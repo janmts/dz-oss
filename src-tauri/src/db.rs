@@ -694,6 +694,7 @@ pub struct DriftRunRow {
     pub invalid_reason: Option<String>,
     pub computed_score: Option<f32>,
     pub manual_score: Option<i64>,
+    pub manual_notes: Option<String>,
     pub packet_count: i64,
     pub score_breakdown: Option<serde_json::Value>,
 }
@@ -703,7 +704,7 @@ pub fn list_drift_runs(conn: &Connection) -> Result<Vec<DriftRunRow>> {
         "SELECT r.id, r.zone_id, r.started_at, r.ended_at, r.car_ordinal,
                 r.car_class, r.car_pi, r.drivetrain_type, r.car_group,
                 r.valid, r.invalid_reason, r.computed_score, s.manual_score,
-                r.packet_count, r.score_breakdown_json
+                r.packet_count, r.score_breakdown_json, s.notes
          FROM drift_runs r
          LEFT JOIN drift_run_scores s ON s.run_id = r.id
          ORDER BY r.started_at DESC
@@ -725,6 +726,7 @@ pub fn list_drift_runs(conn: &Connection) -> Result<Vec<DriftRunRow>> {
             invalid_reason: r.get(10)?,
             computed_score: r.get(11)?,
             manual_score: r.get(12)?,
+            manual_notes: r.get(15)?,
             packet_count: r.get(13)?,
             score_breakdown: breakdown.and_then(|s| serde_json::from_str(&s).ok()),
         })
@@ -1068,6 +1070,7 @@ mod tests {
 
         let rows = list_drift_runs(&conn).unwrap();
         assert_eq!(rows[0].manual_score, Some(43_500));
+        assert_eq!(rows[0].manual_notes.as_deref(), Some("corrected"));
         let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM drift_run_scores WHERE run_id=?1",

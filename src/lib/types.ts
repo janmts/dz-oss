@@ -116,6 +116,7 @@ export interface DriftRunRow {
   invalidReason: string | null;
   computedScore: number | null;
   manualScore: number | null;
+  manualNotes: string | null;
   packetCount: number;
   scoreBreakdown: DriftScoreBreakdown | null;
 }

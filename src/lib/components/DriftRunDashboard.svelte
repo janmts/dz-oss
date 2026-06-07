@@ -22,6 +22,7 @@
 
   let selectedId = $state<number | null>(null);
   let scoreDraft = $state('');
+  let noteDraft = $state('');
   let savingScore = $state(false);
   let scoreStatus = $state('');
   let lastScoreRunId = $state<number | null>(null);
@@ -93,6 +94,7 @@
       scoreDraft = scoringRun?.manualScore !== null && scoringRun?.manualScore !== undefined
         ? String(scoringRun.manualScore)
         : '';
+      noteDraft = scoringRun?.manualNotes ?? '';
       scoreStatus = '';
       if (scoringRun?.id === autoSelectedRunId) queueMicrotask(() => scoreInput?.focus());
     }
@@ -164,7 +166,7 @@
     }
     savingScore = true;
     try {
-      await setDriftRunManualScore(scoringRun.id, parsed, null);
+      await setDriftRunManualScore(scoringRun.id, parsed, noteDraft.trim() || null);
       scoreStatus = 'Saved';
     } finally {
       savingScore = false;
@@ -355,6 +357,15 @@
             {savingScore ? 'Saving' : 'Save'}
           </button>
         </div>
+        <div class="note-row">
+          <input
+            class="note-input"
+            placeholder="Note — car / style / tag (saved with score)"
+            bind:value={noteDraft}
+            disabled={!scoringRun || savingScore}
+            onkeydown={(e) => e.key === 'Enter' && saveScore()}
+          />
+        </div>
         <p class="score-status">{scoreStatus || recomputeStatus || (scoringRun ? '' : 'No completed runs')}</p>
       </section>
 
@@ -396,6 +407,9 @@
                   <span>{carName(run.carOrdinal)}</span>
                   <small>{CAR_CLASS_LABELS[run.carClass] ?? '?'} {run.carPi} / {DRIVETRAIN_LABELS[run.drivetrainType] ?? '?'}</small>
                 </div>
+                {#if run.manualNotes}
+                  <div class="note-line" title={run.manualNotes}>{run.manualNotes}</div>
+                {/if}
               </button>
               <button
                 class="run-del"
@@ -754,6 +768,13 @@
     opacity: 0.45;
     cursor: default;
   }
+  .note-row {
+    padding: 0 0.75rem 0.3rem;
+  }
+  .note-input {
+    width: 100%;
+    font-size: 0.78rem;
+  }
   .score-status {
     padding: 0 0.75rem;
   }
@@ -817,6 +838,15 @@
     color: var(--tx-hi);
     font-size: 0.95rem;
     font-variant-numeric: tabular-nums;
+  }
+  .run-row .note-line {
+    display: block;
+    color: var(--ac);
+    font-size: 0.66rem;
+    font-style: italic;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .empty {
     padding: 1rem;
