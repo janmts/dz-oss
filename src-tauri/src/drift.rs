@@ -189,13 +189,12 @@ impl DriftRunManager {
                 return None;
             }
         };
-        // A run starts when the car enters the polygon (outside → inside). Drift
-        // zones are narrow ribbons whose long sides are road edges you don't
-        // cross, so entry only happens at the two ends — whichever end gate the
-        // entry point is nearest is the entry, and the far gate is the finish.
-        // (We deliberately do NOT require crossing the exact gate line segment:
-        // a real entry line can slip past the segment's endpoints yet clearly
-        // enter the ribbon, which made strict gate-crossing miss reverse runs.)
+        // A run starts only when the car crosses *between* an end gate's two
+        // points while entering the polygon — matching the game's "between the
+        // flags" gates. Bidirectional: whichever gate was crossed is the entry,
+        // the other is the finish. (This precise crossing test relies on the end
+        // gates being correctly placed — see `from_row`, which always derives
+        // them from the current boundary so they can't go stale.)
         let started = zones
             .iter()
             .filter_map(RunnableZone::from_row)
@@ -205,12 +204,16 @@ impl DriftRunManager {
                 {
                     return None;
                 }
-                let near_a = gate_distance_sq(current, zone.gate_a);
-                let near_b = gate_distance_sq(current, zone.gate_b);
-                let (entry, finish) = if near_a <= near_b {
+                let crossed_a =
+                    segment_intersects(previous, current, zone.gate_a[0], zone.gate_a[1]);
+                let crossed_b =
+                    segment_intersects(previous, current, zone.gate_b[0], zone.gate_b[1]);
+                let (entry, finish) = if crossed_a {
                     (zone.gate_a, zone.gate_b)
-                } else {
+                } else if crossed_b {
                     (zone.gate_b, zone.gate_a)
+                } else {
+                    return None;
                 };
                 Some((zone, entry, finish))
             })
@@ -718,22 +721,19 @@ mod tests {
     }
 
     #[test]
-    fn run_starts_without_crossing_exact_gate() {
-        // Enter through the left side near the far (z=10) end WITHOUT crossing the
-        // gate-B line segment itself. Proximity-based entry must still start the
-        // run and pick gate A as the finish (the regression that broke reverse runs).
+    fn side_entry_without_gate_crossing_does_not_start() {
+        // Entering through a long side (a wall, mid-zone) must NOT start a run —
+        // a run requires crossing between an end gate's two points, like the
+        // game's flag gates.
         let conn = in_memory();
         save_square_zone(&conn, 0.0);
         let mut mgr = DriftRunManager::new();
         let raw = vec![1u8; 324];
-        // (-1,9) outside via the x<0 side; (1,9) inside, nearest gate B (z=10).
-        assert!(mgr.note_packet(&conn, &packet(-1.0, 9.0), &raw, 1000).is_none());
-        let started = mgr.note_packet(&conn, &packet(1.0, 9.0), &raw, 1100).unwrap();
-        assert_eq!(started.state, "running");
-        // Finish is the opposite (gate A, z=0).
-        let finished = mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 2000).unwrap();
-        assert_eq!(finished.state, "completed");
-        assert!(db::list_drift_runs(&conn).unwrap()[0].valid);
+        // (-1,5) outside; (1,5) inside, but the segment crosses the left boundary
+        // (x=0) mid-zone — not an end gate (z=0 or z=10).
+        assert!(mgr.note_packet(&conn, &packet(-1.0, 5.0), &raw, 1000).is_none());
+        assert!(mgr.note_packet(&conn, &packet(1.0, 5.0), &raw, 1100).is_none());
+        assert!(db::list_drift_runs(&conn).unwrap().is_empty());
     }
 
     #[test]
