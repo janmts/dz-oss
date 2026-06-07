@@ -51,6 +51,15 @@ export async function setDriftRunManualScore(runId: number, manualScore: number,
   await ipc.setDriftRunManualScore(runId, manualScore, notes);
   await loadDriftRuns();
 }
+export async function deleteDriftRun(runId: number) {
+  await ipc.deleteDriftRun(runId);
+  await loadDriftRuns();
+}
+export async function deleteInvalidDriftRuns(): Promise<number> {
+  const n = await ipc.deleteInvalidDriftRuns();
+  await loadDriftRuns();
+  return n;
+}
 export async function loadDriftZones() { driftZones.set(await ipc.getDriftZones()); }
 export async function saveDriftZone(zone: DriftZoneInput): Promise<DriftZoneRow> {
   const saved = await ipc.saveDriftZone(zone);

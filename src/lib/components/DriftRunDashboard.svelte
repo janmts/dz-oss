@@ -5,6 +5,8 @@
     driftRuns,
     driftRunStatus,
     driftZones,
+    deleteDriftRun,
+    deleteInvalidDriftRuns,
     loadDriftRuns,
     loadDriftZones,
     recomputeDriftScores,
@@ -20,6 +22,7 @@
 
   let selectedId = $state<number | null>(null);
   let scoreDraft = $state('');
+  let noteDraft = $state('');
   let savingScore = $state(false);
   let scoreStatus = $state('');
   let lastScoreRunId = $state<number | null>(null);
@@ -27,6 +30,10 @@
   let autoSelectedRunId = $state<number | null>(null);
   let recomputing = $state(false);
   let recomputeStatus = $state('');
+  let purging = $state(false);
+
+  // Invalid runs across every zone (the purge command is global, matching this).
+  let invalidCount = $derived($driftRuns.filter((run) => !run.valid).length);
   let scoreInput: HTMLInputElement | null = null;
   let unsubscribeStatus: (() => void) | null = null;
 
@@ -87,6 +94,7 @@
       scoreDraft = scoringRun?.manualScore !== null && scoringRun?.manualScore !== undefined
         ? String(scoringRun.manualScore)
         : '';
+      noteDraft = scoringRun?.manualNotes ?? '';
       scoreStatus = '';
       if (scoringRun?.id === autoSelectedRunId) queueMicrotask(() => scoreInput?.focus());
     }
@@ -158,7 +166,7 @@
     }
     savingScore = true;
     try {
-      await setDriftRunManualScore(scoringRun.id, parsed, null);
+      await setDriftRunManualScore(scoringRun.id, parsed, noteDraft.trim() || null);
       scoreStatus = 'Saved';
     } finally {
       savingScore = false;
@@ -175,6 +183,44 @@
       recomputeStatus = `Failed: ${e}`;
     } finally {
       recomputing = false;
+    }
+  }
+
+  // Permanently drop a single run (and its telemetry) — for OOB noise or a run
+  // where the wrong actual score was typed in. Irreversible, so confirm first.
+  async function removeRun(run: DriftRunRow) {
+    const tag = run.valid ? '' : ' (invalid)';
+    if (
+      !confirm(
+        `Delete run #${run.id}${tag} — computed ${formatScore(run.computedScore)}? ` +
+          'This permanently removes its telemetry and cannot be undone.'
+      )
+    )
+      return;
+    if (selectedRunId === run.id) selectedRunId = null;
+    if (autoSelectedRunId === run.id) autoSelectedRunId = null;
+    await deleteDriftRun(run.id);
+  }
+
+  // Bulk-purge every invalid run across all zones in one go.
+  async function purgeInvalid() {
+    const n = invalidCount;
+    if (n === 0) return;
+    if (
+      !confirm(
+        `Delete ALL ${n} invalid run${n === 1 ? '' : 's'} across every zone? ` +
+          'This permanently removes their telemetry and cannot be undone.'
+      )
+    )
+      return;
+    purging = true;
+    try {
+      const removed = await deleteInvalidDriftRuns();
+      recomputeStatus = `Purged ${removed} invalid run${removed === 1 ? '' : 's'}`;
+    } catch (e) {
+      recomputeStatus = `Failed: ${e}`;
+    } finally {
+      purging = false;
     }
   }
 </script>
@@ -311,35 +357,67 @@
             {savingScore ? 'Saving' : 'Save'}
           </button>
         </div>
+        <div class="note-row">
+          <input
+            class="note-input"
+            placeholder="Note — car / style / tag (saved with score)"
+            bind:value={noteDraft}
+            disabled={!scoringRun || savingScore}
+            onkeydown={(e) => e.key === 'Enter' && saveScore()}
+          />
+        </div>
         <p class="score-status">{scoreStatus || recomputeStatus || (scoringRun ? '' : 'No completed runs')}</p>
       </section>
 
       <section class="history">
         <div class="card-title">
           <span>Recent Runs · newest first</span>
-          <strong>{selectedRuns.length}</strong>
+          <div class="title-actions">
+            {#if invalidCount > 0}
+              <button
+                class="ghost danger"
+                disabled={purging}
+                onclick={purgeInvalid}
+                title="Permanently delete every invalid run across all zones"
+              >
+                {purging ? 'Purging…' : `Purge ${invalidCount} invalid`}
+              </button>
+            {/if}
+            <strong>{selectedRuns.length}</strong>
+          </div>
         </div>
         <div class="run-list">
           {#each selectedRuns as run}
-            <button
-              class="run-row"
-              class:active={run.id === scoringRun?.id}
-              onclick={() => {
-                selectedRunId = run.id;
-              }}
-            >
-              <div>
-                <strong>{formatScore(run.computedScore)}</strong>
-                <span class="when">{formatShort(run.startedAt)}</span>
-              </div>
-              <div>
-                <span>act {run.manualScore?.toLocaleString() ?? '—'} · {formatStatus(run)} / {formatDuration(run)}</span>
-              </div>
-              <div>
-                <span>{carName(run.carOrdinal)}</span>
-                <small>{CAR_CLASS_LABELS[run.carClass] ?? '?'} {run.carPi} / {DRIVETRAIN_LABELS[run.drivetrainType] ?? '?'}</small>
-              </div>
-            </button>
+            <div class="run-row-wrap" class:invalid={!run.valid}>
+              <button
+                class="run-row"
+                class:active={run.id === scoringRun?.id}
+                onclick={() => {
+                  selectedRunId = run.id;
+                }}
+              >
+                <div>
+                  <strong>{formatScore(run.computedScore)}</strong>
+                  <span class="when">{formatShort(run.startedAt)}</span>
+                </div>
+                <div>
+                  <span>act {run.manualScore?.toLocaleString() ?? '—'} · {formatStatus(run)} / {formatDuration(run)}</span>
+                </div>
+                <div>
+                  <span>{carName(run.carOrdinal)}</span>
+                  <small>{CAR_CLASS_LABELS[run.carClass] ?? '?'} {run.carPi} / {DRIVETRAIN_LABELS[run.drivetrainType] ?? '?'}</small>
+                </div>
+                {#if run.manualNotes}
+                  <div class="note-line" title={run.manualNotes}>{run.manualNotes}</div>
+                {/if}
+              </button>
+              <button
+                class="run-del"
+                aria-label="Delete run {run.id}"
+                title="Delete this run permanently"
+                onclick={() => removeRun(run)}
+              >×</button>
+            </div>
           {:else}
             <p class="empty">No runs for this zone.</p>
           {/each}
@@ -589,6 +667,15 @@
     color: var(--tx-hi);
     border-color: var(--bd-strong);
   }
+  button.ghost.danger:hover:not(:disabled) {
+    color: #fca5a5;
+    border-color: #ef4444;
+  }
+  .title-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
   .score-readout {
     display: flex;
     align-items: baseline;
@@ -681,6 +768,13 @@
     opacity: 0.45;
     cursor: default;
   }
+  .note-row {
+    padding: 0 0.75rem 0.3rem;
+  }
+  .note-input {
+    width: 100%;
+    font-size: 0.78rem;
+  }
   .score-status {
     padding: 0 0.75rem;
   }
@@ -703,6 +797,36 @@
     display: grid;
     gap: 0.35rem;
   }
+  .run-row-wrap {
+    display: flex;
+    align-items: stretch;
+    gap: 0.3rem;
+  }
+  .run-row-wrap .run-row {
+    flex: 1;
+    min-width: 0;
+  }
+  .run-row-wrap.invalid .run-row strong {
+    color: var(--tx-dim);
+  }
+  .run-del {
+    flex: 0 0 auto;
+    width: 1.9rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--bd-dim);
+    background: var(--bg-panel);
+    border-radius: 6px;
+    color: var(--tx-dim);
+    cursor: pointer;
+    font-size: 1rem;
+    line-height: 1;
+  }
+  .run-del:hover {
+    color: #fca5a5;
+    border-color: #ef4444;
+  }
   .run-row div {
     min-width: 0;
     display: flex;
@@ -714,6 +838,15 @@
     color: var(--tx-hi);
     font-size: 0.95rem;
     font-variant-numeric: tabular-nums;
+  }
+  .run-row .note-line {
+    display: block;
+    color: var(--ac);
+    font-size: 0.66rem;
+    font-style: italic;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .empty {
     padding: 1rem;

@@ -117,6 +117,21 @@ pub async fn set_drift_run_manual_score(
         .map_err(err)
 }
 
+pub async fn delete_drift_run(
+    State(s): State<ServerState>,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, JsonErr> {
+    api::delete_drift_run(&s.app, id)
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(err)
+}
+
+pub async fn delete_invalid_drift_runs(
+    State(s): State<ServerState>,
+) -> Result<Json<usize>, JsonErr> {
+    api::delete_invalid_drift_runs(&s.app).map(Json).map_err(err)
+}
+
 pub async fn list_drift_zones(
     State(s): State<ServerState>,
 ) -> Result<Json<Vec<db::DriftZoneRow>>, JsonErr> {

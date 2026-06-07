@@ -73,6 +73,16 @@ pub fn set_drift_run_manual_score(
 }
 
 #[tauri::command]
+pub fn delete_drift_run(state: State<'_, Arc<AppState>>, run_id: i64) -> Result<(), String> {
+    api::delete_drift_run(&state, run_id)
+}
+
+#[tauri::command]
+pub fn delete_invalid_drift_runs(state: State<'_, Arc<AppState>>) -> Result<usize, String> {
+    api::delete_invalid_drift_runs(&state)
+}
+
+#[tauri::command]
 pub fn get_drift_run_status(state: State<'_, Arc<AppState>>) -> crate::drift::DriftRunStatus {
     api::drift_run_status(&state)
 }

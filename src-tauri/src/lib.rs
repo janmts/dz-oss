@@ -103,6 +103,8 @@ pub fn run() {
             commands::get_drift_runs,
             commands::recompute_drift_scores,
             commands::set_drift_run_manual_score,
+            commands::delete_drift_run,
+            commands::delete_invalid_drift_runs,
             commands::get_drift_run_status,
             commands::get_drift_zones,
             commands::save_drift_zone,

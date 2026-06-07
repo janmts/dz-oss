@@ -654,6 +654,30 @@ pub fn set_drift_run_manual_score(
     Ok(())
 }
 
+/// Delete a single run and everything hanging off it (packets, splits, manual
+/// score). FK cascade isn't enabled on this connection, so children are removed
+/// explicitly — same approach as [`delete_session`]. Returns true if a run row
+/// was actually deleted (false if the id didn't exist).
+pub fn delete_drift_run(conn: &Connection, run_id: i64) -> Result<bool> {
+    conn.execute("DELETE FROM drift_run_packets WHERE run_id=?1", [run_id])?;
+    conn.execute("DELETE FROM drift_run_splits WHERE run_id=?1", [run_id])?;
+    conn.execute("DELETE FROM drift_run_scores WHERE run_id=?1", [run_id])?;
+    let affected = conn.execute("DELETE FROM drift_runs WHERE id=?1", [run_id])?;
+    Ok(affected > 0)
+}
+
+/// Delete every run flagged invalid (left the zone before finishing) and its
+/// children. Returns the number of runs removed. Used to purge the out-of-bounds
+/// noise that would otherwise pollute the finetuning fit.
+pub fn delete_invalid_drift_runs(conn: &Connection) -> Result<usize> {
+    let child = "WHERE run_id IN (SELECT id FROM drift_runs WHERE valid=0)";
+    conn.execute(&format!("DELETE FROM drift_run_packets {child}"), [])?;
+    conn.execute(&format!("DELETE FROM drift_run_splits {child}"), [])?;
+    conn.execute(&format!("DELETE FROM drift_run_scores {child}"), [])?;
+    let affected = conn.execute("DELETE FROM drift_runs WHERE valid=0", [])?;
+    Ok(affected)
+}
+
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DriftRunRow {
@@ -670,6 +694,7 @@ pub struct DriftRunRow {
     pub invalid_reason: Option<String>,
     pub computed_score: Option<f32>,
     pub manual_score: Option<i64>,
+    pub manual_notes: Option<String>,
     pub packet_count: i64,
     pub score_breakdown: Option<serde_json::Value>,
 }
@@ -679,7 +704,7 @@ pub fn list_drift_runs(conn: &Connection) -> Result<Vec<DriftRunRow>> {
         "SELECT r.id, r.zone_id, r.started_at, r.ended_at, r.car_ordinal,
                 r.car_class, r.car_pi, r.drivetrain_type, r.car_group,
                 r.valid, r.invalid_reason, r.computed_score, s.manual_score,
-                r.packet_count, r.score_breakdown_json
+                r.packet_count, r.score_breakdown_json, s.notes
          FROM drift_runs r
          LEFT JOIN drift_run_scores s ON s.run_id = r.id
          ORDER BY r.started_at DESC
@@ -701,6 +726,7 @@ pub fn list_drift_runs(conn: &Connection) -> Result<Vec<DriftRunRow>> {
             invalid_reason: r.get(10)?,
             computed_score: r.get(11)?,
             manual_score: r.get(12)?,
+            manual_notes: r.get(15)?,
             packet_count: r.get(13)?,
             score_breakdown: breakdown.and_then(|s| serde_json::from_str(&s).ok()),
         })
@@ -1044,6 +1070,7 @@ mod tests {
 
         let rows = list_drift_runs(&conn).unwrap();
         assert_eq!(rows[0].manual_score, Some(43_500));
+        assert_eq!(rows[0].manual_notes.as_deref(), Some("corrected"));
         let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM drift_run_scores WHERE run_id=?1",
@@ -1052,5 +1079,60 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn delete_drift_run_removes_run_and_children() {
+        let conn = in_memory();
+        let id = open_drift_run(&conn, None, 123, 1, 2, 300, 1, 7).unwrap();
+        insert_drift_run_packet(&conn, id, 1000, &vec![1u8; 324]).unwrap();
+        insert_drift_run_packet(&conn, id, 1016, &vec![2u8; 324]).unwrap();
+        set_drift_run_manual_score(&conn, id, 50_000, None, 1000).unwrap();
+
+        assert!(delete_drift_run(&conn, id).unwrap());
+        assert!(list_drift_runs(&conn).unwrap().is_empty());
+        let pkts: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM drift_run_packets WHERE run_id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let scores: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM drift_run_scores WHERE run_id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!((pkts, scores), (0, 0));
+        // Deleting a non-existent id is a no-op that reports false.
+        assert!(!delete_drift_run(&conn, 99_999).unwrap());
+    }
+
+    #[test]
+    fn delete_invalid_drift_runs_only_removes_invalid() {
+        let conn = in_memory();
+        let good = open_drift_run(&conn, None, 1, 1, 1, 1, 1, 1).unwrap();
+        close_drift_run(&conn, good, 100, true, None, Some(1000.0)).unwrap();
+        let bad = open_drift_run(&conn, None, 2, 2, 2, 2, 2, 2).unwrap();
+        insert_drift_run_packet(&conn, bad, 1000, &vec![3u8; 324]).unwrap();
+        set_drift_run_manual_score(&conn, bad, 9_999_999, Some("marker"), 1000).unwrap();
+        close_drift_run(&conn, bad, 200, false, Some("left zone"), Some(0.0)).unwrap();
+
+        let removed = delete_invalid_drift_runs(&conn).unwrap();
+        assert_eq!(removed, 1);
+        let rows = list_drift_runs(&conn).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, good);
+        // The invalid run's orphaned children are gone too.
+        let leftover: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM drift_run_packets WHERE run_id=?1",
+                [bad],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(leftover, 0);
     }
 }
