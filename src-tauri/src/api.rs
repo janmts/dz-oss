@@ -71,6 +71,10 @@ pub fn set_drift_run_manual_score(
         .map_err(|e| e.to_string())
 }
 
+pub fn drift_run_status(state: &AppState) -> crate::drift::DriftRunStatus {
+    state.drift_manager.lock().unwrap().status()
+}
+
 pub fn list_drift_zones(state: &AppState) -> Result<Vec<db::DriftZoneRow>, String> {
     let conn = state.db.lock().unwrap();
     db::list_drift_zones(&conn).map_err(|e| e.to_string())
@@ -124,6 +128,7 @@ mod tests {
         AppState {
             db: Mutex::new(conn),
             session_manager: Mutex::new(SessionManager::new(true)),
+            drift_manager: Mutex::new(crate::drift::DriftRunManager::new()),
             settings: Mutex::new(settings::Settings::default()),
         }
     }

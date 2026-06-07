@@ -146,35 +146,35 @@ pub fn parse(buf: &[u8]) -> Result<TelemetryPacket, ParseError> {
     // 256: Speed, 260: Power, 264: Torque
     // 268: TireTemp x4, 284: Boost, 288: Fuel ...
     // 312: LapNumber, 314: RacePosition, 315: Accel, 316: Brake ...
-    let position_x = c.read_f32::<LittleEndian>()?;        // 244 world X
-    let position_y = c.read_f32::<LittleEndian>()?;        // 248 world Y (height)
-    let position_z = c.read_f32::<LittleEndian>()?;        // 252 world Z
-    let speed_ms = c.read_f32::<LittleEndian>()?;           // 256
-    let power = c.read_f32::<LittleEndian>()?;              // 260
-    let torque = c.read_f32::<LittleEndian>()?;             // 264
-    // Game sends tire temps in Fahrenheit; convert to Celsius for display
+    let position_x = c.read_f32::<LittleEndian>()?; // 244 world X
+    let position_y = c.read_f32::<LittleEndian>()?; // 248 world Y (height)
+    let position_z = c.read_f32::<LittleEndian>()?; // 252 world Z
+    let speed_ms = c.read_f32::<LittleEndian>()?; // 256
+    let power = c.read_f32::<LittleEndian>()?; // 260
+    let torque = c.read_f32::<LittleEndian>()?; // 264
+                                                // Game sends tire temps in Fahrenheit; convert to Celsius for display
     let tire_temp_fl = (c.read_f32::<LittleEndian>()? - 32.0) * 5.0 / 9.0; // 268
     let tire_temp_fr = (c.read_f32::<LittleEndian>()? - 32.0) * 5.0 / 9.0; // 272
     let tire_temp_rl = (c.read_f32::<LittleEndian>()? - 32.0) * 5.0 / 9.0; // 276
     let tire_temp_rr = (c.read_f32::<LittleEndian>()? - 32.0) * 5.0 / 9.0; // 280
-    let boost = c.read_f32::<LittleEndian>()?;              // 284
-    let fuel = c.read_f32::<LittleEndian>()?;               // 288
-    let distance_traveled = c.read_f32::<LittleEndian>()?;  // 292
-    let best_lap = c.read_f32::<LittleEndian>()?;           // 296
-    let last_lap = c.read_f32::<LittleEndian>()?;           // 300
-    let current_lap = c.read_f32::<LittleEndian>()?;        // 304
-    let current_race_time = c.read_f32::<LittleEndian>()?;  // 308
-    let lap_number = c.read_u16::<LittleEndian>()?;         // 312
-    let race_position = c.read_u8()?;                       // 314
-    let throttle = c.read_u8()?;                            // 315 (Accel)
-    let brake = c.read_u8()?;                               // 316
-    let clutch = c.read_u8()?;                              // 317
-    let handbrake = c.read_u8()?;                           // 318
-    let gear = c.read_u8()?;                                // 319
-    let steer = c.read_i8()?;                               // 320
-    let _driving_line = c.read_i8()?;                       // 321
-    let _ai_brake_diff = c.read_i8()?;                      // 322
-    // Official FH6 packets are 324 bytes; the last byte is currently unused by this app.
+    let boost = c.read_f32::<LittleEndian>()?; // 284
+    let fuel = c.read_f32::<LittleEndian>()?; // 288
+    let distance_traveled = c.read_f32::<LittleEndian>()?; // 292
+    let best_lap = c.read_f32::<LittleEndian>()?; // 296
+    let last_lap = c.read_f32::<LittleEndian>()?; // 300
+    let current_lap = c.read_f32::<LittleEndian>()?; // 304
+    let current_race_time = c.read_f32::<LittleEndian>()?; // 308
+    let lap_number = c.read_u16::<LittleEndian>()?; // 312
+    let race_position = c.read_u8()?; // 314
+    let throttle = c.read_u8()?; // 315 (Accel)
+    let brake = c.read_u8()?; // 316
+    let clutch = c.read_u8()?; // 317
+    let handbrake = c.read_u8()?; // 318
+    let gear = c.read_u8()?; // 319
+    let steer = c.read_i8()?; // 320
+    let _driving_line = c.read_i8()?; // 321
+    let _ai_brake_diff = c.read_i8()?; // 322
+                                       // Official FH6 packets are 324 bytes; the last byte is currently unused by this app.
 
     // FH6 does not include TireWear fields. Keep nullable fields for frontend compatibility.
     let tire_wear_fl = None;

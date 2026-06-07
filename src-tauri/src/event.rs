@@ -1,4 +1,4 @@
-use crate::parser::TelemetryPacket;
+use crate::{drift::DriftRunStatus, parser::TelemetryPacket};
 
 /// Decouples the UDP ingest loop from any particular front door. The desktop
 /// app forwards these to `app.emit`; the server streams them as SSE.
@@ -7,4 +7,5 @@ pub enum ServerEvent {
     Tick(TelemetryPacket),
     BindFailed(String),
     SessionError(String),
+    DriftRunStatus(DriftRunStatus),
 }

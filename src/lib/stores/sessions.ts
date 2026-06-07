@@ -6,12 +6,23 @@ import type {
   AppSettings,
   SessionLap,
   DriftRunRow,
+  DriftRunStatus,
   DriftZoneInput,
   DriftZoneRow,
 } from '$lib/types';
 
 export const sessions = writable<SessionRow[]>([]);
 export const driftRuns = writable<DriftRunRow[]>([]);
+export const driftRunStatus = writable<DriftRunStatus>({
+  state: 'idle',
+  runId: null,
+  zoneId: null,
+  zoneName: null,
+  startedAt: null,
+  endedAt: null,
+  packetCount: 0,
+  invalidReason: null,
+});
 export const driftZones = writable<DriftZoneRow[]>([]);
 export const settings = writable<AppSettings | null>(null);
 
@@ -23,6 +34,14 @@ export async function clearAllSessions() { await ipc.clearAllSessions(); await l
 export async function renameSession(sessionId: number, name: string | null) { await ipc.renameSession(sessionId, name); await loadSessions(); }
 export async function setSessionBookmark(sessionId: number, bookmarked: boolean) { await ipc.setSessionBookmark(sessionId, bookmarked); await loadSessions(); }
 export async function loadDriftRuns() { driftRuns.set(await ipc.getDriftRuns()); }
+export async function loadDriftRunStatus() { driftRunStatus.set(await ipc.getDriftRunStatus()); }
+export async function startDriftRunStatusListener(): Promise<() => void> {
+  await loadDriftRunStatus();
+  return ipc.subscribeDriftRunStatus((status) => {
+    driftRunStatus.set(status);
+    if (status.state === 'completed' || status.state === 'invalid') void loadDriftRuns();
+  });
+}
 export async function setDriftRunManualScore(runId: number, manualScore: number, notes: string | null) {
   await ipc.setDriftRunManualScore(runId, manualScore, notes);
   await loadDriftRuns();

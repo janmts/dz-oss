@@ -125,7 +125,12 @@ fn migrate(conn: &Connection) {
     );
 }
 
-pub fn insert_lap(conn: &Connection, session_id: i64, lap_number: i64, lap_time: f32) -> Result<()> {
+pub fn insert_lap(
+    conn: &Connection,
+    session_id: i64,
+    lap_number: i64,
+    lap_time: f32,
+) -> Result<()> {
     conn.execute(
         "INSERT INTO session_laps (session_id, lap_number, lap_time) VALUES (?1, ?2, ?3)
          ON CONFLICT(session_id, lap_number) DO UPDATE SET lap_time=excluded.lap_time",
@@ -157,7 +162,10 @@ pub fn get_session_laps(conn: &Connection, session_id: i64) -> Result<Vec<LapRow
          WHERE session_id=?1 ORDER BY lap_number ASC",
     )?;
     let rows = stmt.query_map([session_id], |r| {
-        Ok(LapRow { lap_number: r.get(0)?, lap_time: r.get(1)? })
+        Ok(LapRow {
+            lap_number: r.get(0)?,
+            lap_time: r.get(1)?,
+        })
     })?;
     rows.collect()
 }
@@ -194,10 +202,7 @@ pub fn update_session_car_if_unknown(
 }
 
 pub fn reopen_session(conn: &Connection, id: i64) -> Result<()> {
-    conn.execute(
-        "UPDATE sessions SET ended_at = NULL WHERE id=?1",
-        [id],
-    )?;
+    conn.execute("UPDATE sessions SET ended_at = NULL WHERE id=?1", [id])?;
     Ok(())
 }
 
@@ -380,14 +385,18 @@ fn parse_value_json(raw: String) -> serde_json::Value {
 fn normalize_zone_input(input: &DriftZoneInput) -> DriftZoneInput {
     let start_gate = if input.start_gate.len() == 2 {
         input.start_gate.clone()
-    } else if let (Some(left), Some(right)) = (input.left_boundary.first(), input.right_boundary.first()) {
+    } else if let (Some(left), Some(right)) =
+        (input.left_boundary.first(), input.right_boundary.first())
+    {
         vec![left.clone(), right.clone()]
     } else {
         Vec::new()
     };
     let finish_gate = if input.finish_gate.len() == 2 {
         input.finish_gate.clone()
-    } else if let (Some(left), Some(right)) = (input.left_boundary.last(), input.right_boundary.last()) {
+    } else if let (Some(left), Some(right)) =
+        (input.left_boundary.last(), input.right_boundary.last())
+    {
         vec![left.clone(), right.clone()]
     } else {
         Vec::new()
@@ -395,7 +404,12 @@ fn normalize_zone_input(input: &DriftZoneInput) -> DriftZoneInput {
     DriftZoneInput {
         id: input.id,
         name: input.name.trim().to_string(),
-        description: input.description.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string),
+        description: input
+            .description
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
         active: input.active,
         left_boundary: input.left_boundary.clone(),
         right_boundary: input.right_boundary.clone(),
@@ -408,7 +422,11 @@ fn normalize_zone_input(input: &DriftZoneInput) -> DriftZoneInput {
 
 pub fn save_drift_zone(conn: &Connection, input: &DriftZoneInput, now_ms: i64) -> Result<i64> {
     let zone = normalize_zone_input(input);
-    let name = if zone.name.is_empty() { "Untitled drift zone".to_string() } else { zone.name };
+    let name = if zone.name.is_empty() {
+        "Untitled drift zone".to_string()
+    } else {
+        zone.name
+    };
     let left = zone_points_json(&zone.left_boundary)?;
     let right = zone_points_json(&zone.right_boundary)?;
     let start = zone_points_json(&zone.start_gate)?;
@@ -689,7 +707,9 @@ mod tests {
         assert!(id > 0);
         close_session(&conn, id, 1000, 78.5).unwrap();
         let ended: Option<i64> = conn
-            .query_row("SELECT ended_at FROM sessions WHERE id=?1", [id], |r| r.get(0))
+            .query_row("SELECT ended_at FROM sessions WHERE id=?1", [id], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert!(ended.is_some());
     }
@@ -701,7 +721,9 @@ mod tests {
         close_session(&conn, id, 1000, 78.5).unwrap();
         reopen_session(&conn, id).unwrap();
         let ended: Option<i64> = conn
-            .query_row("SELECT ended_at FROM sessions WHERE id=?1", [id], |r| r.get(0))
+            .query_row("SELECT ended_at FROM sessions WHERE id=?1", [id], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert!(ended.is_none());
     }
@@ -717,7 +739,9 @@ mod tests {
         reopen_session(&conn, id).unwrap();
         close_session(&conn, id, 200, 54.0).unwrap(); // true min after upsert
         let best: Option<f32> = conn
-            .query_row("SELECT best_lap FROM sessions WHERE id=?1", [id], |r| r.get(0))
+            .query_row("SELECT best_lap FROM sessions WHERE id=?1", [id], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(best, Some(54.0));
     }
@@ -731,7 +755,9 @@ mod tests {
         // Better lap after rewind — should update
         close_session(&conn, id, 200, 60.0).unwrap();
         let best: Option<f32> = conn
-            .query_row("SELECT best_lap FROM sessions WHERE id=?1", [id], |r| r.get(0))
+            .query_row("SELECT best_lap FROM sessions WHERE id=?1", [id], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(best, Some(60.0));
     }
@@ -745,7 +771,9 @@ mod tests {
         // -1.0 means no lap was recorded post-rewind
         close_session(&conn, id, 200, -1.0).unwrap();
         let best: Option<f32> = conn
-            .query_row("SELECT best_lap FROM sessions WHERE id=?1", [id], |r| r.get(0))
+            .query_row("SELECT best_lap FROM sessions WHERE id=?1", [id], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(best, Some(65.5));
     }
@@ -819,7 +847,11 @@ mod tests {
         delete_session(&conn, id).unwrap();
         assert_eq!(get_session_laps(&conn, id).unwrap().len(), 0);
         let pkts: i64 = conn
-            .query_row("SELECT COUNT(*) FROM session_packets WHERE session_id=?1", [id], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM session_packets WHERE session_id=?1",
+                [id],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(pkts, 0);
     }
@@ -852,7 +884,9 @@ mod tests {
         insert_packet(&conn, id, 1000, &blob).unwrap();
         insert_packet(&conn, id, 2000, &blob).unwrap();
         let count: i64 = conn
-            .query_row("SELECT packet_count FROM sessions WHERE id=?1", [id], |r| r.get(0))
+            .query_row("SELECT packet_count FROM sessions WHERE id=?1", [id], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(count, 2);
     }
@@ -884,14 +918,8 @@ mod tests {
             name: name.into(),
             description: Some("test zone".into()),
             active: true,
-            left_boundary: vec![
-                ZonePoint { x: 0.0, z: 0.0 },
-                ZonePoint { x: 0.0, z: 10.0 },
-            ],
-            right_boundary: vec![
-                ZonePoint { x: 5.0, z: 0.0 },
-                ZonePoint { x: 5.0, z: 10.0 },
-            ],
+            left_boundary: vec![ZonePoint { x: 0.0, z: 0.0 }, ZonePoint { x: 0.0, z: 10.0 }],
+            right_boundary: vec![ZonePoint { x: 5.0, z: 0.0 }, ZonePoint { x: 5.0, z: 10.0 }],
             start_gate: Vec::new(),
             finish_gate: Vec::new(),
             split_gates: vec![vec![
@@ -945,7 +973,11 @@ mod tests {
         delete_drift_zone(&conn, zone_id).unwrap();
         assert_eq!(list_drift_zones(&conn).unwrap().len(), 0);
         let zone: Option<i64> = conn
-            .query_row("SELECT zone_id FROM drift_runs WHERE id=?1", [run_id], |r| r.get(0))
+            .query_row(
+                "SELECT zone_id FROM drift_runs WHERE id=?1",
+                [run_id],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(zone, None);
     }
@@ -982,7 +1014,11 @@ mod tests {
         let rows = list_drift_runs(&conn).unwrap();
         assert_eq!(rows[0].manual_score, Some(43_500));
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM drift_run_scores WHERE run_id=?1", [id], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM drift_run_scores WHERE run_id=?1",
+                [id],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(count, 1);
     }

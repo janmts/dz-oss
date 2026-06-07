@@ -68,6 +68,11 @@ pub fn set_drift_run_manual_score(
 }
 
 #[tauri::command]
+pub fn get_drift_run_status(state: State<'_, Arc<AppState>>) -> crate::drift::DriftRunStatus {
+    api::drift_run_status(&state)
+}
+
+#[tauri::command]
 pub fn get_drift_zones(state: State<'_, Arc<AppState>>) -> Result<Vec<db::DriftZoneRow>, String> {
     api::list_drift_zones(&state)
 }

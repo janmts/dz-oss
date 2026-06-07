@@ -106,6 +106,17 @@ export interface DriftRunRow {
   packetCount: number;
 }
 
+export interface DriftRunStatus {
+  state: 'idle' | 'running' | 'completed' | 'invalid';
+  runId: number | null;
+  zoneId: number | null;
+  zoneName: string | null;
+  startedAt: number | null;
+  endedAt: number | null;
+  packetCount: number;
+  invalidReason: string | null;
+}
+
 export interface ZonePoint {
   x: number;
   z: number;

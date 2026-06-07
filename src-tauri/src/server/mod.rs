@@ -29,7 +29,11 @@ pub fn router(state: ServerState) -> axum::Router {
         .route("/sessions/:id/rename", post(routes::rename_session))
         .route("/sessions/:id/bookmark", post(routes::set_bookmark))
         .route("/drift-runs", get(routes::list_drift_runs))
-        .route("/drift-runs/:id/manual-score", post(routes::set_drift_run_manual_score))
+        .route("/drift-runs/status", get(routes::drift_run_status))
+        .route(
+            "/drift-runs/:id/manual-score",
+            post(routes::set_drift_run_manual_score),
+        )
         .route("/drift-zones", get(routes::list_drift_zones))
         .route("/drift-zones", post(routes::save_drift_zone))
         .route("/drift-zones/:id", post(routes::save_drift_zone_with_id))
@@ -43,6 +47,9 @@ pub fn router(state: ServerState) -> axum::Router {
         .route("/login", get(auth::login_page).post(auth::login))
         .route("/logout", post(auth::logout))
         .fallback(static_assets::serve)
-        .layer(axum::middleware::from_fn_with_state(state.clone(), auth::guard))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::guard,
+        ))
         .with_state(state)
 }

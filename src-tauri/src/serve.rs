@@ -3,11 +3,15 @@ use std::sync::{Arc, Mutex};
 
 use clap::Parser;
 use fh6_tel_lib::{
-    db, event::ServerEvent, server, session::SessionManager, settings, AppState, Shared,
+    db, drift::DriftRunManager, event::ServerEvent, server, session::SessionManager, settings,
+    AppState, Shared,
 };
 
 #[derive(Parser, Debug)]
-#[command(name = "fh6-tel-serve", about = "Headless FH6 Telemetry server + web host")]
+#[command(
+    name = "fh6-tel-serve",
+    about = "Headless FH6 Telemetry server + web host"
+)]
 struct Cli {
     /// Bind address for the HTTP server.
     #[arg(long, default_value = "127.0.0.1")]
@@ -41,6 +45,7 @@ async fn main() {
     let app: Shared = Arc::new(AppState {
         db: Mutex::new(conn),
         session_manager: Mutex::new(SessionManager::new(auto_record)),
+        drift_manager: Mutex::new(DriftRunManager::new()),
         settings: Mutex::new(loaded),
     });
 

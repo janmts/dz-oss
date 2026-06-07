@@ -11,14 +11,19 @@ use crate::{api, db, parser, settings};
 type JsonErr = (StatusCode, Json<serde_json::Value>);
 
 fn err(e: String) -> JsonErr {
-    (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e })))
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({ "error": e })),
+    )
 }
 
 pub async fn version() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "version": env!("CARGO_PKG_VERSION") }))
 }
 
-pub async fn list_sessions(State(s): State<ServerState>) -> Result<Json<Vec<db::SessionRow>>, JsonErr> {
+pub async fn list_sessions(
+    State(s): State<ServerState>,
+) -> Result<Json<Vec<db::SessionRow>>, JsonErr> {
     api::list_sessions(&s.app).map(Json).map_err(err)
 }
 
@@ -40,37 +45,55 @@ pub async fn delete_session(
     State(s): State<ServerState>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, JsonErr> {
-    api::delete_session(&s.app, id).map(|_| StatusCode::NO_CONTENT).map_err(err)
+    api::delete_session(&s.app, id)
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(err)
 }
 
 pub async fn clear_all_sessions(State(s): State<ServerState>) -> Result<StatusCode, JsonErr> {
-    api::clear_all_sessions(&s.app).map(|_| StatusCode::NO_CONTENT).map_err(err)
+    api::clear_all_sessions(&s.app)
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(err)
 }
 
 #[derive(Deserialize)]
-pub struct RenameBody { pub name: Option<String> }
+pub struct RenameBody {
+    pub name: Option<String>,
+}
 
 pub async fn rename_session(
     State(s): State<ServerState>,
     Path(id): Path<i64>,
     Json(body): Json<RenameBody>,
 ) -> Result<StatusCode, JsonErr> {
-    api::rename_session(&s.app, id, body.name).map(|_| StatusCode::NO_CONTENT).map_err(err)
+    api::rename_session(&s.app, id, body.name)
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(err)
 }
 
 #[derive(Deserialize)]
-pub struct BookmarkBody { pub bookmarked: bool }
+pub struct BookmarkBody {
+    pub bookmarked: bool,
+}
 
 pub async fn set_bookmark(
     State(s): State<ServerState>,
     Path(id): Path<i64>,
     Json(body): Json<BookmarkBody>,
 ) -> Result<StatusCode, JsonErr> {
-    api::set_session_bookmark(&s.app, id, body.bookmarked).map(|_| StatusCode::NO_CONTENT).map_err(err)
+    api::set_session_bookmark(&s.app, id, body.bookmarked)
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(err)
 }
 
-pub async fn list_drift_runs(State(s): State<ServerState>) -> Result<Json<Vec<db::DriftRunRow>>, JsonErr> {
+pub async fn list_drift_runs(
+    State(s): State<ServerState>,
+) -> Result<Json<Vec<db::DriftRunRow>>, JsonErr> {
     api::list_drift_runs(&s.app).map(Json).map_err(err)
+}
+
+pub async fn drift_run_status(State(s): State<ServerState>) -> Json<crate::drift::DriftRunStatus> {
+    Json(api::drift_run_status(&s.app))
 }
 
 #[derive(Deserialize)]
@@ -90,7 +113,9 @@ pub async fn set_drift_run_manual_score(
         .map_err(err)
 }
 
-pub async fn list_drift_zones(State(s): State<ServerState>) -> Result<Json<Vec<db::DriftZoneRow>>, JsonErr> {
+pub async fn list_drift_zones(
+    State(s): State<ServerState>,
+) -> Result<Json<Vec<db::DriftZoneRow>>, JsonErr> {
     api::list_drift_zones(&s.app).map(Json).map_err(err)
 }
 
@@ -114,7 +139,9 @@ pub async fn delete_drift_zone(
     State(s): State<ServerState>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, JsonErr> {
-    api::delete_drift_zone(&s.app, id).map(|_| StatusCode::NO_CONTENT).map_err(err)
+    api::delete_drift_zone(&s.app, id)
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(err)
 }
 
 pub async fn get_settings(State(s): State<ServerState>) -> Json<settings::Settings> {
@@ -125,7 +152,9 @@ pub async fn save_settings(
     State(s): State<ServerState>,
     Json(new_settings): Json<settings::Settings>,
 ) -> Result<StatusCode, JsonErr> {
-    api::save_settings(&s.app, new_settings).map(|_| StatusCode::NO_CONTENT).map_err(err)
+    api::save_settings(&s.app, new_settings)
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(err)
 }
 
 #[cfg(test)]
@@ -143,26 +172,52 @@ mod tests {
         let app = Arc::new(AppState {
             db: Mutex::new(conn),
             session_manager: Mutex::new(SessionManager::new(true)),
+            drift_manager: Mutex::new(crate::drift::DriftRunManager::new()),
             settings: Mutex::new(Settings::default()),
         });
         let (tx, _rx) = tokio::sync::broadcast::channel(16);
-        ServerState { app, tx, auth: AuthState::disabled() }
+        ServerState {
+            app,
+            tx,
+            auth: AuthState::disabled(),
+        }
     }
 
     #[tokio::test]
     async fn sessions_empty_then_listed() {
         let st = state();
         let app = router(st.clone());
-        let res = app.clone().oneshot(Request::builder().uri("/api/sessions").body(Body::empty()).unwrap()).await.unwrap();
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/sessions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+        let body = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap();
         assert_eq!(&body[..], b"[]");
         {
             let conn = st.app.db.lock().unwrap();
             db::open_session(&conn, 1000, 42, 5, 800).unwrap();
         }
-        let res = app.oneshot(Request::builder().uri("/api/sessions").body(Body::empty()).unwrap()).await.unwrap();
-        let body = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/sessions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap();
         let rows: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
         assert_eq!(rows.len(), 1);
     }
@@ -170,7 +225,15 @@ mod tests {
     #[tokio::test]
     async fn version_endpoint() {
         let app = router(state());
-        let res = app.oneshot(Request::builder().uri("/api/version").body(Body::empty()).unwrap()).await.unwrap();
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/version")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
     }
 
@@ -180,18 +243,49 @@ mod tests {
         st.auth = AuthState::new(Some("secret".into()));
         let app = router(st.clone());
         // No cookie -> 401 on API.
-        let res = app.clone().oneshot(Request::builder().uri("/api/sessions").body(Body::empty()).unwrap()).await.unwrap();
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/sessions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
         // Login with correct token -> Set-Cookie.
-        let res = app.clone().oneshot(
-            Request::builder().method("POST").uri("/login")
-                .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from("token=secret")).unwrap()
-        ).await.unwrap();
-        let cookie = res.headers().get("set-cookie").unwrap().to_str().unwrap().to_string();
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/login")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("token=secret"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let cookie = res
+            .headers()
+            .get("set-cookie")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
         let sid = cookie.split(';').next().unwrap().to_string();
         // Reuse cookie -> 200.
-        let res = app.oneshot(Request::builder().uri("/api/sessions").header("cookie", sid).body(Body::empty()).unwrap()).await.unwrap();
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/sessions")
+                    .header("cookie", sid)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
     }
 }

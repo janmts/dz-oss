@@ -22,7 +22,10 @@ async fn do_check(app: &tauri::AppHandle) -> Result<Option<UpdateInfo>, String> 
         .check()
         .await
         .map_err(|e| e.to_string())?;
-    Ok(update.map(|u| UpdateInfo { version: u.version, is_deb: false }))
+    Ok(update.map(|u| UpdateInfo {
+        version: u.version,
+        is_deb: false,
+    }))
 }
 
 #[cfg(target_os = "linux")]
@@ -43,7 +46,10 @@ async fn do_check(app: &tauri::AppHandle) -> Result<Option<UpdateInfo>, String> 
             .await
             .map_err(|e| e.to_string())?
     };
-    Ok(update.map(|u| UpdateInfo { version: u.version, is_deb }))
+    Ok(update.map(|u| UpdateInfo {
+        version: u.version,
+        is_deb,
+    }))
 }
 
 #[cfg(not(target_os = "linux"))]

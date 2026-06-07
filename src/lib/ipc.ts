@@ -4,6 +4,7 @@ import type {
   AppSettings,
   SessionLap,
   DriftRunRow,
+  DriftRunStatus,
   DriftZoneInput,
   DriftZoneRow,
 } from '$lib/types';
@@ -103,6 +104,9 @@ export const ipc = {
   getDriftRuns: (): Promise<DriftRunRow[]> =>
     isTauri ? tauriInvoke('get_drift_runs') : http('/api/drift-runs'),
 
+  getDriftRunStatus: (): Promise<DriftRunStatus> =>
+    isTauri ? tauriInvoke('get_drift_run_status') : http('/api/drift-runs/status'),
+
   setDriftRunManualScore: (
     runId: number,
     manualScore: number,
@@ -146,6 +150,18 @@ export const ipc = {
 
   subscribeTelemetry: (h: TelemetryHandlers): Promise<() => void> | (() => void) =>
     isTauri ? tauriSubscribe(h) : httpSubscribe(h),
+
+  subscribeDriftRunStatus: async (
+    handler: (event: DriftRunStatus) => void
+  ): Promise<() => void> => {
+    if (isTauri) {
+      const { listen } = await import('@tauri-apps/api/event');
+      return listen<DriftRunStatus>('drift_run_status', (e) => handler(e.payload));
+    }
+    const es = new EventSource('/events', { withCredentials: true });
+    es.addEventListener('drift_run_status', (e) => handler(JSON.parse((e as MessageEvent).data)));
+    return () => es.close();
+  },
 
   subscribeDriftZoneCapture: async (
     handler: (event: DriftZoneCaptureShortcut) => void

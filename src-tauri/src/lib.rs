@@ -2,6 +2,7 @@ pub mod api;
 #[cfg(feature = "desktop")]
 pub mod commands;
 pub mod db;
+pub mod drift;
 pub mod event;
 pub mod parser;
 #[cfg(feature = "server")]
@@ -12,12 +13,14 @@ pub mod udp;
 #[cfg(feature = "desktop")]
 pub mod update;
 
+use drift::DriftRunManager;
 use session::SessionManager;
 use std::sync::Mutex;
 
 pub struct AppState {
     pub db: Mutex<rusqlite::Connection>,
     pub session_manager: Mutex<SessionManager>,
+    pub drift_manager: Mutex<DriftRunManager>,
     pub settings: Mutex<settings::Settings>,
 }
 
@@ -29,7 +32,9 @@ pub type Shared = std::sync::Arc<AppState>;
 pub fn run() {
     use std::sync::Arc;
     use tauri::Emitter;
-    use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+    use tauri_plugin_global_shortcut::{
+        Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
+    };
 
     let loaded_settings = settings::load();
     let port = loaded_settings.port;
@@ -38,15 +43,19 @@ pub fn run() {
     let state: Shared = Arc::new(AppState {
         db: Mutex::new(db::open().expect("failed to open database")),
         session_manager: Mutex::new(SessionManager::new(auto_record)),
+        drift_manager: Mutex::new(DriftRunManager::new()),
         settings: Mutex::new(loaded_settings),
     });
 
     // The initial receiver is dropped; the forwarder task below calls tx.subscribe()
     // before the ingest loop starts sending, so no ticks are missed.
     let (tx, _rx) = tokio::sync::broadcast::channel::<event::ServerEvent>(256);
-    let capture_active_shortcut = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyZ);
-    let capture_left_shortcut = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyL);
-    let capture_right_shortcut = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyR);
+    let capture_active_shortcut =
+        Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyZ);
+    let capture_left_shortcut =
+        Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyL);
+    let capture_right_shortcut =
+        Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyR);
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -92,6 +101,7 @@ pub fn run() {
             commands::set_session_bookmark,
             commands::get_drift_runs,
             commands::set_drift_run_manual_score,
+            commands::get_drift_run_status,
             commands::get_drift_zones,
             commands::save_drift_zone,
             commands::delete_drift_zone,
@@ -117,6 +127,9 @@ pub fn run() {
                         event::ServerEvent::SessionError(msg) => {
                             let _ = handle.emit("session_error", msg);
                         }
+                        event::ServerEvent::DriftRunStatus(status) => {
+                            let _ = handle.emit("drift_run_status", &status);
+                        }
                     }
                 }
             });
@@ -127,13 +140,22 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 udp::run(udp_state, port, udp_tx).await;
             });
-            if let Err(e) = app.global_shortcut().register(capture_active_shortcut.clone()) {
+            if let Err(e) = app
+                .global_shortcut()
+                .register(capture_active_shortcut.clone())
+            {
                 eprintln!("[shortcut] failed to register Ctrl+Alt+Z: {e}");
             }
-            if let Err(e) = app.global_shortcut().register(capture_left_shortcut.clone()) {
+            if let Err(e) = app
+                .global_shortcut()
+                .register(capture_left_shortcut.clone())
+            {
                 eprintln!("[shortcut] failed to register Ctrl+Alt+L: {e}");
             }
-            if let Err(e) = app.global_shortcut().register(capture_right_shortcut.clone()) {
+            if let Err(e) = app
+                .global_shortcut()
+                .register(capture_right_shortcut.clone())
+            {
                 eprintln!("[shortcut] failed to register Ctrl+Alt+R: {e}");
             }
             Ok(())

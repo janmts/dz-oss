@@ -17,9 +17,16 @@ pub async fn events(
     let stream = BroadcastStream::new(rx).filter_map(|res| {
         let ev = res.ok()?;
         let event = match ev {
-            ServerEvent::Tick(pkt) => Event::default().event("telemetry_tick").json_data(&pkt).ok()?,
+            ServerEvent::Tick(pkt) => Event::default()
+                .event("telemetry_tick")
+                .json_data(&pkt)
+                .ok()?,
             ServerEvent::BindFailed(msg) => Event::default().event("udp_bind_failed").data(msg),
             ServerEvent::SessionError(msg) => Event::default().event("session_error").data(msg),
+            ServerEvent::DriftRunStatus(status) => Event::default()
+                .event("drift_run_status")
+                .json_data(&status)
+                .ok()?,
         };
         Some(Ok(event))
     });

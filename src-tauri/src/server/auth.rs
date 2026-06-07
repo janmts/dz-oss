@@ -22,17 +22,28 @@ pub struct AuthState {
 
 impl AuthState {
     pub fn new(token: Option<String>) -> Self {
-        Self { token: token.map(Arc::new), sessions: Arc::new(Mutex::new(HashSet::new())) }
+        Self {
+            token: token.map(Arc::new),
+            sessions: Arc::new(Mutex::new(HashSet::new())),
+        }
     }
-    pub fn disabled() -> Self { Self::new(None) }
-    pub fn enabled(&self) -> bool { self.token.is_some() }
-    fn valid_session(&self, sid: &str) -> bool { self.sessions.lock().unwrap().contains(sid) }
+    pub fn disabled() -> Self {
+        Self::new(None)
+    }
+    pub fn enabled(&self) -> bool {
+        self.token.is_some()
+    }
+    fn valid_session(&self, sid: &str) -> bool {
+        self.sessions.lock().unwrap().contains(sid)
+    }
     fn mint(&self) -> String {
         let sid = format!("{:032x}", random_u128());
         self.sessions.lock().unwrap().insert(sid.clone());
         sid
     }
-    fn revoke(&self, sid: &str) { self.sessions.lock().unwrap().remove(sid); }
+    fn revoke(&self, sid: &str) {
+        self.sessions.lock().unwrap().remove(sid);
+    }
 }
 
 // Dependency-free unguessable id. Swap for `rand` if stronger ids are ever needed.
@@ -40,34 +51,54 @@ fn random_u128() -> u128 {
     use std::time::{SystemTime, UNIX_EPOCH};
     let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     let mut x = t.as_nanos() ^ (t.as_secs() as u128).wrapping_mul(0x9E3779B97F4A7C15);
-    x ^= x >> 33; x = x.wrapping_mul(0xFF51AFD7ED558CCD);
-    x ^= x >> 33; x = x.wrapping_mul(0xC4CEB9FE1A85EC53);
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xFF51AFD7ED558CCD);
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xC4CEB9FE1A85EC53);
     x ^= x >> 33;
     x
 }
 
 fn cookie_value(headers: &header::HeaderMap) -> Option<String> {
     let raw = headers.get(header::COOKIE)?.to_str().ok()?;
-    raw.split(';').filter_map(|kv| {
-        let kv = kv.trim();
-        let (k, v) = kv.split_once('=')?;
-        (k == COOKIE).then(|| v.to_string())
-    }).next()
+    raw.split(';')
+        .filter_map(|kv| {
+            let kv = kv.trim();
+            let (k, v) = kv.split_once('=')?;
+            (k == COOKIE).then(|| v.to_string())
+        })
+        .next()
 }
 
 fn token_eq(a: &str, b: &str) -> bool {
-    if a.len() != b.len() { return false; }
+    if a.len() != b.len() {
+        return false;
+    }
     let mut diff = 0u8;
-    for (x, y) in a.bytes().zip(b.bytes()) { diff |= x ^ y; }
+    for (x, y) in a.bytes().zip(b.bytes()) {
+        diff |= x ^ y;
+    }
     diff == 0
 }
 
-pub async fn guard(State(s): State<ServerState>, req: axum::extract::Request, next: Next) -> Response {
-    if !s.auth.enabled() { return next.run(req).await; }
+pub async fn guard(
+    State(s): State<ServerState>,
+    req: axum::extract::Request,
+    next: Next,
+) -> Response {
+    if !s.auth.enabled() {
+        return next.run(req).await;
+    }
     let path = req.uri().path();
-    if path == "/login" || path == "/logout" { return next.run(req).await; }
-    let authed = cookie_value(req.headers()).map(|sid| s.auth.valid_session(&sid)).unwrap_or(false);
-    if authed { return next.run(req).await; }
+    if path == "/login" || path == "/logout" {
+        return next.run(req).await;
+    }
+    let authed = cookie_value(req.headers())
+        .map(|sid| s.auth.valid_session(&sid))
+        .unwrap_or(false);
+    if authed {
+        return next.run(req).await;
+    }
     if path.starts_with("/api") || path == "/events" {
         return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     }
@@ -75,10 +106,17 @@ pub async fn guard(State(s): State<ServerState>, req: axum::extract::Request, ne
 }
 
 #[derive(serde::Deserialize)]
-pub struct LoginForm { pub token: String }
+pub struct LoginForm {
+    pub token: String,
+}
 
-pub async fn login(State(s): State<ServerState>, axum::extract::Form(form): axum::extract::Form<LoginForm>) -> Response {
-    let Some(expected) = s.auth.token.as_ref() else { return Redirect::to("/").into_response(); };
+pub async fn login(
+    State(s): State<ServerState>,
+    axum::extract::Form(form): axum::extract::Form<LoginForm>,
+) -> Response {
+    let Some(expected) = s.auth.token.as_ref() else {
+        return Redirect::to("/").into_response();
+    };
     if token_eq(&form.token, expected) {
         let sid = s.auth.mint();
         let cookie = format!("{COOKIE}={sid}; HttpOnly; SameSite=Strict; Path=/");
@@ -89,15 +127,23 @@ pub async fn login(State(s): State<ServerState>, axum::extract::Form(form): axum
 }
 
 pub async fn logout(State(s): State<ServerState>, headers: header::HeaderMap) -> Response {
-    if let Some(sid) = cookie_value(&headers) { s.auth.revoke(&sid); }
+    if let Some(sid) = cookie_value(&headers) {
+        s.auth.revoke(&sid);
+    }
     let expire = format!("{COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
     ([(header::SET_COOKIE, expire)], Redirect::to("/login")).into_response()
 }
 
-pub async fn login_page() -> Html<String> { Html(login_html(false)) }
+pub async fn login_page() -> Html<String> {
+    Html(login_html(false))
+}
 
 fn login_html(failed: bool) -> String {
-    let msg = if failed { "<p style=\"color:#e66\">Incorrect token.</p>" } else { "" };
+    let msg = if failed {
+        "<p style=\"color:#e66\">Incorrect token.</p>"
+    } else {
+        ""
+    };
     format!(
         "<!doctype html><html><head><meta charset=utf-8><title>FH6 Telemetry — Login</title>\
          <meta name=viewport content=\"width=device-width,initial-scale=1\">\
