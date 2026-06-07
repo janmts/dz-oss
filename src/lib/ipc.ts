@@ -122,6 +122,14 @@ export const ipc = {
                 body: JSON.stringify({ manualScore, notes }),
               }),
 
+  deleteDriftRun: (runId: number): Promise<void> =>
+    isTauri ? tauriInvoke('delete_drift_run', { runId })
+            : http(`/api/drift-runs/${runId}`, { method: 'DELETE' }),
+
+  deleteInvalidDriftRuns: (): Promise<number> =>
+    isTauri ? tauriInvoke('delete_invalid_drift_runs')
+            : http('/api/drift-runs/purge-invalid', { method: 'POST' }),
+
   getDriftZones: (): Promise<DriftZoneRow[]> =>
     isTauri ? tauriInvoke('get_drift_zones') : http('/api/drift-zones'),
 

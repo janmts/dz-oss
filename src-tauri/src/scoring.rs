@@ -27,8 +27,10 @@ pub struct ScoringParams {
     /// Angle (deg) at which the angle factor peaks; beyond it returns diminish.
     pub sweet_angle_deg: f64,
     /// Exponent for the low-angle ramp up to the sweet spot. 1.0 is linear;
-    /// 0.5 (sqrt) gives shallow high-speed drifts more credit, matching the
-    /// current scored FH6 samples better.
+    /// values <1 give shallow high-speed drifts more credit. The default 0.4
+    /// fits the logged FH6 samples best — the residual error still correlated
+    /// positively with avg drift angle at 0.5 (the model over-rewarded steep
+    /// angle), and pulling the exponent down removed most of that bias.
     pub angle_power: f64,
     /// Speed (m/s) at which the speed factor saturates (~134 mph).
     pub speed_cap_ms: f64,
@@ -57,7 +59,7 @@ impl Default for ScoringParams {
             min_angle_deg: 12.0,
             spin_angle_deg: 90.0,
             sweet_angle_deg: 45.0,
-            angle_power: 0.5,
+            angle_power: 0.4,
             speed_cap_ms: 60.0,
             slip_gate: 1.0,
             base_rate: 1000.0,
@@ -65,9 +67,10 @@ impl Default for ScoringParams {
             mult_cap: 1.0,
             transition_grace_s: 0.5,
             // Least-squares fit across valid logged in-game scores (44 runs
-            // across two zones) with the default no-combo model; re-derive as
-            // more scores are logged.
-            scale: 13.197,
+            // across two zones) with the default no-combo, angle_power=0.4
+            // model; re-derive as more scores are logged. Marker rows (the
+            // all-9s placeholder) and invalid runs are excluded from the fit.
+            scale: 12.671,
         }
     }
 }

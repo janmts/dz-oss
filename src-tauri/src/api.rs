@@ -84,6 +84,22 @@ pub fn recompute_drift_scores(state: &AppState) -> Result<usize, String> {
     Ok(count)
 }
 
+/// Delete one run and its packets/splits/score. Returns Ok even if the id was
+/// already gone (idempotent from the caller's perspective).
+pub fn delete_drift_run(state: &AppState, run_id: i64) -> Result<(), String> {
+    let conn = state.db.lock().unwrap();
+    db::delete_drift_run(&conn, run_id)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Purge all invalid runs (out-of-bounds, never finished). Returns how many
+/// were removed.
+pub fn delete_invalid_drift_runs(state: &AppState) -> Result<usize, String> {
+    let conn = state.db.lock().unwrap();
+    db::delete_invalid_drift_runs(&conn).map_err(|e| e.to_string())
+}
+
 pub fn set_drift_run_manual_score(
     state: &AppState,
     run_id: i64,
