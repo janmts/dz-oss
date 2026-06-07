@@ -1,11 +1,10 @@
 //! Baseline drift-score estimator.
 //!
-//! The model mirrors how Forza Horizon scores drift zones: points accrue while
-//! the car is sideways, proportional to **drift angle × speed**, integrated over
-//! time, and amplified by a **combo multiplier** that grows the longer a drift is
-//! held and collapses the moment it breaks. Defaults were calibrated against
-//! recorded FH6 telemetry (see scripts/score_model.py); the coefficients are
-//! expected to be finetuned later against logged in-game scores.
+//! The model mirrors the strongest signal seen in recorded FH6 drift-zone data:
+//! points accrue while the car is sideways, proportional to **drift angle ×
+//! speed**, integrated over time. Earlier builds also applied a growing combo
+//! multiplier, but the logged in-game scores fit better without it. The combo
+//! knobs remain per-zone overrides for future experiments.
 //!
 //! All parameters are overridable per-zone via `drift_zones.scoring_config_json`,
 //! deserialized over [`ScoringParams::default`].
@@ -33,13 +32,15 @@ pub struct ScoringParams {
     pub slip_gate: f64,
     /// Points per second at full angle/speed factors and multiplier 1.0.
     pub base_rate: f64,
-    /// Multiplier increase per second of sustained, unbroken drift.
+    /// Multiplier increase per second of sustained, unbroken drift. The default
+    /// is 0.0 because the current FH6 drift-zone samples fit better without a
+    /// combo-style multiplier.
     pub mult_growth_per_s: f64,
-    /// Maximum combo multiplier.
+    /// Maximum combo multiplier. Values <=1.0 disable combo scaling.
     pub mult_cap: f64,
-    /// Max time (s) the drift may dip out of band and still keep the combo —
-    /// but only across a *flick* (drifting resumes the opposite direction). A
-    /// straighten with no direction change breaks the combo regardless.
+    /// Max time (s) a drift may dip out of band and still be considered a
+    /// linked flick (drifting resumes the opposite direction). This only affects
+    /// scoring when combo growth is enabled.
     pub transition_grace_s: f64,
     /// Final scale factor mapping raw points to in-game magnitude.
     pub scale: f64,
@@ -55,12 +56,13 @@ impl Default for ScoringParams {
             speed_cap_ms: 31.0,
             slip_gate: 1.0,
             base_rate: 1000.0,
-            mult_growth_per_s: 0.6,
-            mult_cap: 5.0,
+            mult_growth_per_s: 0.0,
+            mult_cap: 1.0,
             transition_grace_s: 0.5,
-            // Least-squares fit across the logged in-game scores (8 runs);
-            // re-derive with scripts/score_model.py as more are logged.
-            scale: 2.018,
+            // Least-squares fit across the logged in-game scores (10 runs) with
+            // the default no-combo model; re-derive with scripts/score_model.py
+            // as more scores are logged.
+            scale: 7.465,
         }
     }
 }
@@ -84,8 +86,10 @@ pub struct RunScore {
     pub avg_angle_deg: f64,
     pub max_angle_deg: f64,
     pub avg_speed_ms: f64,
+    /// Maximum score multiplier reached. Defaults to 1.0 unless combo growth is
+    /// enabled by a per-zone config.
     pub max_multiplier: f64,
-    /// Number of flicks (direction changes that kept the combo alive).
+    /// Number of flicks (direction changes that bridged a short out-of-band dip).
     pub transitions: usize,
 }
 
@@ -96,7 +100,10 @@ pub struct RunScore {
 /// yaw needed. Verified ≈0 (mean 0.03°, std 0.45°) on straight grip driving
 /// across all headings (scripts/frame_test.py).
 pub fn drift_angle_deg(pkt: &TelemetryPacket) -> f64 {
-    (pkt.vel_x as f64).atan2(pkt.vel_z as f64).abs().to_degrees()
+    (pkt.vel_x as f64)
+        .atan2(pkt.vel_z as f64)
+        .abs()
+        .to_degrees()
 }
 
 /// Rear-axle combined slip: max of the two rear tires' combined slip. Forza's
@@ -173,14 +180,11 @@ pub fn score_run(packets: &[TelemetryPacket], p: &ScoringParams) -> RunScore {
             && rear_combined_slip(pkt) >= p.slip_gate;
 
         if drifting {
-            // Resuming after a dip: keep the combo only if this is a flick —
-            // drifting picked back up the *opposite* way within the grace
-            // window. A straighten (same/unknown direction, or too long a gap)
-            // breaks it. Forza rewards linked direction changes; it doesn't
-            // reward straightening out.
+            // Resuming after a dip: count a linked flick only if drifting picked
+            // back up the opposite way within the grace window. If combo growth
+            // is enabled, only those linked flicks preserve drift duration.
             if out_time > 0.0 {
-                let flick =
-                    out_time <= p.transition_grace_s && last_sign != 0 && sign != last_sign;
+                let flick = out_time <= p.transition_grace_s && last_sign != 0 && sign != last_sign;
                 if flick {
                     transitions += 1;
                 } else {
@@ -189,9 +193,14 @@ pub fn score_run(packets: &[TelemetryPacket], p: &ScoringParams) -> RunScore {
                 out_time = 0.0;
             }
             drift_duration += dt;
-            let multiplier = (1.0 + p.mult_growth_per_s * drift_duration).min(p.mult_cap);
+            let multiplier = if p.mult_growth_per_s > 0.0 && p.mult_cap > 1.0 {
+                (1.0 + p.mult_growth_per_s * drift_duration).min(p.mult_cap)
+            } else {
+                1.0
+            };
             max_multiplier = max_multiplier.max(multiplier);
-            total += p.base_rate * angle_factor(angle, p) * speed_factor(speed, p) * multiplier * dt;
+            total +=
+                p.base_rate * angle_factor(angle, p) * speed_factor(speed, p) * multiplier * dt;
             drift_time += dt;
             angle_sum += angle;
             speed_sum += speed;
@@ -211,9 +220,17 @@ pub fn score_run(packets: &[TelemetryPacket], p: &ScoringParams) -> RunScore {
         sample_count: packets.len(),
         drift_time_s: drift_time,
         total_time_s: total_time,
-        avg_angle_deg: if drift_samples > 0 { angle_sum / drift_samples as f64 } else { 0.0 },
+        avg_angle_deg: if drift_samples > 0 {
+            angle_sum / drift_samples as f64
+        } else {
+            0.0
+        },
         max_angle_deg: max_angle,
-        avg_speed_ms: if drift_samples > 0 { speed_sum / drift_samples as f64 } else { 0.0 },
+        avg_speed_ms: if drift_samples > 0 {
+            speed_sum / drift_samples as f64
+        } else {
+            0.0
+        },
         max_multiplier,
         transitions,
     }
@@ -248,6 +265,14 @@ mod tests {
         p
     }
 
+    fn combo_params() -> ScoringParams {
+        ScoringParams {
+            mult_growth_per_s: 0.6,
+            mult_cap: 5.0,
+            ..ScoringParams::default()
+        }
+    }
+
     #[test]
     fn drift_angle_recovers_beta() {
         for &beta in &[15.0_f64, 35.0, 60.0] {
@@ -270,7 +295,7 @@ mod tests {
     }
 
     #[test]
-    fn sustained_drift_builds_multiplier_and_scores() {
+    fn sustained_drift_scores_without_default_combo() {
         let params = ScoringParams::default();
         // ~3 s of a steady 40° drift at 20 m/s, 60 Hz.
         let pkts: Vec<_> = (0..180)
@@ -278,14 +303,24 @@ mod tests {
             .collect();
         let r = score_run(&pkts, &params);
         assert!(r.score > 0.0);
-        assert!(r.max_multiplier > 1.0, "multiplier should grow");
+        assert_eq!(r.max_multiplier, 1.0);
         assert!((r.avg_angle_deg - 40.0).abs() < 1.0);
         assert!(r.drift_time_s > 2.5 && r.drift_time_s < 3.1);
     }
 
     #[test]
-    fn breaking_drift_resets_multiplier() {
-        let params = ScoringParams::default();
+    fn combo_config_builds_multiplier() {
+        let params = combo_params();
+        let pkts: Vec<_> = (0..180)
+            .map(|i| at(drifting_packet(40.0, 20.0), i * 16))
+            .collect();
+        let r = score_run(&pkts, &params);
+        assert!(r.max_multiplier > 1.0, "configured multiplier should grow");
+    }
+
+    #[test]
+    fn breaking_drift_resets_configured_multiplier() {
+        let params = combo_params();
         // Drift, then a straight (non-drift) stretch, then drift again: the
         // second stretch must start from multiplier 1, not the earlier peak.
         let mut pkts = Vec::new();
@@ -298,20 +333,24 @@ mod tests {
             pkts.push(at(drifting_packet(0.0, 20.0), t)); // straight = break
             t += 16;
         }
+        for _ in 0..180 {
+            pkts.push(at(drifting_packet(40.0, 20.0), t));
+            t += 16;
+        }
         let with_break = score_run(&pkts, &params);
         // Sanity: a single continuous drift of equal drift-time scores more,
         // because the multiplier is never reset.
-        let continuous: Vec<_> = (0..180)
+        let continuous: Vec<_> = (0..360)
             .map(|i| at(drifting_packet(40.0, 20.0), i * 16))
             .collect();
         let cont = score_run(&continuous, &params);
-        assert!(with_break.max_multiplier >= cont.max_multiplier - 1e-9);
-        assert!(with_break.score < cont.score * 2.0);
+        assert!(cont.max_multiplier > with_break.max_multiplier);
+        assert!(with_break.score < cont.score);
     }
 
     #[test]
-    fn flick_keeps_combo_but_straighten_breaks_it() {
-        let p = ScoringParams::default();
+    fn flick_keeps_configured_combo_but_straighten_breaks_it() {
+        let p = combo_params();
         // Build a left drift, a brief through-zero, then a right drift.
         fn run(gap_ticks: usize) -> Vec<TelemetryPacket> {
             let mut pkts = Vec::new();
@@ -337,8 +376,8 @@ mod tests {
 
         assert_eq!(flick.transitions, 1);
         assert_eq!(straighten.transitions, 0);
-        // The flick keeps building one long combo, so its multiplier and score
-        // exceed the straighten that had to rebuild from 1×.
+        // With combo growth explicitly enabled, the flick keeps building one
+        // long combo while the straighten has to rebuild from 1×.
         assert!(flick.max_multiplier > straighten.max_multiplier + 0.2);
         assert!(flick.score > straighten.score);
     }
@@ -370,7 +409,7 @@ mod tests {
         assert_eq!(r.sample_count, 0);
     }
 
-    /// Parity check against the Python prototype + the one known in-game score.
+    /// Parity check against the Python prototype + the logged in-game scores.
     /// Reads the developer's local DB; ignored by default.
     /// Run: cargo test --lib -- --ignored matches_recorded --nocapture
     #[test]
@@ -387,8 +426,12 @@ mod tests {
             "run#1 computed={:.0} drift_t={:.1}s total_t={:.1}s avg_ang={:.0} max_ang={:.0} max_mult={:.1} flicks={}",
             r.score, r.drift_time_s, r.total_time_s, r.avg_angle_deg, r.max_angle_deg, r.max_multiplier, r.transitions
         );
-        // Scale is now a least-squares fit across many runs (not a single-point
-        // calibration), so run #1 is allowed to sit within ±20% of its 57016.
-        assert!((r.score - 57016.0).abs() / 57016.0 < 0.20, "got {}", r.score);
+        // Scale is a least-squares fit across all logged scores, not a
+        // single-point calibration, so run #1 is allowed to sit within ±15%.
+        assert!(
+            (r.score - 57016.0).abs() / 57016.0 < 0.15,
+            "got {}",
+            r.score
+        );
     }
 }

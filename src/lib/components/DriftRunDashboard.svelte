@@ -272,8 +272,13 @@
           <div class="breakdown">
             <span>drift {b.driftTimeS.toFixed(1)}s / {b.totalTimeS.toFixed(1)}s</span>
             <span>angle {b.avgAngleDeg.toFixed(0)}° avg · {b.maxAngleDeg.toFixed(0)}° max</span>
-            <span>mult ×{b.maxMultiplier.toFixed(1)}</span>
-            <span>flicks ×{b.transitions}</span>
+            <span>speed {b.avgSpeedMs.toFixed(1)} m/s</span>
+            {#if b.maxMultiplier > 1.01}
+              <span>mult ×{b.maxMultiplier.toFixed(1)}</span>
+            {/if}
+            {#if b.transitions > 0}
+              <span>links ×{b.transitions}</span>
+            {/if}
           </div>
         {/if}
         {#if scoringRun}
