@@ -1,4 +1,12 @@
-import type { SessionRow, TelemetryPacket, AppSettings, SessionLap } from '$lib/types';
+import type {
+  SessionRow,
+  TelemetryPacket,
+  AppSettings,
+  SessionLap,
+  DriftRunRow,
+  DriftZoneInput,
+  DriftZoneRow,
+} from '$lib/types';
 
 const isTauri =
   typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
@@ -87,6 +95,37 @@ export const ipc = {
                 method: 'POST', headers: { 'content-type': 'application/json' },
                 body: JSON.stringify({ bookmarked }),
               }),
+
+  getDriftRuns: (): Promise<DriftRunRow[]> =>
+    isTauri ? tauriInvoke('get_drift_runs') : http('/api/drift-runs'),
+
+  setDriftRunManualScore: (
+    runId: number,
+    manualScore: number,
+    notes: string | null
+  ): Promise<void> =>
+    isTauri ? tauriInvoke('set_drift_run_manual_score', { runId, manualScore, notes })
+            : http(`/api/drift-runs/${runId}/manual-score`, {
+                method: 'POST', headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ manualScore, notes }),
+              }),
+
+  getDriftZones: (): Promise<DriftZoneRow[]> =>
+    isTauri ? tauriInvoke('get_drift_zones') : http('/api/drift-zones'),
+
+  saveDriftZone: (zone: DriftZoneInput): Promise<DriftZoneRow> => {
+    if (isTauri) return tauriInvoke('save_drift_zone', { zone });
+    const path = zone.id ? `/api/drift-zones/${zone.id}` : '/api/drift-zones';
+    return http(path, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(zone),
+    });
+  },
+
+  deleteDriftZone: (zoneId: number): Promise<void> =>
+    isTauri ? tauriInvoke('delete_drift_zone', { zoneId })
+            : http(`/api/drift-zones/${zoneId}`, { method: 'DELETE' }),
 
   getSettings: (): Promise<AppSettings> =>
     isTauri ? tauriInvoke('get_settings') : http('/api/settings'),

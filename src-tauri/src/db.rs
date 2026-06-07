@@ -1,4 +1,5 @@
 use rusqlite::{Connection, Result};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 pub fn db_path() -> PathBuf {
@@ -61,6 +62,66 @@ fn migrate(conn: &Connection) {
             UNIQUE(session_id, lap_number)
         );
         CREATE INDEX IF NOT EXISTS idx_laps_session ON session_laps(session_id);",
+    );
+    let _ = conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS drift_zones (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1,
+            left_boundary_json TEXT NOT NULL,
+            right_boundary_json TEXT NOT NULL,
+            start_gate_json TEXT NOT NULL DEFAULT '[]',
+            finish_gate_json TEXT NOT NULL DEFAULT '[]',
+            split_gates_json TEXT NOT NULL DEFAULT '[]',
+            scoring_config_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE TABLE IF NOT EXISTS drift_runs (
+            id INTEGER PRIMARY KEY,
+            zone_id INTEGER REFERENCES drift_zones(id) ON DELETE SET NULL,
+            started_at INTEGER NOT NULL,
+            ended_at INTEGER,
+            car_ordinal INTEGER NOT NULL DEFAULT 0,
+            car_class INTEGER NOT NULL DEFAULT 0,
+            car_pi INTEGER NOT NULL DEFAULT 0,
+            drivetrain_type INTEGER NOT NULL DEFAULT -1,
+            car_group INTEGER NOT NULL DEFAULT 0,
+            valid INTEGER NOT NULL DEFAULT 1,
+            invalid_reason TEXT,
+            computed_score REAL,
+            packet_count INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS drift_run_packets (
+            id INTEGER PRIMARY KEY,
+            run_id INTEGER NOT NULL REFERENCES drift_runs(id) ON DELETE CASCADE,
+            timestamp_ms INTEGER NOT NULL,
+            data BLOB NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS drift_run_splits (
+            id INTEGER PRIMARY KEY,
+            run_id INTEGER NOT NULL REFERENCES drift_runs(id) ON DELETE CASCADE,
+            split_index INTEGER NOT NULL,
+            start_timestamp_ms INTEGER,
+            end_timestamp_ms INTEGER,
+            duration_ms INTEGER,
+            computed_score REAL,
+            telemetry_summary_json TEXT NOT NULL DEFAULT '{}',
+            UNIQUE(run_id, split_index)
+        );
+        CREATE TABLE IF NOT EXISTS drift_run_scores (
+            id INTEGER PRIMARY KEY,
+            run_id INTEGER NOT NULL REFERENCES drift_runs(id) ON DELETE CASCADE,
+            manual_score INTEGER NOT NULL,
+            notes TEXT,
+            entered_at INTEGER NOT NULL,
+            UNIQUE(run_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_drift_runs_zone_started ON drift_runs(zone_id, started_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_drift_runs_car_started ON drift_runs(car_ordinal, started_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_drift_packets_run ON drift_run_packets(run_id);
+        CREATE INDEX IF NOT EXISTS idx_drift_splits_run ON drift_run_splits(run_id);",
     );
 }
 
@@ -247,6 +308,355 @@ pub fn clear_all_sessions(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "DELETE FROM session_laps; DELETE FROM session_packets; DELETE FROM sessions;",
     )
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ZonePoint {
+    pub x: f64,
+    pub z: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DriftZoneInput {
+    pub id: Option<i64>,
+    pub name: String,
+    pub description: Option<String>,
+    pub active: bool,
+    pub left_boundary: Vec<ZonePoint>,
+    pub right_boundary: Vec<ZonePoint>,
+    #[serde(default)]
+    pub start_gate: Vec<ZonePoint>,
+    #[serde(default)]
+    pub finish_gate: Vec<ZonePoint>,
+    #[serde(default)]
+    pub split_gates: Vec<Vec<ZonePoint>>,
+    #[serde(default)]
+    pub scoring_config: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DriftZoneRow {
+    pub id: i64,
+    pub name: String,
+    pub description: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub active: bool,
+    pub left_boundary: Vec<ZonePoint>,
+    pub right_boundary: Vec<ZonePoint>,
+    pub start_gate: Vec<ZonePoint>,
+    pub finish_gate: Vec<ZonePoint>,
+    pub split_gates: Vec<Vec<ZonePoint>>,
+    pub scoring_config: serde_json::Value,
+}
+
+fn zone_points_json(points: &[ZonePoint]) -> Result<String> {
+    serde_json::to_string(points).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+}
+
+fn split_gates_json(gates: &[Vec<ZonePoint>]) -> Result<String> {
+    serde_json::to_string(gates).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+}
+
+fn value_json(value: &serde_json::Value) -> Result<String> {
+    serde_json::to_string(value).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+}
+
+fn parse_points_json(raw: String) -> Vec<ZonePoint> {
+    serde_json::from_str(&raw).unwrap_or_default()
+}
+
+fn parse_split_gates_json(raw: String) -> Vec<Vec<ZonePoint>> {
+    serde_json::from_str(&raw).unwrap_or_default()
+}
+
+fn parse_value_json(raw: String) -> serde_json::Value {
+    serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}))
+}
+
+fn normalize_zone_input(input: &DriftZoneInput) -> DriftZoneInput {
+    let start_gate = if input.start_gate.len() == 2 {
+        input.start_gate.clone()
+    } else if let (Some(left), Some(right)) = (input.left_boundary.first(), input.right_boundary.first()) {
+        vec![left.clone(), right.clone()]
+    } else {
+        Vec::new()
+    };
+    let finish_gate = if input.finish_gate.len() == 2 {
+        input.finish_gate.clone()
+    } else if let (Some(left), Some(right)) = (input.left_boundary.last(), input.right_boundary.last()) {
+        vec![left.clone(), right.clone()]
+    } else {
+        Vec::new()
+    };
+    DriftZoneInput {
+        id: input.id,
+        name: input.name.trim().to_string(),
+        description: input.description.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string),
+        active: input.active,
+        left_boundary: input.left_boundary.clone(),
+        right_boundary: input.right_boundary.clone(),
+        start_gate,
+        finish_gate,
+        split_gates: input.split_gates.clone(),
+        scoring_config: input.scoring_config.clone(),
+    }
+}
+
+pub fn save_drift_zone(conn: &Connection, input: &DriftZoneInput, now_ms: i64) -> Result<i64> {
+    let zone = normalize_zone_input(input);
+    let name = if zone.name.is_empty() { "Untitled drift zone".to_string() } else { zone.name };
+    let left = zone_points_json(&zone.left_boundary)?;
+    let right = zone_points_json(&zone.right_boundary)?;
+    let start = zone_points_json(&zone.start_gate)?;
+    let finish = zone_points_json(&zone.finish_gate)?;
+    let splits = split_gates_json(&zone.split_gates)?;
+    let scoring = value_json(&zone.scoring_config)?;
+
+    if let Some(id) = zone.id {
+        conn.execute(
+            "UPDATE drift_zones
+             SET name=?1, description=?2, updated_at=?3, active=?4,
+                 left_boundary_json=?5, right_boundary_json=?6,
+                 start_gate_json=?7, finish_gate_json=?8,
+                 split_gates_json=?9, scoring_config_json=?10
+             WHERE id=?11",
+            rusqlite::params![
+                name,
+                zone.description,
+                now_ms,
+                zone.active as i64,
+                left,
+                right,
+                start,
+                finish,
+                splits,
+                scoring,
+                id,
+            ],
+        )?;
+        Ok(id)
+    } else {
+        conn.execute(
+            "INSERT INTO drift_zones (
+                name, description, created_at, updated_at, active,
+                left_boundary_json, right_boundary_json, start_gate_json,
+                finish_gate_json, split_gates_json, scoring_config_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            rusqlite::params![
+                name,
+                zone.description,
+                now_ms,
+                now_ms,
+                zone.active as i64,
+                left,
+                right,
+                start,
+                finish,
+                splits,
+                scoring,
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+}
+
+pub fn get_drift_zone(conn: &Connection, id: i64) -> Result<DriftZoneRow> {
+    conn.query_row(
+        "SELECT id, name, description, created_at, updated_at, active,
+                left_boundary_json, right_boundary_json, start_gate_json,
+                finish_gate_json, split_gates_json, scoring_config_json
+         FROM drift_zones WHERE id=?1",
+        [id],
+        |r| {
+            Ok(DriftZoneRow {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                description: r.get(2)?,
+                created_at: r.get(3)?,
+                updated_at: r.get(4)?,
+                active: r.get::<_, i64>(5)? != 0,
+                left_boundary: parse_points_json(r.get(6)?),
+                right_boundary: parse_points_json(r.get(7)?),
+                start_gate: parse_points_json(r.get(8)?),
+                finish_gate: parse_points_json(r.get(9)?),
+                split_gates: parse_split_gates_json(r.get(10)?),
+                scoring_config: parse_value_json(r.get(11)?),
+            })
+        },
+    )
+}
+
+pub fn list_drift_zones(conn: &Connection) -> Result<Vec<DriftZoneRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, description, created_at, updated_at, active,
+                left_boundary_json, right_boundary_json, start_gate_json,
+                finish_gate_json, split_gates_json, scoring_config_json
+         FROM drift_zones ORDER BY active DESC, updated_at DESC, name ASC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(DriftZoneRow {
+            id: r.get(0)?,
+            name: r.get(1)?,
+            description: r.get(2)?,
+            created_at: r.get(3)?,
+            updated_at: r.get(4)?,
+            active: r.get::<_, i64>(5)? != 0,
+            left_boundary: parse_points_json(r.get(6)?),
+            right_boundary: parse_points_json(r.get(7)?),
+            start_gate: parse_points_json(r.get(8)?),
+            finish_gate: parse_points_json(r.get(9)?),
+            split_gates: parse_split_gates_json(r.get(10)?),
+            scoring_config: parse_value_json(r.get(11)?),
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn delete_drift_zone(conn: &Connection, id: i64) -> Result<()> {
+    conn.execute("UPDATE drift_runs SET zone_id=NULL WHERE zone_id=?1", [id])?;
+    conn.execute("DELETE FROM drift_zones WHERE id=?1", [id])?;
+    Ok(())
+}
+
+pub fn open_drift_run(
+    conn: &Connection,
+    zone_id: Option<i64>,
+    started_at: i64,
+    car_ordinal: i32,
+    car_class: i32,
+    car_pi: i32,
+    drivetrain_type: i32,
+    car_group: u32,
+) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO drift_runs (
+            zone_id, started_at, car_ordinal, car_class, car_pi, drivetrain_type, car_group
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![
+            zone_id,
+            started_at,
+            car_ordinal,
+            car_class,
+            car_pi,
+            drivetrain_type,
+            car_group as i64,
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn close_drift_run(
+    conn: &Connection,
+    run_id: i64,
+    ended_at: i64,
+    valid: bool,
+    invalid_reason: Option<&str>,
+    computed_score: Option<f32>,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE drift_runs
+         SET ended_at=?1, valid=?2, invalid_reason=?3, computed_score=?4
+         WHERE id=?5",
+        rusqlite::params![
+            ended_at,
+            valid as i64,
+            invalid_reason,
+            computed_score,
+            run_id,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn insert_drift_run_packet(
+    conn: &Connection,
+    run_id: i64,
+    timestamp_ms: u32,
+    data: &[u8],
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO drift_run_packets (run_id, timestamp_ms, data) VALUES (?1, ?2, ?3)",
+        rusqlite::params![run_id, timestamp_ms, data],
+    )?;
+    conn.execute(
+        "UPDATE drift_runs SET packet_count = packet_count + 1 WHERE id=?1",
+        [run_id],
+    )?;
+    Ok(())
+}
+
+pub fn set_drift_run_manual_score(
+    conn: &Connection,
+    run_id: i64,
+    manual_score: i64,
+    notes: Option<&str>,
+    entered_at: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO drift_run_scores (run_id, manual_score, notes, entered_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(run_id) DO UPDATE SET
+            manual_score=excluded.manual_score,
+            notes=excluded.notes,
+            entered_at=excluded.entered_at",
+        rusqlite::params![run_id, manual_score, notes, entered_at],
+    )?;
+    Ok(())
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DriftRunRow {
+    pub id: i64,
+    pub zone_id: Option<i64>,
+    pub started_at: i64,
+    pub ended_at: Option<i64>,
+    pub car_ordinal: i32,
+    pub car_class: i32,
+    pub car_pi: i32,
+    pub drivetrain_type: i32,
+    pub car_group: i64,
+    pub valid: bool,
+    pub invalid_reason: Option<String>,
+    pub computed_score: Option<f32>,
+    pub manual_score: Option<i64>,
+    pub packet_count: i64,
+}
+
+pub fn list_drift_runs(conn: &Connection) -> Result<Vec<DriftRunRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT r.id, r.zone_id, r.started_at, r.ended_at, r.car_ordinal,
+                r.car_class, r.car_pi, r.drivetrain_type, r.car_group,
+                r.valid, r.invalid_reason, r.computed_score, s.manual_score,
+                r.packet_count
+         FROM drift_runs r
+         LEFT JOIN drift_run_scores s ON s.run_id = r.id
+         ORDER BY r.started_at DESC
+         LIMIT 200",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(DriftRunRow {
+            id: r.get(0)?,
+            zone_id: r.get(1)?,
+            started_at: r.get(2)?,
+            ended_at: r.get(3)?,
+            car_ordinal: r.get(4)?,
+            car_class: r.get(5)?,
+            car_pi: r.get(6)?,
+            drivetrain_type: r.get(7)?,
+            car_group: r.get(8)?,
+            valid: r.get::<_, i64>(9)? != 0,
+            invalid_reason: r.get(10)?,
+            computed_score: r.get(11)?,
+            manual_score: r.get(12)?,
+            packet_count: r.get(13)?,
+        })
+    })?;
+    rows.collect()
 }
 
 #[cfg(test)]
@@ -445,5 +855,135 @@ mod tests {
             .query_row("SELECT packet_count FROM sessions WHERE id=?1", [id], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn drift_tables_are_created() {
+        let conn = in_memory();
+        for table in [
+            "drift_zones",
+            "drift_runs",
+            "drift_run_packets",
+            "drift_run_splits",
+            "drift_run_scores",
+        ] {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(exists, 1, "missing table {table}");
+        }
+    }
+
+    fn zone_input(name: &str) -> DriftZoneInput {
+        DriftZoneInput {
+            id: None,
+            name: name.into(),
+            description: Some("test zone".into()),
+            active: true,
+            left_boundary: vec![
+                ZonePoint { x: 0.0, z: 0.0 },
+                ZonePoint { x: 0.0, z: 10.0 },
+            ],
+            right_boundary: vec![
+                ZonePoint { x: 5.0, z: 0.0 },
+                ZonePoint { x: 5.0, z: 10.0 },
+            ],
+            start_gate: Vec::new(),
+            finish_gate: Vec::new(),
+            split_gates: vec![vec![
+                ZonePoint { x: 0.0, z: 5.0 },
+                ZonePoint { x: 5.0, z: 5.0 },
+            ]],
+            scoring_config: serde_json::json!({ "version": 1 }),
+        }
+    }
+
+    #[test]
+    fn drift_zone_save_lists_and_derives_gates() {
+        let conn = in_memory();
+        let id = save_drift_zone(&conn, &zone_input("Switchbacks"), 1000).unwrap();
+        let zones = list_drift_zones(&conn).unwrap();
+        assert_eq!(zones.len(), 1);
+        let zone = &zones[0];
+        assert_eq!(zone.id, id);
+        assert_eq!(zone.name, "Switchbacks");
+        assert_eq!(zone.left_boundary.len(), 2);
+        assert_eq!(zone.right_boundary.len(), 2);
+        assert_eq!(zone.start_gate.len(), 2);
+        assert_eq!(zone.finish_gate.len(), 2);
+        assert_eq!(zone.split_gates.len(), 1);
+        assert_eq!(zone.scoring_config["version"], 1);
+    }
+
+    #[test]
+    fn drift_zone_update_replaces_geometry() {
+        let conn = in_memory();
+        let id = save_drift_zone(&conn, &zone_input("Original"), 1000).unwrap();
+        let mut update = zone_input("Updated");
+        update.id = Some(id);
+        update.active = false;
+        update.left_boundary.push(ZonePoint { x: 1.0, z: 20.0 });
+        save_drift_zone(&conn, &update, 2000).unwrap();
+
+        let zone = get_drift_zone(&conn, id).unwrap();
+        assert_eq!(zone.name, "Updated");
+        assert!(!zone.active);
+        assert_eq!(zone.updated_at, 2000);
+        assert_eq!(zone.left_boundary.len(), 3);
+        assert_eq!(list_drift_zones(&conn).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn drift_zone_delete_keeps_runs_with_null_zone() {
+        let conn = in_memory();
+        let zone_id = save_drift_zone(&conn, &zone_input("Zone"), 1000).unwrap();
+        let run_id = open_drift_run(&conn, Some(zone_id), 1100, 1, 2, 300, 2, 3).unwrap();
+        delete_drift_zone(&conn, zone_id).unwrap();
+        assert_eq!(list_drift_zones(&conn).unwrap().len(), 0);
+        let zone: Option<i64> = conn
+            .query_row("SELECT zone_id FROM drift_runs WHERE id=?1", [run_id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(zone, None);
+    }
+
+    #[test]
+    fn drift_run_keeps_car_metadata_and_packets() {
+        let conn = in_memory();
+        let id = open_drift_run(&conn, None, 123, 3249, 5, 900, 1, 77).unwrap();
+        insert_drift_run_packet(&conn, id, 1000, &vec![1u8; 324]).unwrap();
+        insert_drift_run_packet(&conn, id, 1016, &vec![2u8; 324]).unwrap();
+        close_drift_run(&conn, id, 5000, true, None, Some(12345.0)).unwrap();
+
+        let rows = list_drift_runs(&conn).unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.id, id);
+        assert_eq!(row.car_ordinal, 3249);
+        assert_eq!(row.car_class, 5);
+        assert_eq!(row.car_pi, 900);
+        assert_eq!(row.drivetrain_type, 1);
+        assert_eq!(row.car_group, 77);
+        assert_eq!(row.packet_count, 2);
+        assert!(row.valid);
+        assert!((row.computed_score.unwrap() - 12345.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn drift_manual_score_upserts() {
+        let conn = in_memory();
+        let id = open_drift_run(&conn, None, 123, 1, 2, 300, 2, 3).unwrap();
+        set_drift_run_manual_score(&conn, id, 42_000, Some("first read"), 1000).unwrap();
+        set_drift_run_manual_score(&conn, id, 43_500, Some("corrected"), 2000).unwrap();
+
+        let rows = list_drift_runs(&conn).unwrap();
+        assert_eq!(rows[0].manual_score, Some(43_500));
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM drift_run_scores WHERE run_id=?1", [id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
     }
 }

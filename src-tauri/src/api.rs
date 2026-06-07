@@ -1,4 +1,5 @@
 use crate::{db, settings, AppState};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn list_sessions(state: &AppState) -> Result<Vec<db::SessionRow>, String> {
     let conn = state.db.lock().unwrap();
@@ -48,6 +49,49 @@ pub fn set_session_bookmark(
 ) -> Result<(), String> {
     let conn = state.db.lock().unwrap();
     db::set_session_bookmark(&conn, session_id, bookmarked).map_err(|e| e.to_string())
+}
+
+pub fn list_drift_runs(state: &AppState) -> Result<Vec<db::DriftRunRow>, String> {
+    let conn = state.db.lock().unwrap();
+    db::list_drift_runs(&conn).map_err(|e| e.to_string())
+}
+
+pub fn set_drift_run_manual_score(
+    state: &AppState,
+    run_id: i64,
+    manual_score: i64,
+    notes: Option<String>,
+) -> Result<(), String> {
+    let entered_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_millis() as i64;
+    let conn = state.db.lock().unwrap();
+    db::set_drift_run_manual_score(&conn, run_id, manual_score, notes.as_deref(), entered_at)
+        .map_err(|e| e.to_string())
+}
+
+pub fn list_drift_zones(state: &AppState) -> Result<Vec<db::DriftZoneRow>, String> {
+    let conn = state.db.lock().unwrap();
+    db::list_drift_zones(&conn).map_err(|e| e.to_string())
+}
+
+pub fn save_drift_zone(
+    state: &AppState,
+    zone: db::DriftZoneInput,
+) -> Result<db::DriftZoneRow, String> {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_millis() as i64;
+    let conn = state.db.lock().unwrap();
+    let id = db::save_drift_zone(&conn, &zone, now_ms).map_err(|e| e.to_string())?;
+    db::get_drift_zone(&conn, id).map_err(|e| e.to_string())
+}
+
+pub fn delete_drift_zone(state: &AppState, zone_id: i64) -> Result<(), String> {
+    let conn = state.db.lock().unwrap();
+    db::delete_drift_zone(&conn, zone_id).map_err(|e| e.to_string())
 }
 
 pub fn get_settings(state: &AppState) -> settings::Settings {
@@ -122,6 +166,42 @@ mod tests {
         }
         clear_all_sessions(&state).unwrap();
         assert_eq!(list_sessions(&state).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn drift_runs_and_manual_score_roundtrip() {
+        let state = test_state();
+        let id = {
+            let conn = state.db.lock().unwrap();
+            db::open_drift_run(&conn, None, 1000, 3249, 5, 900, 1, 77).unwrap()
+        };
+        set_drift_run_manual_score(&state, id, 99_999, Some("entered after run".into())).unwrap();
+        let rows = list_drift_runs(&state).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].car_ordinal, 3249);
+        assert_eq!(rows[0].manual_score, Some(99_999));
+    }
+
+    #[test]
+    fn drift_zones_roundtrip() {
+        let state = test_state();
+        let zone = db::DriftZoneInput {
+            id: None,
+            name: "Mountain Pass".into(),
+            description: None,
+            active: true,
+            left_boundary: vec![db::ZonePoint { x: 1.0, z: 2.0 }],
+            right_boundary: vec![db::ZonePoint { x: 3.0, z: 4.0 }],
+            start_gate: Vec::new(),
+            finish_gate: Vec::new(),
+            split_gates: Vec::new(),
+            scoring_config: serde_json::json!({}),
+        };
+        let saved = save_drift_zone(&state, zone).unwrap();
+        assert_eq!(saved.name, "Mountain Pass");
+        assert_eq!(list_drift_zones(&state).unwrap().len(), 1);
+        delete_drift_zone(&state, saved.id).unwrap();
+        assert_eq!(list_drift_zones(&state).unwrap().len(), 0);
     }
 
     #[test]

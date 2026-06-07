@@ -69,6 +69,54 @@ pub async fn set_bookmark(
     api::set_session_bookmark(&s.app, id, body.bookmarked).map(|_| StatusCode::NO_CONTENT).map_err(err)
 }
 
+pub async fn list_drift_runs(State(s): State<ServerState>) -> Result<Json<Vec<db::DriftRunRow>>, JsonErr> {
+    api::list_drift_runs(&s.app).map(Json).map_err(err)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManualScoreBody {
+    pub manual_score: i64,
+    pub notes: Option<String>,
+}
+
+pub async fn set_drift_run_manual_score(
+    State(s): State<ServerState>,
+    Path(id): Path<i64>,
+    Json(body): Json<ManualScoreBody>,
+) -> Result<StatusCode, JsonErr> {
+    api::set_drift_run_manual_score(&s.app, id, body.manual_score, body.notes)
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(err)
+}
+
+pub async fn list_drift_zones(State(s): State<ServerState>) -> Result<Json<Vec<db::DriftZoneRow>>, JsonErr> {
+    api::list_drift_zones(&s.app).map(Json).map_err(err)
+}
+
+pub async fn save_drift_zone(
+    State(s): State<ServerState>,
+    Json(zone): Json<db::DriftZoneInput>,
+) -> Result<Json<db::DriftZoneRow>, JsonErr> {
+    api::save_drift_zone(&s.app, zone).map(Json).map_err(err)
+}
+
+pub async fn save_drift_zone_with_id(
+    State(s): State<ServerState>,
+    Path(id): Path<i64>,
+    Json(mut zone): Json<db::DriftZoneInput>,
+) -> Result<Json<db::DriftZoneRow>, JsonErr> {
+    zone.id = Some(id);
+    api::save_drift_zone(&s.app, zone).map(Json).map_err(err)
+}
+
+pub async fn delete_drift_zone(
+    State(s): State<ServerState>,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, JsonErr> {
+    api::delete_drift_zone(&s.app, id).map(|_| StatusCode::NO_CONTENT).map_err(err)
+}
+
 pub async fn get_settings(State(s): State<ServerState>) -> Json<settings::Settings> {
     Json(api::get_settings(&s.app))
 }

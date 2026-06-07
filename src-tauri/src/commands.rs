@@ -53,6 +53,39 @@ pub fn set_session_bookmark(
 }
 
 #[tauri::command]
+pub fn get_drift_runs(state: State<'_, Arc<AppState>>) -> Result<Vec<db::DriftRunRow>, String> {
+    api::list_drift_runs(&state)
+}
+
+#[tauri::command]
+pub fn set_drift_run_manual_score(
+    state: State<'_, Arc<AppState>>,
+    run_id: i64,
+    manual_score: i64,
+    notes: Option<String>,
+) -> Result<(), String> {
+    api::set_drift_run_manual_score(&state, run_id, manual_score, notes)
+}
+
+#[tauri::command]
+pub fn get_drift_zones(state: State<'_, Arc<AppState>>) -> Result<Vec<db::DriftZoneRow>, String> {
+    api::list_drift_zones(&state)
+}
+
+#[tauri::command]
+pub fn save_drift_zone(
+    state: State<'_, Arc<AppState>>,
+    zone: db::DriftZoneInput,
+) -> Result<db::DriftZoneRow, String> {
+    api::save_drift_zone(&state, zone)
+}
+
+#[tauri::command]
+pub fn delete_drift_zone(state: State<'_, Arc<AppState>>, zone_id: i64) -> Result<(), String> {
+    api::delete_drift_zone(&state, zone_id)
+}
+
+#[tauri::command]
 pub fn get_settings(state: State<'_, Arc<AppState>>) -> settings::Settings {
     api::get_settings(&state)
 }

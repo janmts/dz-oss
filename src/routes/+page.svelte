@@ -14,10 +14,12 @@
   import SessionViewer from '$lib/components/SessionViewer.svelte';
   import ReplayBar from '$lib/components/ReplayBar.svelte';
   import SettingsModal from '$lib/components/SettingsModal.svelte';
+  import DriftZoneEditor from '$lib/components/DriftZoneEditor.svelte';
   import type { SessionRow } from '$lib/types';
 
   let showSessions = $state(false);
   let showSettings = $state(false);
+  let showZones = $state(false);
   let viewerSession = $state<SessionRow | null>(null);
   let toasts = $state<{ id: number; message: string }[]>([]);
   let nextToastId = 0;
@@ -151,6 +153,7 @@
     useMph={s?.useMph ?? true}
     onSettings={() => (showSettings = true)}
     onSessions={() => (showSessions = !showSessions)}
+    onZones={() => (showZones = true)}
     tiresVisible={s?.tiresVisible ?? true}
     mapEnabled={s?.mapEnabled ?? false}
     {mapPoppedOut}
@@ -238,6 +241,10 @@
 
 {#if showSettings}
   <SettingsModal onClose={() => (showSettings = false)} />
+{/if}
+
+{#if showZones}
+  <DriftZoneEditor onClose={() => (showZones = false)} />
 {/if}
 
 <style>

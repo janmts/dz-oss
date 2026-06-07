@@ -10,6 +10,9 @@ export interface TelemetryPacket {
   velX: number;
   velY: number;
   velZ: number;
+  angularVelocityX: number;
+  angularVelocityY: number;
+  angularVelocityZ: number;
   positionX: number;
   positionY: number;
   positionZ: number;
@@ -21,10 +24,18 @@ export interface TelemetryPacket {
   tireSlipAngleFr: number;
   tireSlipAngleRl: number;
   tireSlipAngleRr: number;
+  tireCombinedSlipFl: number;
+  tireCombinedSlipFr: number;
+  tireCombinedSlipRl: number;
+  tireCombinedSlipRr: number;
   carOrdinal: number;
   carClass: number;
   carPi: number;
   drivetrainType: number;
+  numCylinders: number;
+  carGroup: number;
+  smashableVelDiff: number;
+  smashableMass: number;
   speedMs: number;
   power: number;
   torque: number;
@@ -76,6 +87,47 @@ export interface SessionRow {
 export interface SessionLap {
   lapNumber: number;
   lapTime: number;
+}
+
+export interface DriftRunRow {
+  id: number;
+  zoneId: number | null;
+  startedAt: number;
+  endedAt: number | null;
+  carOrdinal: number;
+  carClass: number;
+  carPi: number;
+  drivetrainType: number;
+  carGroup: number;
+  valid: boolean;
+  invalidReason: string | null;
+  computedScore: number | null;
+  manualScore: number | null;
+  packetCount: number;
+}
+
+export interface ZonePoint {
+  x: number;
+  z: number;
+}
+
+export interface DriftZoneInput {
+  id: number | null;
+  name: string;
+  description: string | null;
+  active: boolean;
+  leftBoundary: ZonePoint[];
+  rightBoundary: ZonePoint[];
+  startGate: ZonePoint[];
+  finishGate: ZonePoint[];
+  splitGates: ZonePoint[][];
+  scoringConfig: Record<string, unknown>;
+}
+
+export interface DriftZoneRow extends DriftZoneInput {
+  id: number;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface AppSettings {

@@ -4,10 +4,11 @@
   import { carName } from '$lib/car-name';
   import { CAR_CLASS_LABELS, DRIVETRAIN_LABELS } from '$lib/types';
 
-  let { useMph = true, onSettings, onSessions, tiresVisible = true, mapEnabled = false, mapPoppedOut = false, onToggleTires, onToggleMap }: {
+  let { useMph = true, onSettings, onSessions, onZones, tiresVisible = true, mapEnabled = false, mapPoppedOut = false, onToggleTires, onToggleMap }: {
     useMph: boolean;
     onSettings: () => void;
     onSessions: () => void;
+    onZones: () => void;
     tiresVisible?: boolean;
     mapEnabled?: boolean;
     mapPoppedOut?: boolean;
@@ -70,6 +71,7 @@
       onclick={onToggleMap}
       title={mapPoppedOut ? 'Close pop-out map' : mapEnabled ? 'Hide map' : 'Show map'}
     >MAP{#if mapPoppedOut} ⤢{/if}</button>
+    <button class="panel-chip" onclick={onZones} title="Drift zone editor">ZONES</button>
     <button class="icon-btn" onclick={onSessions} title="Sessions">⏱</button>
     <button class="icon-btn" onclick={onSettings} title="Settings">⚙</button>
     {#if version}<span class="version">v{version}</span>{/if}

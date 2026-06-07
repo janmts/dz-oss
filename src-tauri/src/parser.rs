@@ -5,7 +5,7 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ParseError {
-    #[error("packet too short: {0} bytes (need ≥323)")]
+    #[error("packet too short: {0} bytes (need ≥324)")]
     TooShort(usize),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
@@ -25,6 +25,9 @@ pub struct TelemetryPacket {
     pub vel_x: f32,
     pub vel_y: f32,
     pub vel_z: f32,
+    pub angular_velocity_x: f32,
+    pub angular_velocity_y: f32,
+    pub angular_velocity_z: f32,
     pub position_x: f32,
     pub position_y: f32,
     pub position_z: f32,
@@ -36,10 +39,18 @@ pub struct TelemetryPacket {
     pub tire_slip_angle_fr: f32,
     pub tire_slip_angle_rl: f32,
     pub tire_slip_angle_rr: f32,
+    pub tire_combined_slip_fl: f32,
+    pub tire_combined_slip_fr: f32,
+    pub tire_combined_slip_rl: f32,
+    pub tire_combined_slip_rr: f32,
     pub car_ordinal: i32,
     pub car_class: i32,
     pub car_pi: i32,
     pub drivetrain_type: i32,
+    pub num_cylinders: i32,
+    pub car_group: u32,
+    pub smashable_vel_diff: f32,
+    pub smashable_mass: f32,
     pub speed_ms: f32,
     pub power: f32,
     pub torque: f32,
@@ -76,7 +87,7 @@ pub struct TelemetryPacket {
 }
 
 pub fn parse(buf: &[u8]) -> Result<TelemetryPacket, ParseError> {
-    if buf.len() < 323 {
+    if buf.len() < 324 {
         return Err(ParseError::TooShort(buf.len()));
     }
     let mut c = Cursor::new(buf);
@@ -93,7 +104,9 @@ pub fn parse(buf: &[u8]) -> Result<TelemetryPacket, ParseError> {
     let vel_x = c.read_f32::<LittleEndian>()?;
     let vel_y = c.read_f32::<LittleEndian>()?;
     let vel_z = c.read_f32::<LittleEndian>()?;
-    skip_f32_fields(&mut c, 3)?; // AngularVelocity X/Y/Z
+    let angular_velocity_x = c.read_f32::<LittleEndian>()?;
+    let angular_velocity_y = c.read_f32::<LittleEndian>()?;
+    let angular_velocity_z = c.read_f32::<LittleEndian>()?;
     let yaw = c.read_f32::<LittleEndian>()?;
     let pitch = c.read_f32::<LittleEndian>()?;
     let roll = c.read_f32::<LittleEndian>()?;
@@ -113,21 +126,26 @@ pub fn parse(buf: &[u8]) -> Result<TelemetryPacket, ParseError> {
     let tire_slip_angle_fr = c.read_f32::<LittleEndian>()?;
     let tire_slip_angle_rl = c.read_f32::<LittleEndian>()?;
     let tire_slip_angle_rr = c.read_f32::<LittleEndian>()?;
-    skip_f32_fields(&mut c, 4)?; // TireCombinedSlip
+    let tire_combined_slip_fl = c.read_f32::<LittleEndian>()?;
+    let tire_combined_slip_fr = c.read_f32::<LittleEndian>()?;
+    let tire_combined_slip_rl = c.read_f32::<LittleEndian>()?;
+    let tire_combined_slip_rr = c.read_f32::<LittleEndian>()?;
     skip_f32_fields(&mut c, 4)?; // SuspensionTravelMeters
     let car_ordinal = c.read_i32::<LittleEndian>()?;
     let car_class = c.read_i32::<LittleEndian>()?;
     let car_pi = c.read_i32::<LittleEndian>()?;
     let drivetrain_type = c.read_i32::<LittleEndian>()?;
-    let _num_cylinders = c.read_i32::<LittleEndian>()?;
+    let num_cylinders = c.read_i32::<LittleEndian>()?;
+    let car_group = c.read_u32::<LittleEndian>()?;
+    let smashable_vel_diff = c.read_f32::<LittleEndian>()?;
+    let smashable_mass = c.read_f32::<LittleEndian>()?;
 
-    // Dash-only fields — offsets verified against go-forza-telemetry v2.go
-    // 232–243: 12 unknown bytes (not parsed in V2 format)
+    // FH6-specific post-sled fields — offsets verified against official FH6 Data Out docs.
+    // 232: CarGroup, 236: SmashableVelDiff, 240: SmashableMass
     // 244–255: Position X/Y/Z world coords (skipped)
     // 256: Speed, 260: Power, 264: Torque
     // 268: TireTemp x4, 284: Boost, 288: Fuel ...
     // 312: LapNumber, 314: RacePosition, 315: Accel, 316: Brake ...
-    skip_f32_fields(&mut c, 3)?; // bytes 232–243 unknown
     let position_x = c.read_f32::<LittleEndian>()?;        // 244 world X
     let position_y = c.read_f32::<LittleEndian>()?;        // 248 world Y (height)
     let position_z = c.read_f32::<LittleEndian>()?;        // 252 world Z
@@ -156,13 +174,13 @@ pub fn parse(buf: &[u8]) -> Result<TelemetryPacket, ParseError> {
     let steer = c.read_i8()?;                               // 320
     let _driving_line = c.read_i8()?;                       // 321
     let _ai_brake_diff = c.read_i8()?;                      // 322
-    // Now at byte 323
+    // Official FH6 packets are 324 bytes; the last byte is currently unused by this app.
 
-    // Optional tire wear (bytes 323+)
-    let tire_wear_fl = if buf.len() >= 327 { Some(c.read_f32::<LittleEndian>()?) } else { None };
-    let tire_wear_fr = if buf.len() >= 331 { Some(c.read_f32::<LittleEndian>()?) } else { None };
-    let tire_wear_rl = if buf.len() >= 335 { Some(c.read_f32::<LittleEndian>()?) } else { None };
-    let tire_wear_rr = if buf.len() >= 339 { Some(c.read_f32::<LittleEndian>()?) } else { None };
+    // FH6 does not include TireWear fields. Keep nullable fields for frontend compatibility.
+    let tire_wear_fl = None;
+    let tire_wear_fr = None;
+    let tire_wear_rl = None;
+    let tire_wear_rr = None;
 
     Ok(TelemetryPacket {
         is_race_on,
@@ -176,6 +194,9 @@ pub fn parse(buf: &[u8]) -> Result<TelemetryPacket, ParseError> {
         vel_x,
         vel_y,
         vel_z,
+        angular_velocity_x,
+        angular_velocity_y,
+        angular_velocity_z,
         position_x,
         position_y,
         position_z,
@@ -187,10 +208,18 @@ pub fn parse(buf: &[u8]) -> Result<TelemetryPacket, ParseError> {
         tire_slip_angle_fr,
         tire_slip_angle_rl,
         tire_slip_angle_rr,
+        tire_combined_slip_fl,
+        tire_combined_slip_fr,
+        tire_combined_slip_rl,
+        tire_combined_slip_rr,
         car_ordinal,
         car_class,
         car_pi,
         drivetrain_type,
+        num_cylinders,
+        car_group,
+        smashable_vel_diff,
+        smashable_mass,
         speed_ms,
         power,
         torque,
@@ -242,7 +271,7 @@ mod tests {
     }
 
     fn packet_with_speed(speed_ms: f32) -> Vec<u8> {
-        let mut buf = zero_packet(323);
+        let mut buf = zero_packet(324);
         buf[256..260].copy_from_slice(&speed_ms.to_le_bytes());
         buf
     }
@@ -261,29 +290,37 @@ mod tests {
     }
 
     #[test]
-    fn accepts_323_byte_packet() {
-        let buf = zero_packet(323);
+    fn accepts_324_byte_packet() {
+        let buf = zero_packet(324);
         assert!(parse(&buf).is_ok());
     }
 
     #[test]
-    fn accepts_packet_with_tire_wear() {
-        let mut buf = zero_packet(327);
-        buf[323..327].copy_from_slice(&0.85f32.to_le_bytes());
+    fn rejects_323_byte_packet() {
+        let buf = zero_packet(323);
+        assert!(parse(&buf).is_err());
+    }
+
+    #[test]
+    fn fh6_has_no_tire_wear_fields() {
+        let buf = zero_packet(324);
         let pkt = parse(&buf).unwrap();
-        assert!((pkt.tire_wear_fl.unwrap() - 0.85).abs() < 0.001);
+        assert!(pkt.tire_wear_fl.is_none());
+        assert!(pkt.tire_wear_fr.is_none());
+        assert!(pkt.tire_wear_rl.is_none());
+        assert!(pkt.tire_wear_rr.is_none());
     }
 
     #[test]
     fn is_race_on_zero_parses_as_false() {
-        let buf = zero_packet(323);
+        let buf = zero_packet(324);
         let pkt = parse(&buf).unwrap();
         assert!(!pkt.is_race_on);
     }
 
     #[test]
     fn is_race_on_one_parses_as_true() {
-        let mut buf = zero_packet(323);
+        let mut buf = zero_packet(324);
         buf[0..4].copy_from_slice(&1i32.to_le_bytes());
         let pkt = parse(&buf).unwrap();
         assert!(pkt.is_race_on);
@@ -291,7 +328,7 @@ mod tests {
 
     #[test]
     fn tire_temp_converted_from_fahrenheit() {
-        let mut buf = zero_packet(323);
+        let mut buf = zero_packet(324);
         // 212°F = 100°C, TireTemp FL is at byte 268
         buf[268..272].copy_from_slice(&212.0f32.to_le_bytes());
         let pkt = parse(&buf).unwrap();
@@ -300,7 +337,7 @@ mod tests {
 
     #[test]
     fn parses_world_position() {
-        let mut buf = zero_packet(323);
+        let mut buf = zero_packet(324);
         buf[244..248].copy_from_slice(&123.5f32.to_le_bytes());
         buf[248..252].copy_from_slice(&7.25f32.to_le_bytes());
         buf[252..256].copy_from_slice(&(-987.0f32).to_le_bytes());
@@ -311,14 +348,30 @@ mod tests {
     }
 
     #[test]
-    fn partial_tire_wear_fl_only() {
-        let mut buf = zero_packet(327);
-        // Tire wear FL starts at byte 323
-        buf[323..327].copy_from_slice(&0.50f32.to_le_bytes());
+    fn parses_fh6_specific_fields() {
+        let mut buf = zero_packet(324);
+        buf[44..48].copy_from_slice(&1.25f32.to_le_bytes());
+        buf[48..52].copy_from_slice(&2.5f32.to_le_bytes());
+        buf[52..56].copy_from_slice(&3.75f32.to_le_bytes());
+        buf[180..184].copy_from_slice(&0.11f32.to_le_bytes());
+        buf[184..188].copy_from_slice(&0.22f32.to_le_bytes());
+        buf[188..192].copy_from_slice(&0.33f32.to_le_bytes());
+        buf[192..196].copy_from_slice(&0.44f32.to_le_bytes());
+        buf[228..232].copy_from_slice(&6i32.to_le_bytes());
+        buf[232..236].copy_from_slice(&1234u32.to_le_bytes());
+        buf[236..240].copy_from_slice(&4.5f32.to_le_bytes());
+        buf[240..244].copy_from_slice(&125.0f32.to_le_bytes());
         let pkt = parse(&buf).unwrap();
-        assert!((pkt.tire_wear_fl.unwrap() - 0.50).abs() < 0.001);
-        assert!(pkt.tire_wear_fr.is_none());
-        assert!(pkt.tire_wear_rl.is_none());
-        assert!(pkt.tire_wear_rr.is_none());
+        assert!((pkt.angular_velocity_x - 1.25).abs() < 0.001);
+        assert!((pkt.angular_velocity_y - 2.5).abs() < 0.001);
+        assert!((pkt.angular_velocity_z - 3.75).abs() < 0.001);
+        assert!((pkt.tire_combined_slip_fl - 0.11).abs() < 0.001);
+        assert!((pkt.tire_combined_slip_fr - 0.22).abs() < 0.001);
+        assert!((pkt.tire_combined_slip_rl - 0.33).abs() < 0.001);
+        assert!((pkt.tire_combined_slip_rr - 0.44).abs() < 0.001);
+        assert_eq!(pkt.num_cylinders, 6);
+        assert_eq!(pkt.car_group, 1234);
+        assert!((pkt.smashable_vel_diff - 4.5).abs() < 0.001);
+        assert!((pkt.smashable_mass - 125.0).abs() < 0.001);
     }
 }

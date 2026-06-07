@@ -28,6 +28,12 @@ pub fn router(state: ServerState) -> axum::Router {
         .route("/sessions/:id", delete(routes::delete_session))
         .route("/sessions/:id/rename", post(routes::rename_session))
         .route("/sessions/:id/bookmark", post(routes::set_bookmark))
+        .route("/drift-runs", get(routes::list_drift_runs))
+        .route("/drift-runs/:id/manual-score", post(routes::set_drift_run_manual_score))
+        .route("/drift-zones", get(routes::list_drift_zones))
+        .route("/drift-zones", post(routes::save_drift_zone))
+        .route("/drift-zones/:id", post(routes::save_drift_zone_with_id))
+        .route("/drift-zones/:id", delete(routes::delete_drift_zone))
         .route("/settings", get(routes::get_settings))
         .route("/settings", post(routes::save_settings));
 
