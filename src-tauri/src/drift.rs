@@ -23,8 +23,13 @@ struct RunnableZone {
     id: i64,
     name: String,
     polygon: Vec<Point>,
-    start_gate: [Point; 2],
-    finish_gate: [Point; 2],
+    // The two end gates. A run may enter through either and must exit the other,
+    // so the zone is bidirectional — neither is intrinsically start nor finish.
+    gate_a: [Point; 2],
+    gate_b: [Point; 2],
+    /// Metres a point may stray outside the polygon and still count as inside,
+    /// to tolerate sparse/corner-cutting boundary geometry. Per-zone tunable.
+    slack_m: f64,
     params: scoring::ScoringParams,
 }
 
@@ -32,6 +37,8 @@ struct RunnableZone {
 struct ActiveRun {
     id: i64,
     zone: RunnableZone,
+    /// The gate this run must cross to complete — the one it did NOT enter through.
+    finish_gate: [Point; 2],
     started_at: i64,
     packet_count: i64,
 }
@@ -121,7 +128,7 @@ impl DriftRunManager {
         self.last_point = Some(current);
 
         if let Some(run) = self.active.as_mut() {
-            if segment_crosses_gate(previous, current, run.zone.finish_gate) {
+            if segment_crosses_gate(previous, current, run.finish_gate) {
                 if let Err(e) = db::insert_drift_run_packet(conn, run.id, pkt.timestamp_ms, raw) {
                     eprintln!("[drift] packet insert error: {e}");
                 } else {
@@ -142,7 +149,7 @@ impl DriftRunManager {
                 return Some(status);
             }
 
-            if !point_in_polygon(current, &run.zone.polygon) {
+            if !within_slack(current, &run.zone.polygon, run.zone.slack_m) {
                 let reason = "left drift zone before finish".to_string();
                 let (score, breakdown) = score_from_packets(conn, run.id, &run.zone.params);
                 let status = DriftRunStatus::closed(run, now_ms, false, Some(reason.clone()));
@@ -182,21 +189,36 @@ impl DriftRunManager {
                 return None;
             }
         };
-        let started_zone = zones
+        // A run starts when the car crosses into the polygon through *either* end
+        // gate; whichever gate it crossed is the entry, the other is the finish.
+        let started = zones
             .iter()
             .filter_map(RunnableZone::from_row)
-            .filter(|zone| {
-                !point_in_polygon(previous, &zone.polygon)
-                    && point_in_polygon(current, &zone.polygon)
-                    && segment_intersects(previous, current, zone.start_gate[0], zone.start_gate[1])
+            .filter_map(|zone| {
+                if point_in_polygon(previous, &zone.polygon)
+                    || !point_in_polygon(current, &zone.polygon)
+                {
+                    return None;
+                }
+                let crossed_a = segment_intersects(previous, current, zone.gate_a[0], zone.gate_a[1]);
+                let crossed_b = segment_intersects(previous, current, zone.gate_b[0], zone.gate_b[1]);
+                // Entry gate (for ranking) and the opposite gate (to finish on).
+                let (entry, finish) = if crossed_a {
+                    (zone.gate_a, zone.gate_b)
+                } else if crossed_b {
+                    (zone.gate_b, zone.gate_a)
+                } else {
+                    return None;
+                };
+                Some((zone, entry, finish))
             })
             .min_by(|a, b| {
-                gate_distance_sq(current, a.start_gate)
-                    .partial_cmp(&gate_distance_sq(current, b.start_gate))
+                gate_distance_sq(current, a.1)
+                    .partial_cmp(&gate_distance_sq(current, b.1))
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
 
-        let Some(zone) = started_zone else {
+        let Some((zone, _entry, finish_gate)) = started else {
             return None;
         };
 
@@ -214,6 +236,7 @@ impl DriftRunManager {
                 let mut run = ActiveRun {
                     id,
                     zone,
+                    finish_gate,
                     started_at: now_ms,
                     packet_count: 0,
                 };
@@ -246,12 +269,12 @@ impl RunnableZone {
         if !row.active || row.left_boundary.len() < 2 || row.right_boundary.len() < 2 {
             return None;
         }
-        let start = gate_or_derived(
+        let gate_a = gate_or_derived(
             &row.start_gate,
             row.left_boundary.first()?,
             row.right_boundary.first()?,
         );
-        let finish = gate_or_derived(
+        let gate_b = gate_or_derived(
             &row.finish_gate,
             row.left_boundary.last()?,
             row.right_boundary.last()?,
@@ -265,11 +288,59 @@ impl RunnableZone {
             id: row.id,
             name: row.name.clone(),
             polygon,
-            start_gate: start,
-            finish_gate: finish,
+            gate_a,
+            gate_b,
+            slack_m: slack_from_config(&row.scoring_config),
             params: scoring::ScoringParams::from_config(&row.scoring_config),
         })
     }
+}
+
+/// Per-zone boundary slack (metres) from the zone's `scoring_config` bag,
+/// defaulting to 3 m. Stored there (not a dedicated column) since it's just
+/// another per-zone knob.
+fn slack_from_config(config: &serde_json::Value) -> f64 {
+    config
+        .get("boundarySlackM")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(3.0)
+        .max(0.0)
+}
+
+/// True if `point` is inside the polygon, or outside it by no more than
+/// `slack_m` metres (distance to the nearest edge). World coords are in metres.
+pub fn within_slack(point: Point, polygon: &[Point], slack_m: f64) -> bool {
+    if point_in_polygon(point, polygon) {
+        return true;
+    }
+    if slack_m <= 0.0 || polygon.len() < 2 {
+        return false;
+    }
+    let mut min_dist = f64::INFINITY;
+    let mut j = polygon.len() - 1;
+    for i in 0..polygon.len() {
+        min_dist = min_dist.min(point_segment_dist(point, polygon[j], polygon[i]));
+        if min_dist <= slack_m {
+            return true;
+        }
+        j = i;
+    }
+    min_dist <= slack_m
+}
+
+/// Euclidean distance from `p` to segment `a`–`b`.
+fn point_segment_dist(p: Point, a: Point, b: Point) -> f64 {
+    let dx = b.x - a.x;
+    let dz = b.z - a.z;
+    let len2 = dx * dx + dz * dz;
+    let t = if len2 <= 1e-12 {
+        0.0
+    } else {
+        (((p.x - a.x) * dx + (p.z - a.z) * dz) / len2).clamp(0.0, 1.0)
+    };
+    let projx = a.x + t * dx;
+    let projz = a.z + t * dz;
+    ((p.x - projx).powi(2) + (p.z - projz).powi(2)).sqrt()
 }
 
 /// Re-read a run's stored packets and score them. Runs once on close, off the
@@ -577,7 +648,8 @@ mod tests {
                 start_gate: Vec::new(),
                 finish_gate: Vec::new(),
                 split_gates: Vec::new(),
-                scoring_config: serde_json::json!({}),
+                // Zero slack → strict geofence for this test.
+                scoring_config: serde_json::json!({ "boundarySlackM": 0.0 }),
             },
             1,
         )
@@ -596,6 +668,61 @@ mod tests {
             rows[0].invalid_reason.as_deref(),
             Some("left drift zone before finish")
         );
+    }
+
+    fn save_square_zone(conn: &Connection, slack: f64) -> i64 {
+        db::save_drift_zone(
+            conn,
+            &db::DriftZoneInput {
+                id: None,
+                name: "Run".into(),
+                description: None,
+                active: true,
+                left_boundary: square_zone().left_boundary,
+                right_boundary: square_zone().right_boundary,
+                start_gate: Vec::new(),
+                finish_gate: Vec::new(),
+                split_gates: Vec::new(),
+                scoring_config: serde_json::json!({ "boundarySlackM": slack }),
+            },
+            1,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn run_tolerates_boundary_slack() {
+        // With 3 m slack, a 1 m excursion past the edge keeps the run alive; a
+        // 4 m excursion still voids it.
+        let conn = in_memory();
+        save_square_zone(&conn, 3.0);
+        let mut mgr = DriftRunManager::new();
+        let raw = vec![1u8; 324];
+        mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 1000);
+        mgr.note_packet(&conn, &packet(2.0, 1.0), &raw, 1100);
+        // x=6 is 1 m outside the x=5 edge → within slack → still running.
+        let still = mgr.note_packet(&conn, &packet(6.0, 5.0), &raw, 1200).unwrap();
+        assert_eq!(still.state, "running");
+        // x=9 is 4 m outside → beyond slack → invalid.
+        let gone = mgr.note_packet(&conn, &packet(9.0, 5.0), &raw, 1300).unwrap();
+        assert_eq!(gone.state, "invalid");
+    }
+
+    #[test]
+    fn run_enters_from_either_gate() {
+        // Drive the zone the "reverse" way: enter through the far (z=10) gate and
+        // exit through the near (z=0) gate. Bidirectional detection completes it.
+        let conn = in_memory();
+        save_square_zone(&conn, 0.0);
+        let mut mgr = DriftRunManager::new();
+        let raw = vec![1u8; 324];
+        assert!(mgr.note_packet(&conn, &packet(2.0, 11.0), &raw, 1000).is_none());
+        let started = mgr.note_packet(&conn, &packet(2.0, 9.0), &raw, 1100).unwrap();
+        assert_eq!(started.state, "running");
+        let finished = mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 2000).unwrap();
+        assert_eq!(finished.state, "completed");
+        let rows = db::list_drift_runs(&conn).unwrap();
+        assert!(rows[0].valid);
     }
 
     #[test]
