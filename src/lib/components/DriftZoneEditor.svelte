@@ -1,12 +1,16 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { packet } from '$lib/stores/telemetry';
+  import { onDestroy, onMount } from 'svelte';
+  import type { LayerGroup, Map as LMap, Marker, TileLayer } from 'leaflet';
+  import { packet, displayPacket } from '$lib/stores/telemetry';
   import {
     deleteDriftZone,
     driftZones,
     loadDriftZones,
     saveDriftZone,
+    settings,
   } from '$lib/stores/sessions';
+  import { effectiveMapConfig, type EffectiveMapConfig } from '$lib/mapDefaults';
+  import { xyzSimpleCRS } from '$lib/mapCrs';
   import type { DriftZoneInput, DriftZoneRow, ZonePoint } from '$lib/types';
 
   let { onClose }: { onClose: () => void } = $props();
@@ -54,16 +58,59 @@
   let saving = $state(false);
   let dragging = $state<{ side: BoundarySide; index: number } | null>(null);
   let svgEl = $state<SVGSVGElement | null>(null);
+  let mapHost = $state<HTMLDivElement | null>(null);
+  let L = $state<typeof import('leaflet') | null>(null);
+  let map = $state<LMap | null>(null);
+  let tiles = $state<TileLayer | null>(null);
+  let boundaryLayer = $state<LayerGroup | null>(null);
+  let markerLayer = $state<LayerGroup | null>(null);
+  let liveMarker = $state<Marker | null>(null);
+  let resizeObserver: ResizeObserver | null = null;
+  let lastKnownPoint = $state<ZonePoint | null>(null);
+  let lastKnownAt = $state(0);
+  let mapReady = $state(false);
 
   onMount(() => {
     void loadDriftZones();
   });
 
-  let livePoint = $derived.by<ZonePoint | null>(() => {
-    const p = $packet;
-    if (!p || (p.positionX === 0 && p.positionZ === 0)) return null;
-    return { x: p.positionX, z: p.positionZ };
+  onDestroy(() => {
+    resizeObserver?.disconnect();
+    map?.remove();
+    map = null;
   });
+
+  $effect(() => {
+    const p = $packet ?? $displayPacket;
+    if (!p || (p.positionX === 0 && p.positionZ === 0)) return;
+    lastKnownPoint = { x: p.positionX, z: p.positionZ };
+    lastKnownAt = Date.now();
+  });
+
+  let livePoint = $derived(lastKnownPoint);
+
+  let liveAgeSecs = $derived(lastKnownAt ? Math.max(0, (Date.now() - lastKnownAt) / 1000) : 0);
+
+  let cfg = $derived($settings ? effectiveMapConfig($settings) : null);
+
+  let calib = $derived.by(() => {
+    if (!cfg) return null;
+    const aw = cfg.calAWorld, bw = cfg.calBWorld;
+    const ap = cfg.calAPix, bp = cfg.calBPix;
+    const dWX = bw[0] - aw[0];
+    const dWZ = bw[1] - aw[1];
+    if (Math.abs(dWX) < 1e-6 || Math.abs(dWZ) < 1e-6) return null;
+    const mX = (bp[0] - ap[0]) / dWX;
+    const mZ = (bp[1] - ap[1]) / dWZ;
+    return {
+      mX,
+      mZ,
+      bX: ap[0] - mX * aw[0],
+      bY: ap[1] - mZ * aw[1],
+    };
+  });
+
+  let mapUsable = $derived(!!cfg && !!calib);
 
   let allPoints = $derived([
     ...draft.leftBoundary,
@@ -121,6 +168,157 @@
     };
   }
 
+  function worldToPix(point: ZonePoint): [number, number] {
+    const c = calib!;
+    return [c.mX * point.x + c.bX, c.mZ * point.z + c.bY];
+  }
+
+  function pixToWorld(pixel: { x: number; y: number }): ZonePoint {
+    const c = calib!;
+    return {
+      x: (pixel.x - c.bX) / c.mX,
+      z: (pixel.y - c.bY) / c.mZ,
+    };
+  }
+
+  function worldToLatLng(point: ZonePoint) {
+    const [x, y] = worldToPix(point);
+    return map!.unproject(L!.point(x, y), cfg!.maxZoom);
+  }
+
+  function latLngToWorld(latlng: Parameters<NonNullable<typeof map>['project']>[0]): ZonePoint {
+    const pixel = map!.project(latlng, cfg!.maxZoom);
+    return pixToWorld(pixel);
+  }
+
+  function markerIcon(side: BoundarySide, label: string) {
+    const cls = side === 'left' ? 'zone-marker-left' : 'zone-marker-right';
+    return L!.divIcon({
+      className: `zone-marker ${cls}`,
+      html: `<span>${label}</span>`,
+      iconSize: [24, 24],
+      iconAnchor: [12, 12],
+    });
+  }
+
+  function liveIcon() {
+    return L!.divIcon({
+      className: 'zone-marker zone-marker-live',
+      html: '<span>●</span>',
+      iconSize: [22, 22],
+      iconAnchor: [11, 11],
+    });
+  }
+
+  async function initMap(config: EffectiveMapConfig) {
+    if (!mapHost || map || !mapUsable) return;
+    L = await import('leaflet');
+    await import('leaflet/dist/leaflet.css');
+    map = L.map(mapHost, {
+      crs: xyzSimpleCRS(L),
+      attributionControl: false,
+      zoomControl: true,
+      minZoom: config.minZoom,
+      maxZoom: config.viewMaxZoom,
+    });
+    tiles = L.tileLayer(config.tileUrl, {
+      minZoom: config.minZoom,
+      maxZoom: config.viewMaxZoom,
+      maxNativeZoom: config.maxZoom,
+      tileSize: config.tileSize,
+      noWrap: true,
+    }).addTo(map);
+    boundaryLayer = L.layerGroup().addTo(map);
+    markerLayer = L.layerGroup().addTo(map);
+    map.setView(
+      map.unproject(L.point(config.defaultCenter[0], config.defaultCenter[1]), config.maxZoom),
+      config.defaultZoom
+    );
+    resizeObserver = new ResizeObserver(() => map?.invalidateSize());
+    resizeObserver.observe(mapHost);
+    mapReady = true;
+    redrawLeaflet();
+  }
+
+  $effect(() => {
+    if (mapHost && cfg && mapUsable && !map) void initMap(cfg);
+  });
+
+  function redrawLeaflet() {
+    if (!map || !L || !boundaryLayer || !markerLayer || !mapUsable) return;
+    boundaryLayer.clearLayers();
+    markerLayer.clearLayers();
+
+    if (draft.leftBoundary.length > 1) {
+      L.polyline(draft.leftBoundary.map(worldToLatLng), {
+        color: '#22c55e',
+        weight: 5,
+        opacity: 0.95,
+      }).addTo(boundaryLayer);
+    }
+    if (draft.rightBoundary.length > 1) {
+      L.polyline(draft.rightBoundary.map(worldToLatLng), {
+        color: '#3b82f6',
+        weight: 5,
+        opacity: 0.95,
+      }).addTo(boundaryLayer);
+    }
+    if (draft.leftBoundary.length && draft.rightBoundary.length) {
+      L.polyline([draft.leftBoundary[0], draft.rightBoundary[0]].map(worldToLatLng), {
+        color: '#f59e0b',
+        weight: 3,
+        dashArray: '10 7',
+      }).addTo(boundaryLayer);
+      L.polyline([
+        draft.leftBoundary[draft.leftBoundary.length - 1],
+        draft.rightBoundary[draft.rightBoundary.length - 1],
+      ].map(worldToLatLng), {
+        color: '#ef4444',
+        weight: 3,
+        dashArray: '10 7',
+      }).addTo(boundaryLayer);
+    }
+
+    for (const side of ['left', 'right'] as BoundarySide[]) {
+      boundary(side).forEach((point, index) => {
+        const marker = L!.marker(worldToLatLng(point), {
+          draggable: true,
+          icon: markerIcon(side, `${side[0].toUpperCase()}${index + 1}`),
+        }).addTo(markerLayer!);
+        marker.on('dragend', () => {
+          const points = [...boundary(side)];
+          points[index] = latLngToWorld(marker.getLatLng());
+          setBoundary(side, points);
+        });
+        marker.on('dblclick', () => deletePoint(side, index));
+      });
+    }
+
+    if (livePoint) {
+      liveMarker = L.marker(worldToLatLng(livePoint), {
+        icon: liveIcon(),
+        interactive: false,
+      }).addTo(markerLayer);
+    } else {
+      liveMarker = null;
+    }
+  }
+
+  function fitMapToGeometry() {
+    if (!map || !L || !mapUsable) return;
+    const points = allPoints;
+    if (!points.length) return;
+    const bounds = L.latLngBounds(points.map(worldToLatLng));
+    map.fitBounds(bounds.pad(0.2), { maxZoom: cfg!.defaultZoom + 1 });
+  }
+
+  $effect(() => {
+    void draft.leftBoundary;
+    void draft.rightBoundary;
+    void livePoint;
+    if (mapReady) redrawLeaflet();
+  });
+
   function path(points: ZonePoint[]): string {
     return points
       .map((p) => {
@@ -134,6 +332,7 @@
     draft = toInput(zone);
     selectedId = zone.id;
     status = '';
+    setTimeout(fitMapToGeometry, 0);
   }
 
   function newZone() {
@@ -153,11 +352,12 @@
 
   function capturePoint() {
     if (!livePoint) {
-      status = 'No live world position available.';
+      status = 'Waiting for the first telemetry world position. Drive briefly, then reopen/click capture.';
       return;
     }
     setBoundary(activeSide, [...boundary(activeSide), { ...livePoint }]);
-    status = `Captured ${activeSide} point ${boundary(activeSide).length}.`;
+    status = `Captured ${activeSide} point ${boundary(activeSide).length} from last known telemetry.`;
+    setTimeout(fitMapToGeometry, 0);
   }
 
   function removeLastPoint() {
@@ -278,81 +478,89 @@
         <button onclick={capturePoint}>Capture live point</button>
         <button onclick={removeLastPoint}>Remove last {activeSide}</button>
         <button onclick={reverseBoundaries}>Reverse direction</button>
+        <button onclick={fitMapToGeometry}>Fit map</button>
         <span class="live">
-          {livePoint ? `Live X ${livePoint.x.toFixed(1)} / Z ${livePoint.z.toFixed(1)}` : 'No live position'}
+          {livePoint
+            ? `Last X ${livePoint.x.toFixed(1)} / Z ${livePoint.z.toFixed(1)}${liveAgeSecs > 2 ? ` (${liveAgeSecs.toFixed(0)}s old)` : ''}`
+            : 'Waiting for telemetry'}
         </span>
       </div>
 
       <div class="map-wrap">
-        <svg
-          bind:this={svgEl}
-          viewBox={`0 0 ${width} ${height}`}
-          onpointermove={moveDrag}
-          onpointerup={stopDrag}
-          onpointercancel={stopDrag}
-          role="img"
-          aria-label="Drift zone boundary editor"
-        >
-          <rect x="0" y="0" width={width} height={height} />
+        {#if mapUsable}
+          <div class="leaflet-host" bind:this={mapHost}></div>
+        {:else}
+          <div class="fallback-note">Map calibration unavailable; showing uncalibrated world-coordinate editor.</div>
+          <svg
+            bind:this={svgEl}
+            viewBox={`0 0 ${width} ${height}`}
+            onpointermove={moveDrag}
+            onpointerup={stopDrag}
+            onpointercancel={stopDrag}
+            role="img"
+            aria-label="Drift zone boundary editor"
+          >
+            <rect x="0" y="0" width={width} height={height} />
 
-          {#if draft.leftBoundary.length > 1}
-            <polyline class="boundary left" points={path(draft.leftBoundary)} />
-          {/if}
-          {#if draft.rightBoundary.length > 1}
-            <polyline class="boundary right" points={path(draft.rightBoundary)} />
-          {/if}
+            {#if draft.leftBoundary.length > 1}
+              <polyline class="boundary left" points={path(draft.leftBoundary)} />
+            {/if}
+            {#if draft.rightBoundary.length > 1}
+              <polyline class="boundary right" points={path(draft.rightBoundary)} />
+            {/if}
 
-          {#if draft.leftBoundary.length > 0 && draft.rightBoundary.length > 0}
-            <polyline
-              class="gate start"
-              points={gateLine([draft.leftBoundary[0], draft.rightBoundary[0]])}
-            />
-            <polyline
-              class="gate finish"
-              points={gateLine([
-                draft.leftBoundary[draft.leftBoundary.length - 1],
-                draft.rightBoundary[draft.rightBoundary.length - 1],
-              ])}
-            />
-          {/if}
-
-          {#if livePoint}
-            {@const live = toSvg(livePoint)}
-            <circle class="live-dot" cx={live[0]} cy={live[1]} r="7" />
-          {/if}
-
-          {#each draft.leftBoundary as point, index}
-            {@const p = toSvg(point)}
-            <g class="point-group">
-              <!-- svelte-ignore a11y_no_static_element_interactions -->
-              <circle
-                class="point left"
-                cx={p[0]}
-                cy={p[1]}
-                r="8"
-                onpointerdown={(e) => startDrag(e, 'left', index)}
-                ondblclick={() => deletePoint('left', index)}
+            {#if draft.leftBoundary.length > 0 && draft.rightBoundary.length > 0}
+              <polyline
+                class="gate start"
+                points={gateLine([draft.leftBoundary[0], draft.rightBoundary[0]])}
               />
-              <text x={p[0] + 12} y={p[1] - 10}>L{index + 1}</text>
-            </g>
-          {/each}
-
-          {#each draft.rightBoundary as point, index}
-            {@const p = toSvg(point)}
-            <g class="point-group">
-              <!-- svelte-ignore a11y_no_static_element_interactions -->
-              <circle
-                class="point right"
-                cx={p[0]}
-                cy={p[1]}
-                r="8"
-                onpointerdown={(e) => startDrag(e, 'right', index)}
-                ondblclick={() => deletePoint('right', index)}
+              <polyline
+                class="gate finish"
+                points={gateLine([
+                  draft.leftBoundary[draft.leftBoundary.length - 1],
+                  draft.rightBoundary[draft.rightBoundary.length - 1],
+                ])}
               />
-              <text x={p[0] + 12} y={p[1] - 10}>R{index + 1}</text>
-            </g>
-          {/each}
-        </svg>
+            {/if}
+
+            {#if livePoint}
+              {@const live = toSvg(livePoint)}
+              <circle class="live-dot" cx={live[0]} cy={live[1]} r="7" />
+            {/if}
+
+            {#each draft.leftBoundary as point, index}
+              {@const p = toSvg(point)}
+              <g class="point-group">
+                <!-- svelte-ignore a11y_no_static_element_interactions -->
+                <circle
+                  class="point left"
+                  cx={p[0]}
+                  cy={p[1]}
+                  r="8"
+                  onpointerdown={(e) => startDrag(e, 'left', index)}
+                  ondblclick={() => deletePoint('left', index)}
+                />
+                <text x={p[0] + 12} y={p[1] - 10}>L{index + 1}</text>
+              </g>
+            {/each}
+
+            {#each draft.rightBoundary as point, index}
+              {@const p = toSvg(point)}
+              <g class="point-group">
+                <!-- svelte-ignore a11y_no_static_element_interactions -->
+                <circle
+                  class="point right"
+                  cx={p[0]}
+                  cy={p[1]}
+                  r="8"
+                  onpointerdown={(e) => startDrag(e, 'right', index)}
+                  ondblclick={() => deletePoint('right', index)}
+                />
+                <text x={p[0] + 12} y={p[1] - 10}>R{index + 1}</text>
+              </g>
+            {/each}
+          </svg>
+        {/if}
       </div>
 
       <div class="details">
@@ -532,6 +740,48 @@
     width: 100%;
     height: min(56vh, 640px);
     touch-action: none;
+  }
+  .leaflet-host {
+    width: 100%;
+    height: min(56vh, 640px);
+    min-height: 380px;
+  }
+  .fallback-note {
+    padding: 0.45rem 0.6rem;
+    color: var(--tx-dim);
+    font-size: 0.72rem;
+    border-bottom: 1px solid var(--bd-dim);
+    background: var(--bg-card);
+  }
+  :global(.zone-marker) {
+    background: none;
+    border: none;
+  }
+  :global(.zone-marker span) {
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 999px;
+    border: 2px solid #020617;
+    color: #020617;
+    font-size: 0.55rem;
+    font-weight: 800;
+    box-shadow: 0 1px 5px rgba(0, 0, 0, 0.45);
+  }
+  :global(.zone-marker-left span) {
+    background: #22c55e;
+  }
+  :global(.zone-marker-right span) {
+    background: #3b82f6;
+  }
+  :global(.zone-marker-live span) {
+    background: #fbbf24;
+    color: #020617;
+  }
+  :global(.leaflet-container) {
+    background: var(--bg-card);
+    font: inherit;
   }
   rect {
     fill: var(--bg-body);
