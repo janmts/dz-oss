@@ -56,6 +56,34 @@ pub fn list_drift_runs(state: &AppState) -> Result<Vec<db::DriftRunRow>, String>
     db::list_drift_runs(&conn).map_err(|e| e.to_string())
 }
 
+/// Re-score every stored run from its saved packets using the current scoring
+/// params (per-zone config over defaults). Returns the number of runs updated.
+/// Used to refresh computed scores after the formula is tuned.
+pub fn recompute_drift_scores(state: &AppState) -> Result<usize, String> {
+    let conn = state.db.lock().unwrap();
+    let refs = db::list_drift_run_refs(&conn).map_err(|e| e.to_string())?;
+    let mut count = 0;
+    for (run_id, zone_id) in refs {
+        let params = match zone_id {
+            Some(z) => db::get_drift_zone(&conn, z)
+                .map(|row| crate::scoring::ScoringParams::from_config(&row.scoring_config))
+                .unwrap_or_default(),
+            None => crate::scoring::ScoringParams::default(),
+        };
+        let blobs = db::get_drift_run_packets(&conn, run_id).map_err(|e| e.to_string())?;
+        let pkts: Vec<_> = blobs
+            .iter()
+            .filter_map(|b| crate::parser::parse(b).ok())
+            .collect();
+        let result = crate::scoring::score_run(&pkts, &params);
+        let breakdown = serde_json::to_string(&result).ok();
+        db::update_drift_run_score(&conn, run_id, Some(result.score as f32), breakdown.as_deref())
+            .map_err(|e| e.to_string())?;
+        count += 1;
+    }
+    Ok(count)
+}
+
 pub fn set_drift_run_manual_score(
     state: &AppState,
     run_id: i64,

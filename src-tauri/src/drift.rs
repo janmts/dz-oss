@@ -1,7 +1,7 @@
 use rusqlite::Connection;
 use serde::Serialize;
 
-use crate::{db, parser};
+use crate::{db, parser, scoring};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Point {
@@ -25,6 +25,7 @@ struct RunnableZone {
     polygon: Vec<Point>,
     start_gate: [Point; 2],
     finish_gate: [Point; 2],
+    params: scoring::ScoringParams,
 }
 
 #[derive(Debug, Clone)]
@@ -126,9 +127,15 @@ impl DriftRunManager {
                 } else {
                     run.packet_count += 1;
                 }
+                let (score, breakdown) = score_from_packets(conn, run.id, &run.zone.params);
                 let status = DriftRunStatus::closed(run, now_ms, true, None);
-                if let Err(e) = db::close_drift_run(conn, run.id, now_ms, true, None, None) {
+                if let Err(e) = db::close_drift_run(conn, run.id, now_ms, true, None, score) {
                     eprintln!("[drift] close error: {e}");
+                }
+                if let Err(e) =
+                    db::update_drift_run_score(conn, run.id, score, breakdown.as_deref())
+                {
+                    eprintln!("[drift] score store error: {e}");
                 }
                 self.active = None;
                 self.last_status = status.clone();
@@ -137,11 +144,17 @@ impl DriftRunManager {
 
             if !point_in_polygon(current, &run.zone.polygon) {
                 let reason = "left drift zone before finish".to_string();
+                let (score, breakdown) = score_from_packets(conn, run.id, &run.zone.params);
                 let status = DriftRunStatus::closed(run, now_ms, false, Some(reason.clone()));
                 if let Err(e) =
-                    db::close_drift_run(conn, run.id, now_ms, false, Some(&reason), None)
+                    db::close_drift_run(conn, run.id, now_ms, false, Some(&reason), score)
                 {
                     eprintln!("[drift] invalid close error: {e}");
+                }
+                if let Err(e) =
+                    db::update_drift_run_score(conn, run.id, score, breakdown.as_deref())
+                {
+                    eprintln!("[drift] score store error: {e}");
                 }
                 self.active = None;
                 self.last_status = status.clone();
@@ -254,8 +267,30 @@ impl RunnableZone {
             polygon,
             start_gate: start,
             finish_gate: finish,
+            params: scoring::ScoringParams::from_config(&row.scoring_config),
         })
     }
+}
+
+/// Re-read a run's stored packets and score them. Runs once on close, off the
+/// per-packet path; loading ~a few thousand blobs and parsing is well under a
+/// frame. Returns the (computed_score, breakdown_json) to persist.
+fn score_from_packets(
+    conn: &Connection,
+    run_id: i64,
+    params: &scoring::ScoringParams,
+) -> (Option<f32>, Option<String>) {
+    let blobs = match db::get_drift_run_packets(conn, run_id) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("[drift] score load error: {e}");
+            return (None, None);
+        }
+    };
+    let pkts: Vec<parser::TelemetryPacket> =
+        blobs.iter().filter_map(|b| parser::parse(b).ok()).collect();
+    let result = scoring::score_run(&pkts, params);
+    (Some(result.score as f32), serde_json::to_string(&result).ok())
 }
 
 fn gate_or_derived(

@@ -89,6 +89,18 @@ export interface SessionLap {
   lapTime: number;
 }
 
+/** Per-run scoring breakdown (mirrors scoring::RunScore in the backend). */
+export interface DriftScoreBreakdown {
+  score: number;
+  sampleCount: number;
+  driftTimeS: number;
+  totalTimeS: number;
+  avgAngleDeg: number;
+  maxAngleDeg: number;
+  avgSpeedMs: number;
+  maxMultiplier: number;
+}
+
 export interface DriftRunRow {
   id: number;
   zoneId: number | null;
@@ -104,6 +116,7 @@ export interface DriftRunRow {
   computedScore: number | null;
   manualScore: number | null;
   packetCount: number;
+  scoreBreakdown: DriftScoreBreakdown | null;
 }
 
 export interface DriftRunStatus {

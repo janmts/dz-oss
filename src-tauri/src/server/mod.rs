@@ -30,6 +30,7 @@ pub fn router(state: ServerState) -> axum::Router {
         .route("/sessions/:id/bookmark", post(routes::set_bookmark))
         .route("/drift-runs", get(routes::list_drift_runs))
         .route("/drift-runs/status", get(routes::drift_run_status))
+        .route("/drift-runs/recompute", post(routes::recompute_drift_scores))
         .route(
             "/drift-runs/:id/manual-score",
             post(routes::set_drift_run_manual_score),

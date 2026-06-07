@@ -123,6 +123,9 @@ fn migrate(conn: &Connection) {
         CREATE INDEX IF NOT EXISTS idx_drift_packets_run ON drift_run_packets(run_id);
         CREATE INDEX IF NOT EXISTS idx_drift_splits_run ON drift_run_splits(run_id);",
     );
+    // Per-run scoring breakdown (avg/max angle, drift time, multiplier, …) as
+    // JSON — drives the dashboard readout and the finetuning workflow.
+    let _ = conn.execute("ALTER TABLE drift_runs ADD COLUMN score_breakdown_json TEXT", []);
 }
 
 pub fn insert_lap(
@@ -607,6 +610,38 @@ pub fn insert_drift_run_packet(
     Ok(())
 }
 
+/// Raw packet blobs for a run, in time order — used to (re)score from history.
+pub fn get_drift_run_packets(conn: &Connection, run_id: i64) -> Result<Vec<Vec<u8>>> {
+    let mut stmt = conn.prepare(
+        "SELECT data FROM drift_run_packets WHERE run_id=?1 ORDER BY timestamp_ms ASC",
+    )?;
+    let rows = stmt.query_map([run_id], |r| r.get::<_, Vec<u8>>(0))?;
+    rows.collect()
+}
+
+/// (run_id, zone_id) for every run — lets the recompute pass pick the right
+/// per-zone scoring config without loading full rows.
+pub fn list_drift_run_refs(conn: &Connection) -> Result<Vec<(i64, Option<i64>)>> {
+    let mut stmt = conn.prepare("SELECT id, zone_id FROM drift_runs ORDER BY id ASC")?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    rows.collect()
+}
+
+/// Store a recomputed score + breakdown on an already-closed run. Leaves
+/// ended_at / valid / invalid_reason untouched.
+pub fn update_drift_run_score(
+    conn: &Connection,
+    run_id: i64,
+    computed_score: Option<f32>,
+    breakdown_json: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE drift_runs SET computed_score=?1, score_breakdown_json=?2 WHERE id=?3",
+        rusqlite::params![computed_score, breakdown_json, run_id],
+    )?;
+    Ok(())
+}
+
 pub fn set_drift_run_manual_score(
     conn: &Connection,
     run_id: i64,
@@ -643,6 +678,7 @@ pub struct DriftRunRow {
     pub computed_score: Option<f32>,
     pub manual_score: Option<i64>,
     pub packet_count: i64,
+    pub score_breakdown: Option<serde_json::Value>,
 }
 
 pub fn list_drift_runs(conn: &Connection) -> Result<Vec<DriftRunRow>> {
@@ -650,13 +686,14 @@ pub fn list_drift_runs(conn: &Connection) -> Result<Vec<DriftRunRow>> {
         "SELECT r.id, r.zone_id, r.started_at, r.ended_at, r.car_ordinal,
                 r.car_class, r.car_pi, r.drivetrain_type, r.car_group,
                 r.valid, r.invalid_reason, r.computed_score, s.manual_score,
-                r.packet_count
+                r.packet_count, r.score_breakdown_json
          FROM drift_runs r
          LEFT JOIN drift_run_scores s ON s.run_id = r.id
          ORDER BY r.started_at DESC
          LIMIT 200",
     )?;
     let rows = stmt.query_map([], |r| {
+        let breakdown: Option<String> = r.get(14)?;
         Ok(DriftRunRow {
             id: r.get(0)?,
             zone_id: r.get(1)?,
@@ -672,6 +709,7 @@ pub fn list_drift_runs(conn: &Connection) -> Result<Vec<DriftRunRow>> {
             computed_score: r.get(11)?,
             manual_score: r.get(12)?,
             packet_count: r.get(13)?,
+            score_breakdown: breakdown.and_then(|s| serde_json::from_str(&s).ok()),
         })
     })?;
     rows.collect()

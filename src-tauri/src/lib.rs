@@ -5,6 +5,7 @@ pub mod db;
 pub mod drift;
 pub mod event;
 pub mod parser;
+pub mod scoring;
 #[cfg(feature = "server")]
 pub mod server;
 pub mod session;
@@ -100,6 +101,7 @@ pub fn run() {
             commands::rename_session,
             commands::set_session_bookmark,
             commands::get_drift_runs,
+            commands::recompute_drift_scores,
             commands::set_drift_run_manual_score,
             commands::get_drift_run_status,
             commands::get_drift_zones,
