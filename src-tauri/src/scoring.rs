@@ -26,6 +26,10 @@ pub struct ScoringParams {
     pub spin_angle_deg: f64,
     /// Angle (deg) at which the angle factor peaks; beyond it returns diminish.
     pub sweet_angle_deg: f64,
+    /// Exponent for the low-angle ramp up to the sweet spot. 1.0 is linear;
+    /// 0.5 (sqrt) gives shallow high-speed drifts more credit, matching the
+    /// current scored FH6 samples better.
+    pub angle_power: f64,
     /// Speed (m/s) at which the speed factor saturates (~134 mph).
     pub speed_cap_ms: f64,
     /// Rear combined-slip threshold (normalized, 1.0 ≈ grip limit) for "sliding".
@@ -53,16 +57,17 @@ impl Default for ScoringParams {
             min_angle_deg: 12.0,
             spin_angle_deg: 90.0,
             sweet_angle_deg: 45.0,
+            angle_power: 0.5,
             speed_cap_ms: 60.0,
             slip_gate: 1.0,
             base_rate: 1000.0,
             mult_growth_per_s: 0.0,
             mult_cap: 1.0,
             transition_grace_s: 0.5,
-            // Least-squares fit across valid logged in-game scores (20 runs
+            // Least-squares fit across valid logged in-game scores (44 runs
             // across two zones) with the default no-combo model; re-derive as
             // more scores are logged.
-            scale: 15.455,
+            scale: 13.197,
         }
     }
 }
@@ -112,14 +117,17 @@ fn rear_combined_slip(pkt: &TelemetryPacket) -> f64 {
     (pkt.tire_combined_slip_rl.abs() as f64).max(pkt.tire_combined_slip_rr.abs() as f64)
 }
 
-/// Angle contribution: ramps 0→1 up to the sweet spot, then diminishes toward a
-/// 0.3 floor near spin-out. Zero outside the [min, spin] band.
+/// Angle contribution: ramps 0->1 up to the sweet spot using `angle_power`,
+/// then diminishes toward a 0.3 floor near spin-out. Zero outside the
+/// [min, spin] band.
 fn angle_factor(angle_deg: f64, p: &ScoringParams) -> f64 {
     if angle_deg < p.min_angle_deg || angle_deg > p.spin_angle_deg {
         return 0.0;
     }
     if angle_deg <= p.sweet_angle_deg {
-        angle_deg / p.sweet_angle_deg
+        let ramp = (angle_deg / p.sweet_angle_deg).clamp(0.0, 1.0);
+        let power = p.angle_power.max(1e-6);
+        ramp.powf(power)
     } else {
         let span = (p.spin_angle_deg - p.sweet_angle_deg).max(1e-6);
         (1.0 - 0.5 * (angle_deg - p.sweet_angle_deg) / span).max(0.3)
@@ -295,6 +303,18 @@ mod tests {
     }
 
     #[test]
+    fn default_angle_curve_boosts_shallow_drift() {
+        let params = ScoringParams::default();
+        let linear = ScoringParams {
+            angle_power: 1.0,
+            ..ScoringParams::default()
+        };
+
+        assert!(angle_factor(23.0, &params) > angle_factor(23.0, &linear));
+        assert!((angle_factor(params.sweet_angle_deg, &params) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn sustained_drift_scores_without_default_combo() {
         let params = ScoringParams::default();
         // ~3 s of a steady 40° drift at 20 m/s, 60 Hz.
@@ -394,10 +414,11 @@ mod tests {
 
     #[test]
     fn config_overrides_defaults() {
-        let cfg = serde_json::json!({ "scale": 10.0, "minAngleDeg": 30.0 });
+        let cfg = serde_json::json!({ "scale": 10.0, "minAngleDeg": 30.0, "anglePower": 1.0 });
         let p = ScoringParams::from_config(&cfg);
         assert_eq!(p.scale, 10.0);
         assert_eq!(p.min_angle_deg, 30.0);
+        assert_eq!(p.angle_power, 1.0);
         // Untouched keys keep defaults.
         assert_eq!(p.speed_cap_ms, ScoringParams::default().speed_cap_ms);
     }
