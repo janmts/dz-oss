@@ -21,6 +21,7 @@
   const width = 1000;
   const height = 640;
   const pad = 48;
+  const editorExtraZoom = 4;
 
   function blankZone(): DriftZoneInput {
     return {
@@ -227,11 +228,11 @@
       attributionControl: false,
       zoomControl: true,
       minZoom: config.minZoom,
-      maxZoom: config.viewMaxZoom,
+      maxZoom: config.viewMaxZoom + editorExtraZoom,
     });
     tiles = L.tileLayer(config.tileUrl, {
       minZoom: config.minZoom,
-      maxZoom: config.viewMaxZoom,
+      maxZoom: config.viewMaxZoom + editorExtraZoom,
       maxNativeZoom: config.maxZoom,
       tileSize: config.tileSize,
       noWrap: true,
@@ -317,7 +318,7 @@
     const points = allPoints;
     if (!points.length) return;
     const bounds = L.latLngBounds(points.map(worldToLatLng));
-    map.fitBounds(bounds.pad(0.2), { maxZoom: cfg!.defaultZoom + 1 });
+    map.fitBounds(bounds.pad(0.2), { maxZoom: cfg!.viewMaxZoom + editorExtraZoom });
   }
 
   $effect(() => {
