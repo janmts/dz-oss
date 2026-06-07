@@ -204,8 +204,8 @@
           <div class="legend">
             <span><i class="left"></i>Left</span>
             <span><i class="right"></i>Right</span>
-            <span><i class="start"></i>Start</span>
-            <span><i class="finish"></i>Finish</span>
+            <span><i class="start"></i>Gate A</span>
+            <span><i class="finish"></i>Gate B</span>
             <span><i class="split"></i>Split</span>
           </div>
         </div>
