@@ -110,20 +110,19 @@
     return points.length === 2 ? path(points) : '';
   }
 
+  // The end gates are always the first/last boundary point pairs — derive from
+  // the current boundary (never the stored gate, which can go stale) so this
+  // matches the editor and the backend detector exactly.
   function derivedStartGate(z: DriftZoneRow): ZonePoint[] {
-    return z.startGate.length === 2
-      ? z.startGate
-      : z.leftBoundary.length && z.rightBoundary.length
-        ? [z.leftBoundary[0], z.rightBoundary[0]]
-        : [];
+    return z.leftBoundary.length && z.rightBoundary.length
+      ? [z.leftBoundary[0], z.rightBoundary[0]]
+      : [];
   }
 
   function derivedFinishGate(z: DriftZoneRow): ZonePoint[] {
-    return z.finishGate.length === 2
-      ? z.finishGate
-      : z.leftBoundary.length && z.rightBoundary.length
-        ? [z.leftBoundary[z.leftBoundary.length - 1], z.rightBoundary[z.rightBoundary.length - 1]]
-        : [];
+    return z.leftBoundary.length && z.rightBoundary.length
+      ? [z.leftBoundary[z.leftBoundary.length - 1], z.rightBoundary[z.rightBoundary.length - 1]]
+      : [];
   }
 
   function worldToPix(point: ZonePoint): [number, number] {

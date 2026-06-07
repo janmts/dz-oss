@@ -7,6 +7,7 @@
     driftZones,
     loadDriftRuns,
     loadDriftZones,
+    recomputeDriftScores,
     setDriftRunManualScore,
     settings,
     startDriftRunStatusListener,
@@ -23,6 +24,8 @@
   let scoreStatus = $state('');
   let lastScoreRunId = $state<number | null>(null);
   let selectedRunId = $state<number | null>(null);
+  let recomputing = $state(false);
+  let recomputeStatus = $state('');
   let unsubscribeStatus: (() => void) | null = null;
 
   onMount(async () => {
@@ -87,6 +90,17 @@
     return ms ? new Date(ms).toLocaleString() : '-';
   }
 
+  function formatShort(ms: number | null) {
+    return ms
+      ? new Date(ms).toLocaleString(undefined, {
+          month: 'short',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+        })
+      : '-';
+  }
+
   function formatDuration(run: DriftRunRow | null) {
     if (!run?.endedAt) return '-';
     return `${Math.max(0, (run.endedAt - run.startedAt) / 1000).toFixed(1)}s`;
@@ -109,6 +123,20 @@
     return zone.leftBoundary.length >= 2 && zone.rightBoundary.length >= 2 ? 'Ready' : 'Incomplete';
   }
 
+  function formatScore(n: number | null | undefined) {
+    return n === null || n === undefined ? '-' : Math.round(n).toLocaleString();
+  }
+
+  // Computed-vs-actual gap for the selected run — the signal that drives tuning.
+  let scoreDelta = $derived.by(() => {
+    const c = scoringRun?.computedScore;
+    const m = scoringRun?.manualScore;
+    if (c === null || c === undefined || m === null || m === undefined) return null;
+    const diff = Math.round(c) - m;
+    const pct = m !== 0 ? (diff / m) * 100 : 0;
+    return { diff, pct };
+  });
+
   async function saveScore() {
     if (!scoringRun) return;
     const parsed = Number.parseInt(scoreDraft.trim(), 10);
@@ -122,6 +150,19 @@
       scoreStatus = 'Saved';
     } finally {
       savingScore = false;
+    }
+  }
+
+  async function recompute() {
+    recomputing = true;
+    recomputeStatus = '';
+    try {
+      const n = await recomputeDriftScores();
+      recomputeStatus = `Rescored ${n} run${n === 1 ? '' : 's'}`;
+    } catch (e) {
+      recomputeStatus = `Failed: ${e}`;
+    } finally {
+      recomputing = false;
     }
   }
 </script>
@@ -163,8 +204,8 @@
           <div class="legend">
             <span><i class="left"></i>Left</span>
             <span><i class="right"></i>Right</span>
-            <span><i class="start"></i>Start</span>
-            <span><i class="finish"></i>Finish</span>
+            <span><i class="start"></i>Gate A</span>
+            <span><i class="finish"></i>Gate B</span>
             <span><i class="split"></i>Split</span>
           </div>
         </div>
@@ -209,13 +250,41 @@
 
       <section class="score-card">
         <div class="card-title">
-          <span>Actual Score</span>
-          <strong>{scoringRun ? `#${scoringRun.id}` : '-'}</strong>
+          <span>Score {scoringRun ? `#${scoringRun.id}` : ''}</span>
+          <button class="ghost" disabled={recomputing} onclick={recompute} title="Re-score all runs from saved telemetry">
+            {recomputing ? 'Rescoring…' : '↻ Recompute'}
+          </button>
         </div>
+        <div class="score-readout">
+          <div class="computed">
+            <span>Computed</span>
+            <strong>{formatScore(scoringRun?.computedScore)}</strong>
+          </div>
+          {#if scoreDelta}
+            <div class="delta" class:over={scoreDelta.diff > 0} class:under={scoreDelta.diff < 0}>
+              <span>vs actual</span>
+              <strong>{scoreDelta.diff > 0 ? '+' : ''}{scoreDelta.diff.toLocaleString()} ({scoreDelta.pct.toFixed(0)}%)</strong>
+            </div>
+          {/if}
+        </div>
+        {#if scoringRun?.scoreBreakdown}
+          {@const b = scoringRun.scoreBreakdown}
+          <div class="breakdown">
+            <span>drift {b.driftTimeS.toFixed(1)}s / {b.totalTimeS.toFixed(1)}s</span>
+            <span>angle {b.avgAngleDeg.toFixed(0)}° avg · {b.maxAngleDeg.toFixed(0)}° max</span>
+            <span>mult ×{b.maxMultiplier.toFixed(1)}</span>
+            <span>flicks ×{b.transitions}</span>
+          </div>
+        {/if}
+        {#if scoringRun}
+          <p class="recorded">Recorded {formatDate(scoringRun.startedAt)}</p>
+        {/if}
+        <label class="actual-label" for="actual-score">Actual (in-game)</label>
         <div class="score-input">
           <input
+            id="actual-score"
             inputmode="numeric"
-            placeholder="Score"
+            placeholder="Enter in-game score"
             bind:value={scoreDraft}
             disabled={!scoringRun || savingScore}
             onkeydown={(e) => e.key === 'Enter' && saveScore()}
@@ -224,12 +293,12 @@
             {savingScore ? 'Saving' : 'Save'}
           </button>
         </div>
-        <p class="score-status">{scoreStatus || (scoringRun ? formatDate(scoringRun.startedAt) : 'No completed runs')}</p>
+        <p class="score-status">{scoreStatus || recomputeStatus || (scoringRun ? '' : 'No completed runs')}</p>
       </section>
 
       <section class="history">
         <div class="card-title">
-          <span>Recent Scores</span>
+          <span>Recent Runs · newest first</span>
           <strong>{selectedRuns.length}</strong>
         </div>
         <div class="run-list">
@@ -242,8 +311,11 @@
               }}
             >
               <div>
-                <strong>{run.manualScore ?? run.computedScore ?? '-'}</strong>
-                <span>{formatStatus(run)} / {formatDuration(run)}</span>
+                <strong>{formatScore(run.computedScore)}</strong>
+                <span class="when">{formatShort(run.startedAt)}</span>
+              </div>
+              <div>
+                <span>act {run.manualScore?.toLocaleString() ?? '—'} · {formatStatus(run)} / {formatDuration(run)}</span>
               </div>
               <div>
                 <span>{carName(run.carOrdinal)}</span>
@@ -483,11 +555,90 @@
   .score-card {
     padding-bottom: 0.65rem;
   }
+  button.ghost {
+    background: none;
+    border: 1px solid var(--bd-muted);
+    border-radius: 4px;
+    color: var(--tx-dim);
+    cursor: pointer;
+    font-size: 0.6rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    padding: 0.2rem 0.4rem;
+    text-transform: uppercase;
+  }
+  button.ghost:hover:not(:disabled) {
+    color: var(--tx-hi);
+    border-color: var(--bd-strong);
+  }
+  .score-readout {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.6rem 0.75rem 0.35rem;
+  }
+  .score-readout .computed {
+    display: grid;
+    gap: 0.1rem;
+  }
+  .score-readout .computed span,
+  .score-readout .delta span {
+    color: var(--tx-dim);
+    font-size: 0.6rem;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+  }
+  .score-readout .computed strong {
+    color: var(--tx-hi);
+    font-size: 1.5rem;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+  }
+  .score-readout .delta {
+    display: grid;
+    gap: 0.1rem;
+    text-align: right;
+  }
+  .score-readout .delta strong {
+    font-size: 0.85rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--tx-mid);
+  }
+  .score-readout .delta.over strong {
+    color: #f59e0b;
+  }
+  .score-readout .delta.under strong {
+    color: #60a5fa;
+  }
+  .breakdown {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 0.75rem;
+    padding: 0 0.75rem 0.5rem;
+    color: var(--tx-dim);
+    font-size: 0.66rem;
+    font-variant-numeric: tabular-nums;
+  }
+  .recorded {
+    padding: 0.15rem 0.75rem 0;
+    color: var(--tx-dim);
+    font-size: 0.66rem;
+    font-variant-numeric: tabular-nums;
+  }
+  .actual-label {
+    display: block;
+    padding: 0.35rem 0.75rem 0;
+    color: var(--tx-dim);
+    font-size: 0.6rem;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+  }
   .score-input {
     display: grid;
     grid-template-columns: 1fr auto;
     gap: 0.5rem;
-    padding: 0.75rem 0.75rem 0.45rem;
+    padding: 0.4rem 0.75rem 0.45rem;
   }
   input {
     min-width: 0;

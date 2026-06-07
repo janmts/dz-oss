@@ -58,6 +58,14 @@
   let activeSide = $state<BoundarySide>('left');
   let status = $state('');
   let saving = $state(false);
+  // Per-zone boundary slack (m). Lives in scoringConfig.boundarySlackM; mirrored
+  // here for a typed number input and written back on save.
+  let slackM = $state(3);
+
+  function syncSlack() {
+    const v = draft.scoringConfig?.boundarySlackM;
+    slackM = typeof v === 'number' ? v : 3;
+  }
   let dragging = $state<{ side: BoundarySide; index: number } | null>(null);
   let selectedPoint = $state<{ side: BoundarySide; index: number } | null>(null);
   let svgEl = $state<SVGSVGElement | null>(null);
@@ -379,6 +387,7 @@
     selectedId = zone.id;
     selectedPoint = null;
     status = '';
+    syncSlack();
     setTimeout(fitMapToGeometry, 0);
   }
 
@@ -387,6 +396,7 @@
     selectedId = null;
     selectedPoint = null;
     status = '';
+    syncSlack();
   }
 
   function boundary(side: BoundarySide): ZonePoint[] {
@@ -519,6 +529,8 @@
 
   async function save() {
     saving = true;
+    // Persist the boundary slack into the per-zone config bag.
+    draft.scoringConfig = { ...draft.scoringConfig, boundarySlackM: Math.max(0, slackM) };
     try {
       const saved = await saveDriftZone(draft);
       draft = toInput(saved);
@@ -574,6 +586,10 @@
         <label>
           Name
           <input bind:value={draft.name} />
+        </label>
+        <label class="num" title="Metres a run may stray past the boundary before it voids. ~3 m suits most zones; raise it for sparsely-mapped or wide zones.">
+          Slack (m)
+          <input type="number" min="0" step="0.5" bind:value={slackM} />
         </label>
         <label class="checkbox">
           <input type="checkbox" bind:checked={draft.active} />
@@ -698,7 +714,7 @@
       <div class="details">
         <div><strong>{sideLabel('left')}</strong><span>{draft.leftBoundary.length} points</span></div>
         <div><strong>{sideLabel('right')}</strong><span>{draft.rightBoundary.length} points</span></div>
-        <div><strong>Start/finish</strong><span>Derived from first/last left+right points</span></div>
+        <div><strong>End gates</strong><span>First &amp; last point pairs — enter either, exit the other</span></div>
         <div><strong>Editing</strong><span>Drag points to refine; double-click to delete</span></div>
       </div>
 
@@ -800,9 +816,12 @@
   }
   .form-row {
     display: grid;
-    grid-template-columns: 1fr auto;
+    grid-template-columns: 1fr auto auto;
     gap: 0.75rem;
     align-items: end;
+  }
+  .num input {
+    width: 5.5rem;
   }
   .checkbox {
     flex-direction: row;
