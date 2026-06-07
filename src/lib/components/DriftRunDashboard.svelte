@@ -24,8 +24,10 @@
   let scoreStatus = $state('');
   let lastScoreRunId = $state<number | null>(null);
   let selectedRunId = $state<number | null>(null);
+  let autoSelectedRunId = $state<number | null>(null);
   let recomputing = $state(false);
   let recomputeStatus = $state('');
+  let scoreInput: HTMLInputElement | null = null;
   let unsubscribeStatus: (() => void) | null = null;
 
   onMount(async () => {
@@ -71,12 +73,22 @@
   });
 
   $effect(() => {
+    const runId = $driftRunStatus.runId;
+    if ($driftRunStatus.state !== 'completed' || runId === null || runId === autoSelectedRunId) return;
+
+    autoSelectedRunId = runId;
+    selectedRunId = runId;
+    if ($driftRunStatus.zoneId !== null) selectedId = $driftRunStatus.zoneId;
+  });
+
+  $effect(() => {
     if (scoringRun?.id !== lastScoreRunId) {
       lastScoreRunId = scoringRun?.id ?? null;
       scoreDraft = scoringRun?.manualScore !== null && scoringRun?.manualScore !== undefined
         ? String(scoringRun.manualScore)
         : '';
       scoreStatus = '';
+      if (scoringRun?.id === autoSelectedRunId) queueMicrotask(() => scoreInput?.focus());
     }
   });
 
@@ -288,6 +300,7 @@
         <div class="score-input">
           <input
             id="actual-score"
+            bind:this={scoreInput}
             inputmode="numeric"
             placeholder="Enter in-game score"
             bind:value={scoreDraft}

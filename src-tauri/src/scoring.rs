@@ -26,7 +26,7 @@ pub struct ScoringParams {
     pub spin_angle_deg: f64,
     /// Angle (deg) at which the angle factor peaks; beyond it returns diminish.
     pub sweet_angle_deg: f64,
-    /// Speed (m/s) at which the speed factor saturates (~70 mph).
+    /// Speed (m/s) at which the speed factor saturates (~134 mph).
     pub speed_cap_ms: f64,
     /// Rear combined-slip threshold (normalized, 1.0 ≈ grip limit) for "sliding".
     pub slip_gate: f64,
@@ -53,16 +53,16 @@ impl Default for ScoringParams {
             min_angle_deg: 12.0,
             spin_angle_deg: 90.0,
             sweet_angle_deg: 45.0,
-            speed_cap_ms: 31.0,
+            speed_cap_ms: 60.0,
             slip_gate: 1.0,
             base_rate: 1000.0,
             mult_growth_per_s: 0.0,
             mult_cap: 1.0,
             transition_grace_s: 0.5,
-            // Least-squares fit across the logged in-game scores (10 runs) with
-            // the default no-combo model; re-derive with scripts/score_model.py
-            // as more scores are logged.
-            scale: 7.465,
+            // Least-squares fit across valid logged in-game scores (20 runs
+            // across two zones) with the default no-combo model; re-derive as
+            // more scores are logged.
+            scale: 15.455,
         }
     }
 }
