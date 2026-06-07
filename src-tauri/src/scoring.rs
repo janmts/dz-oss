@@ -37,6 +37,10 @@ pub struct ScoringParams {
     pub mult_growth_per_s: f64,
     /// Maximum combo multiplier.
     pub mult_cap: f64,
+    /// Max time (s) the drift may dip out of band and still keep the combo —
+    /// but only across a *flick* (drifting resumes the opposite direction). A
+    /// straighten with no direction change breaks the combo regardless.
+    pub transition_grace_s: f64,
     /// Final scale factor mapping raw points to in-game magnitude.
     pub scale: f64,
 }
@@ -53,8 +57,10 @@ impl Default for ScoringParams {
             base_rate: 1000.0,
             mult_growth_per_s: 0.6,
             mult_cap: 5.0,
-            // Calibrated so the one known-scored run (57016) reproduces exactly.
-            scale: 2.775,
+            transition_grace_s: 0.5,
+            // Least-squares fit across the logged in-game scores (8 runs);
+            // re-derive with scripts/score_model.py as more are logged.
+            scale: 2.018,
         }
     }
 }
@@ -79,6 +85,8 @@ pub struct RunScore {
     pub max_angle_deg: f64,
     pub avg_speed_ms: f64,
     pub max_multiplier: f64,
+    /// Number of flicks (direction changes that kept the combo alive).
+    pub transitions: usize,
 }
 
 /// Chassis sideslip (drift angle) in **degrees**, always ≥ 0.
@@ -142,6 +150,9 @@ pub fn score_run(packets: &[TelemetryPacket], p: &ScoringParams) -> RunScore {
     let mut drift_samples = 0usize;
     let mut max_multiplier = 1.0_f64;
     let mut drift_duration = 0.0;
+    let mut out_time = 0.0; // time since the drift last dipped out of band
+    let mut last_sign = 0i8; // direction of the last in-band drift (+1 / −1)
+    let mut transitions = 0usize;
     let mut prev_ms: Option<u32> = None;
 
     for pkt in packets {
@@ -153,13 +164,30 @@ pub fn score_run(packets: &[TelemetryPacket], p: &ScoringParams) -> RunScore {
         total_time += dt;
 
         let speed = pkt.speed_ms as f64;
-        let angle = drift_angle_deg(pkt);
+        let signed = (pkt.vel_x as f64).atan2(pkt.vel_z as f64).to_degrees();
+        let angle = signed.abs();
+        let sign = if signed >= 0.0 { 1i8 } else { -1i8 };
         let drifting = speed >= p.min_speed_ms
             && angle >= p.min_angle_deg
             && angle <= p.spin_angle_deg
             && rear_combined_slip(pkt) >= p.slip_gate;
 
         if drifting {
+            // Resuming after a dip: keep the combo only if this is a flick —
+            // drifting picked back up the *opposite* way within the grace
+            // window. A straighten (same/unknown direction, or too long a gap)
+            // breaks it. Forza rewards linked direction changes; it doesn't
+            // reward straightening out.
+            if out_time > 0.0 {
+                let flick =
+                    out_time <= p.transition_grace_s && last_sign != 0 && sign != last_sign;
+                if flick {
+                    transitions += 1;
+                } else {
+                    drift_duration = 0.0;
+                }
+                out_time = 0.0;
+            }
             drift_duration += dt;
             let multiplier = (1.0 + p.mult_growth_per_s * drift_duration).min(p.mult_cap);
             max_multiplier = max_multiplier.max(multiplier);
@@ -169,9 +197,12 @@ pub fn score_run(packets: &[TelemetryPacket], p: &ScoringParams) -> RunScore {
             speed_sum += speed;
             max_angle = max_angle.max(angle);
             drift_samples += 1;
+            last_sign = sign;
         } else {
-            // Drift broke: combo is lost (multiplier rebuilds from drift_duration).
-            drift_duration = 0.0;
+            out_time += dt;
+            if out_time > p.transition_grace_s {
+                drift_duration = 0.0; // sustained break: combo is lost
+            }
         }
     }
 
@@ -184,6 +215,7 @@ pub fn score_run(packets: &[TelemetryPacket], p: &ScoringParams) -> RunScore {
         max_angle_deg: max_angle,
         avg_speed_ms: if drift_samples > 0 { speed_sum / drift_samples as f64 } else { 0.0 },
         max_multiplier,
+        transitions,
     }
 }
 
@@ -278,6 +310,40 @@ mod tests {
     }
 
     #[test]
+    fn flick_keeps_combo_but_straighten_breaks_it() {
+        let p = ScoringParams::default();
+        // Build a left drift, a brief through-zero, then a right drift.
+        fn run(gap_ticks: usize) -> Vec<TelemetryPacket> {
+            let mut pkts = Vec::new();
+            let mut t = 0u32;
+            for _ in 0..120 {
+                pkts.push(at(drifting_packet(40.0, 20.0), t));
+                t += 16;
+            }
+            for _ in 0..gap_ticks {
+                pkts.push(at(drifting_packet(0.0, 20.0), t)); // straight (out of band)
+                t += 16;
+            }
+            for _ in 0..120 {
+                pkts.push(at(drifting_packet(-40.0, 20.0), t)); // opposite direction
+                t += 16;
+            }
+            pkts
+        }
+        // ~0.13 s gap < grace → a flick: combo survives the direction change.
+        let flick = score_run(&run(8), &p);
+        // ~1.1 s gap > grace → a straighten: combo resets even though direction flips.
+        let straighten = score_run(&run(70), &p);
+
+        assert_eq!(flick.transitions, 1);
+        assert_eq!(straighten.transitions, 0);
+        // The flick keeps building one long combo, so its multiplier and score
+        // exceed the straighten that had to rebuild from 1×.
+        assert!(flick.max_multiplier > straighten.max_multiplier + 0.2);
+        assert!(flick.score > straighten.score);
+    }
+
+    #[test]
     fn spun_out_angle_does_not_score() {
         let params = ScoringParams::default();
         let pkts: Vec<_> = (0..120)
@@ -318,9 +384,11 @@ mod tests {
             .collect();
         let r = score_run(&pkts, &ScoringParams::default());
         println!(
-            "run#1 computed={:.0} drift_t={:.1}s total_t={:.1}s avg_ang={:.0} max_ang={:.0} max_mult={:.1}",
-            r.score, r.drift_time_s, r.total_time_s, r.avg_angle_deg, r.max_angle_deg, r.max_multiplier
+            "run#1 computed={:.0} drift_t={:.1}s total_t={:.1}s avg_ang={:.0} max_ang={:.0} max_mult={:.1} flicks={}",
+            r.score, r.drift_time_s, r.total_time_s, r.avg_angle_deg, r.max_angle_deg, r.max_multiplier, r.transitions
         );
-        assert!((r.score - 57016.0).abs() < 2000.0, "got {}", r.score);
+        // Scale is now a least-squares fit across many runs (not a single-point
+        // calibration), so run #1 is allowed to sit within ±20% of its 57016.
+        assert!((r.score - 57016.0).abs() / 57016.0 < 0.20, "got {}", r.score);
     }
 }

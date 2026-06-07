@@ -99,6 +99,7 @@ export interface DriftScoreBreakdown {
   maxAngleDeg: number;
   avgSpeedMs: number;
   maxMultiplier: number;
+  transitions: number;
 }
 
 export interface DriftRunRow {
