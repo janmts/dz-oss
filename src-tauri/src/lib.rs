@@ -29,6 +29,7 @@ pub type Shared = std::sync::Arc<AppState>;
 pub fn run() {
     use std::sync::Arc;
     use tauri::Emitter;
+    use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
     let loaded_settings = settings::load();
     let port = loaded_settings.port;
@@ -43,11 +44,43 @@ pub fn run() {
     // The initial receiver is dropped; the forwarder task below calls tx.subscribe()
     // before the ingest loop starts sending, so no ticks are missed.
     let (tx, _rx) = tokio::sync::broadcast::channel::<event::ServerEvent>(256);
+    let capture_active_shortcut = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyZ);
+    let capture_left_shortcut = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyL);
+    let capture_right_shortcut = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyR);
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler({
+                    let capture_active_shortcut = capture_active_shortcut.clone();
+                    let capture_left_shortcut = capture_left_shortcut.clone();
+                    let capture_right_shortcut = capture_right_shortcut.clone();
+                    move |app, shortcut, event| {
+                        if event.state() != ShortcutState::Pressed {
+                            return;
+                        }
+                        let side = if shortcut == &capture_left_shortcut {
+                            Some("left")
+                        } else if shortcut == &capture_right_shortcut {
+                            Some("right")
+                        } else if shortcut == &capture_active_shortcut {
+                            None
+                        } else {
+                            return;
+                        };
+                        let _ = app.emit(
+                            "drift_zone_capture",
+                            serde_json::json!({
+                                "side": side,
+                            }),
+                        );
+                    }
+                })
+                .build(),
+        )
         .manage(state.clone())
         .invoke_handler(tauri::generate_handler![
             commands::get_sessions,
@@ -94,6 +127,15 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 udp::run(udp_state, port, udp_tx).await;
             });
+            if let Err(e) = app.global_shortcut().register(capture_active_shortcut.clone()) {
+                eprintln!("[shortcut] failed to register Ctrl+Alt+Z: {e}");
+            }
+            if let Err(e) = app.global_shortcut().register(capture_left_shortcut.clone()) {
+                eprintln!("[shortcut] failed to register Ctrl+Alt+L: {e}");
+            }
+            if let Err(e) = app.global_shortcut().register(capture_right_shortcut.clone()) {
+                eprintln!("[shortcut] failed to register Ctrl+Alt+R: {e}");
+            }
             Ok(())
         })
         .run(tauri::generate_context!())

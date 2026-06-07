@@ -11,6 +11,7 @@
   } from '$lib/stores/sessions';
   import { effectiveMapConfig, type EffectiveMapConfig } from '$lib/mapDefaults';
   import { xyzSimpleCRS } from '$lib/mapCrs';
+  import { ipc } from '$lib/ipc';
   import type { DriftZoneInput, DriftZoneRow, ZonePoint } from '$lib/types';
 
   let { onClose }: { onClose: () => void } = $props();
@@ -66,15 +67,22 @@
   let markerLayer = $state<LayerGroup | null>(null);
   let liveMarker = $state<Marker | null>(null);
   let resizeObserver: ResizeObserver | null = null;
+  let unsubscribeShortcut: (() => void) | null = null;
   let lastKnownPoint = $state<ZonePoint | null>(null);
   let lastKnownAt = $state(0);
   let mapReady = $state(false);
 
-  onMount(() => {
+  onMount(async () => {
     void loadDriftZones();
+    unsubscribeShortcut = await ipc.subscribeDriftZoneCapture(({ side }) => {
+      capturePoint(side ?? activeSide, true);
+    });
+    window.addEventListener('keydown', onLocalKeydown);
   });
 
   onDestroy(() => {
+    unsubscribeShortcut?.();
+    window.removeEventListener('keydown', onLocalKeydown);
     resizeObserver?.disconnect();
     map?.remove();
     map = null;
@@ -350,14 +358,31 @@
     else draft.rightBoundary = points;
   }
 
-  function capturePoint() {
+  function capturePoint(side: BoundarySide = activeSide, fromShortcut = false) {
     if (!livePoint) {
       status = 'Waiting for the first telemetry world position. Drive briefly, then reopen/click capture.';
       return;
     }
-    setBoundary(activeSide, [...boundary(activeSide), { ...livePoint }]);
-    status = `Captured ${activeSide} point ${boundary(activeSide).length} from last known telemetry.`;
+    setBoundary(side, [...boundary(side), { ...livePoint }]);
+    if (fromShortcut && side !== activeSide) activeSide = side;
+    const shortcutLabel = fromShortcut ? ' via shortcut' : '';
+    status = `Captured ${side} point ${boundary(side).length}${shortcutLabel} from last known telemetry.`;
     setTimeout(fitMapToGeometry, 0);
+  }
+
+  function onLocalKeydown(e: KeyboardEvent) {
+    if (!e.ctrlKey || !e.altKey) return;
+    const key = e.key.toLowerCase();
+    if (key === 'z') {
+      e.preventDefault();
+      capturePoint(activeSide, true);
+    } else if (key === 'l') {
+      e.preventDefault();
+      capturePoint('left', true);
+    } else if (key === 'r') {
+      e.preventDefault();
+      capturePoint('right', true);
+    }
   }
 
   function removeLastPoint() {
@@ -475,7 +500,7 @@
           <button class:active={activeSide === 'left'} onclick={() => (activeSide = 'left')}>Left</button>
           <button class:active={activeSide === 'right'} onclick={() => (activeSide = 'right')}>Right</button>
         </div>
-        <button onclick={capturePoint}>Capture live point</button>
+        <button onclick={() => capturePoint()}>Capture live point</button>
         <button onclick={removeLastPoint}>Remove last {activeSide}</button>
         <button onclick={reverseBoundaries}>Reverse direction</button>
         <button onclick={fitMapToGeometry}>Fit map</button>
@@ -485,6 +510,11 @@
             : 'Waiting for telemetry'}
         </span>
       </div>
+
+      <p class="shortcut-hint">
+        Global shortcuts while FH6 has focus: <strong>Ctrl+Alt+Z</strong> captures selected side,
+        <strong>Ctrl+Alt+L</strong> captures left, <strong>Ctrl+Alt+R</strong> captures right.
+      </p>
 
       <div class="map-wrap">
         {#if mapUsable}
@@ -728,6 +758,16 @@
     margin-left: auto;
     color: var(--tx-dim);
     font-size: 0.72rem;
+  }
+  .shortcut-hint {
+    color: var(--tx-dim);
+    font-size: 0.72rem;
+    line-height: 1.45;
+    margin-top: -0.25rem;
+  }
+  .shortcut-hint strong {
+    color: var(--tx-lo);
+    font-weight: 700;
   }
   .map-wrap {
     border: 1px solid var(--bd-dim);

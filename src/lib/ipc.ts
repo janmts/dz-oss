@@ -19,6 +19,10 @@ export interface TelemetryHandlers {
   onError?: (msg: string) => void;
 }
 
+export interface DriftZoneCaptureShortcut {
+  side: 'left' | 'right' | null;
+}
+
 // ---------- Tauri implementation ----------
 async function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const { invoke } = await import('@tauri-apps/api/core');
@@ -142,4 +146,12 @@ export const ipc = {
 
   subscribeTelemetry: (h: TelemetryHandlers): Promise<() => void> | (() => void) =>
     isTauri ? tauriSubscribe(h) : httpSubscribe(h),
+
+  subscribeDriftZoneCapture: async (
+    handler: (event: DriftZoneCaptureShortcut) => void
+  ): Promise<() => void> => {
+    if (!isTauri) return () => {};
+    const { listen } = await import('@tauri-apps/api/event');
+    return listen<DriftZoneCaptureShortcut>('drift_zone_capture', (e) => handler(e.payload));
+  },
 };
