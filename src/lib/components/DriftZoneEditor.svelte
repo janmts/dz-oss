@@ -59,6 +59,7 @@
   let status = $state('');
   let saving = $state(false);
   let dragging = $state<{ side: BoundarySide; index: number } | null>(null);
+  let selectedPoint = $state<{ side: BoundarySide; index: number } | null>(null);
   let svgEl = $state<SVGSVGElement | null>(null);
   let mapHost = $state<HTMLDivElement | null>(null);
   let L = $state<typeof import('leaflet') | null>(null);
@@ -200,10 +201,10 @@
     return pixToWorld(pixel);
   }
 
-  function markerIcon(side: BoundarySide, label: string) {
+  function markerIcon(side: BoundarySide, label: string, selected = false) {
     const cls = side === 'left' ? 'zone-marker-left' : 'zone-marker-right';
     return L!.divIcon({
-      className: `zone-marker ${cls}`,
+      className: `zone-marker ${cls}${selected ? ' zone-marker-selected' : ''}`,
       html: `<span>${label}</span>`,
       iconSize: [24, 24],
       iconAnchor: [12, 12],
@@ -290,14 +291,17 @@
 
     for (const side of ['left', 'right'] as BoundarySide[]) {
       boundary(side).forEach((point, index) => {
+        const selected = selectedPoint?.side === side && selectedPoint.index === index;
         const marker = L!.marker(worldToLatLng(point), {
           draggable: true,
-          icon: markerIcon(side, `${side[0].toUpperCase()}${index + 1}`),
+          icon: markerIcon(side, `${side[0].toUpperCase()}${index + 1}`, selected),
         }).addTo(markerLayer!);
+        marker.on('click', () => selectPoint(side, index));
         marker.on('dragend', () => {
           const points = [...boundary(side)];
           points[index] = latLngToWorld(marker.getLatLng());
           setBoundary(side, points);
+          selectPoint(side, index);
         });
         marker.on('dblclick', () => deletePoint(side, index));
       });
@@ -325,6 +329,7 @@
     void draft.leftBoundary;
     void draft.rightBoundary;
     void livePoint;
+    void selectedPoint;
     if (mapReady) redrawLeaflet();
   });
 
@@ -340,6 +345,7 @@
   function selectZone(zone: DriftZoneRow) {
     draft = toInput(zone);
     selectedId = zone.id;
+    selectedPoint = null;
     status = '';
     setTimeout(fitMapToGeometry, 0);
   }
@@ -347,6 +353,7 @@
   function newZone() {
     draft = blankZone();
     selectedId = null;
+    selectedPoint = null;
     status = '';
   }
 
@@ -359,6 +366,11 @@
     else draft.rightBoundary = points;
   }
 
+  function selectedBoundaryPointLabel(): string {
+    if (!selectedPoint) return 'No point selected';
+    return `${selectedPoint.side === 'left' ? 'L' : 'R'}${selectedPoint.index + 1}`;
+  }
+
   function capturePoint(side: BoundarySide = activeSide, fromShortcut = false) {
     if (!livePoint) {
       status = 'Waiting for the first telemetry world position. Drive briefly, then reopen/click capture.';
@@ -368,6 +380,25 @@
     if (fromShortcut && side !== activeSide) activeSide = side;
     const shortcutLabel = fromShortcut ? ' via shortcut' : '';
     status = `Captured ${side} point ${boundary(side).length}${shortcutLabel} from last known telemetry.`;
+    setTimeout(fitMapToGeometry, 0);
+  }
+
+  function insertAtSelected(offset: 0 | 1) {
+    if (!selectedPoint) {
+      status = 'Select a boundary point first.';
+      return;
+    }
+    if (!livePoint) {
+      status = 'Waiting for the first telemetry world position before inserting.';
+      return;
+    }
+    const points = [...boundary(selectedPoint.side)];
+    const insertIndex = selectedPoint.index + offset;
+    points.splice(insertIndex, 0, { ...livePoint });
+    setBoundary(selectedPoint.side, points);
+    selectedPoint = { side: selectedPoint.side, index: insertIndex };
+    activeSide = selectedPoint.side;
+    status = `Inserted ${selectedBoundaryPointLabel()} from last known telemetry.`;
     setTimeout(fitMapToGeometry, 0);
   }
 
@@ -390,20 +421,47 @@
     const points = boundary(activeSide);
     if (points.length === 0) return;
     setBoundary(activeSide, points.slice(0, -1));
+    if (selectedPoint?.side === activeSide && selectedPoint.index >= points.length - 1) {
+      selectedPoint = points.length > 1 ? { side: activeSide, index: points.length - 2 } : null;
+    }
   }
 
   function reverseBoundaries() {
     draft.leftBoundary = [...draft.leftBoundary].reverse();
     draft.rightBoundary = [...draft.rightBoundary].reverse();
+    if (selectedPoint) {
+      const len = boundary(selectedPoint.side).length;
+      selectedPoint = { side: selectedPoint.side, index: len - selectedPoint.index - 1 };
+    }
   }
 
   function deletePoint(side: BoundarySide, index: number) {
     setBoundary(side, boundary(side).filter((_, i) => i !== index));
+    if (selectedPoint?.side === side) {
+      const nextLen = boundary(side).length;
+      selectedPoint = nextLen === 0 ? null : { side, index: Math.min(index, nextLen - 1) };
+    }
+  }
+
+  function selectPoint(side: BoundarySide, index: number) {
+    selectedPoint = { side, index };
+    activeSide = side;
+  }
+
+  function onPointKeydown(e: KeyboardEvent, side: BoundarySide, index: number) {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      selectPoint(side, index);
+    } else if (e.key === 'Delete' || e.key === 'Backspace') {
+      e.preventDefault();
+      deletePoint(side, index);
+    }
   }
 
   function startDrag(e: PointerEvent, side: BoundarySide, index: number) {
     e.preventDefault();
     e.stopPropagation();
+    selectPoint(side, index);
     dragging = { side, index };
     (e.currentTarget as SVGElement).setPointerCapture(e.pointerId);
   }
@@ -502,6 +560,8 @@
           <button class:active={activeSide === 'right'} onclick={() => (activeSide = 'right')}>Right</button>
         </div>
         <button onclick={() => capturePoint()}>Capture live point</button>
+        <button onclick={() => insertAtSelected(0)}>Insert before</button>
+        <button onclick={() => insertAtSelected(1)}>Insert after</button>
         <button onclick={removeLastPoint}>Remove last {activeSide}</button>
         <button onclick={reverseBoundaries}>Reverse direction</button>
         <button onclick={fitMapToGeometry}>Fit map</button>
@@ -515,6 +575,7 @@
       <p class="shortcut-hint">
         Global shortcuts while FH6 has focus: <strong>Ctrl+Alt+Z</strong> captures selected side,
         <strong>Ctrl+Alt+L</strong> captures left, <strong>Ctrl+Alt+R</strong> captures right.
+        Selected point: <strong>{selectedBoundaryPointLabel()}</strong>.
       </p>
 
       <div class="map-wrap">
@@ -562,13 +623,17 @@
             {#each draft.leftBoundary as point, index}
               {@const p = toSvg(point)}
               <g class="point-group">
-                <!-- svelte-ignore a11y_no_static_element_interactions -->
                 <circle
                   class="point left"
                   cx={p[0]}
                   cy={p[1]}
                   r="8"
+                  role="button"
+                  tabindex="0"
+                  aria-label={`Select left point ${index + 1}`}
+                  class:selected={selectedPoint?.side === 'left' && selectedPoint.index === index}
                   onpointerdown={(e) => startDrag(e, 'left', index)}
+                  onkeydown={(e) => onPointKeydown(e, 'left', index)}
                   ondblclick={() => deletePoint('left', index)}
                 />
                 <text x={p[0] + 12} y={p[1] - 10}>L{index + 1}</text>
@@ -578,13 +643,17 @@
             {#each draft.rightBoundary as point, index}
               {@const p = toSvg(point)}
               <g class="point-group">
-                <!-- svelte-ignore a11y_no_static_element_interactions -->
                 <circle
                   class="point right"
                   cx={p[0]}
                   cy={p[1]}
                   r="8"
+                  role="button"
+                  tabindex="0"
+                  aria-label={`Select right point ${index + 1}`}
+                  class:selected={selectedPoint?.side === 'right' && selectedPoint.index === index}
                   onpointerdown={(e) => startDrag(e, 'right', index)}
+                  onkeydown={(e) => onPointKeydown(e, 'right', index)}
                   ondblclick={() => deletePoint('right', index)}
                 />
                 <text x={p[0] + 12} y={p[1] - 10}>R{index + 1}</text>
@@ -820,6 +889,10 @@
     background: #fbbf24;
     color: #020617;
   }
+  :global(.zone-marker-selected span) {
+    outline: 3px solid #fbbf24;
+    outline-offset: 2px;
+  }
   :global(.leaflet-container) {
     background: var(--bg-card);
     font: inherit;
@@ -863,6 +936,10 @@
   }
   .point:active {
     cursor: grabbing;
+  }
+  .point.selected {
+    stroke: #fbbf24;
+    stroke-width: 4;
   }
   .point-group text {
     fill: var(--tx-lo);
