@@ -104,6 +104,9 @@ export interface DriftScoreBreakdown {
 
 export interface DriftRunRow {
   id: number;
+  /** Per-zone display number (1, 2, 3… within the zone, oldest first). Derived
+   *  at query time, reflows on delete. `id` is still the global identity. */
+  zoneRunNumber: number;
   zoneId: number | null;
   startedAt: number;
   endedAt: number | null;

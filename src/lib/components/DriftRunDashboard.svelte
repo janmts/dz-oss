@@ -192,7 +192,8 @@
     const tag = run.valid ? '' : ' (invalid)';
     if (
       !confirm(
-        `Delete run #${run.id}${tag} — computed ${formatScore(run.computedScore)}? ` +
+        `Delete run #${run.zoneRunNumber}${tag} (global #${run.id}) — ` +
+          `computed ${formatScore(run.computedScore)}? ` +
           'This permanently removes its telemetry and cannot be undone.'
       )
     )
@@ -308,7 +309,7 @@
 
       <section class="score-card">
         <div class="card-title">
-          <span>Score {scoringRun ? `#${scoringRun.id}` : ''}</span>
+          <span>Score {scoringRun ? `#${scoringRun.zoneRunNumber}` : ''}</span>
           <button class="ghost" disabled={recomputing} onclick={recompute} title="Re-score all runs from saved telemetry">
             {recomputing ? 'Rescoring…' : '↻ Recompute'}
           </button>
@@ -340,7 +341,7 @@
           </div>
         {/if}
         {#if scoringRun}
-          <p class="recorded">Recorded {formatDate(scoringRun.startedAt)}</p>
+          <p class="recorded">Recorded {formatDate(scoringRun.startedAt)} · global #{scoringRun.id}</p>
         {/if}
         <label class="actual-label" for="actual-score">Actual (in-game)</label>
         <div class="score-input">
@@ -398,7 +399,7 @@
               >
                 <div>
                   <strong>{formatScore(run.computedScore)}</strong>
-                  <span class="when">{formatShort(run.startedAt)}</span>
+                  <span class="when">#{run.zoneRunNumber} · {formatShort(run.startedAt)}</span>
                 </div>
                 <div>
                   <span>act {run.manualScore?.toLocaleString() ?? '—'} · {formatStatus(run)} / {formatDuration(run)}</span>
@@ -413,7 +414,7 @@
               </button>
               <button
                 class="run-del"
-                aria-label="Delete run {run.id}"
+                aria-label="Delete run #{run.zoneRunNumber}"
                 title="Delete this run permanently"
                 onclick={() => removeRun(run)}
               >×</button>

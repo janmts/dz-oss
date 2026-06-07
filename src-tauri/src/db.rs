@@ -682,6 +682,11 @@ pub fn delete_invalid_drift_runs(conn: &Connection) -> Result<usize> {
 #[serde(rename_all = "camelCase")]
 pub struct DriftRunRow {
     pub id: i64,
+    /// Per-zone display sequence number (1, 2, 3, … within this run's zone,
+    /// oldest first). Derived at query time — NOT a stored column and NOT the
+    /// identity. `id` remains the global primary key / FK target. Reflows when a
+    /// run is deleted, so it always matches the run's position in its zone list.
+    pub zone_run_number: i64,
     pub zone_id: Option<i64>,
     pub started_at: i64,
     pub ended_at: Option<i64>,
@@ -700,13 +705,22 @@ pub struct DriftRunRow {
 }
 
 pub fn list_drift_runs(conn: &Connection) -> Result<Vec<DriftRunRow>> {
+    // zone_run_number is computed in a CTE over the *whole* table (before the
+    // LIMIT) so it stays correct even for runs older than the 200-row window.
     let mut stmt = conn.prepare(
-        "SELECT r.id, r.zone_id, r.started_at, r.ended_at, r.car_ordinal,
+        "WITH numbered AS (
+             SELECT id, ROW_NUMBER() OVER (
+                 PARTITION BY zone_id ORDER BY started_at ASC, id ASC
+             ) AS zone_run_number
+             FROM drift_runs
+         )
+         SELECT r.id, r.zone_id, r.started_at, r.ended_at, r.car_ordinal,
                 r.car_class, r.car_pi, r.drivetrain_type, r.car_group,
                 r.valid, r.invalid_reason, r.computed_score, s.manual_score,
-                r.packet_count, r.score_breakdown_json, s.notes
+                r.packet_count, r.score_breakdown_json, s.notes, n.zone_run_number
          FROM drift_runs r
          LEFT JOIN drift_run_scores s ON s.run_id = r.id
+         JOIN numbered n ON n.id = r.id
          ORDER BY r.started_at DESC
          LIMIT 200",
     )?;
@@ -714,6 +728,7 @@ pub fn list_drift_runs(conn: &Connection) -> Result<Vec<DriftRunRow>> {
         let breakdown: Option<String> = r.get(14)?;
         Ok(DriftRunRow {
             id: r.get(0)?,
+            zone_run_number: r.get(16)?,
             zone_id: r.get(1)?,
             started_at: r.get(2)?,
             ended_at: r.get(3)?,
@@ -1059,6 +1074,44 @@ mod tests {
         assert_eq!(row.packet_count, 2);
         assert!(row.valid);
         assert!((row.computed_score.unwrap() - 12345.0).abs() < 0.001);
+        // Sole run (zone_id NULL) is #1 in its partition.
+        assert_eq!(row.zone_run_number, 1);
+    }
+
+    #[test]
+    fn zone_run_number_is_per_zone_and_chronological() {
+        let conn = in_memory();
+        let z1 = save_drift_zone(&conn, &zone_input("Tokyo"), 1000).unwrap();
+        let z2 = save_drift_zone(&conn, &zone_input("Red Mountain"), 1000).unwrap();
+        // Interleave runs across the two zones by started_at; ids stay global.
+        let a1 = open_drift_run(&conn, Some(z1), 100, 0, 0, 0, 0, 0).unwrap();
+        let b1 = open_drift_run(&conn, Some(z2), 200, 0, 0, 0, 0, 0).unwrap();
+        let a2 = open_drift_run(&conn, Some(z1), 300, 0, 0, 0, 0, 0).unwrap();
+        let b2 = open_drift_run(&conn, Some(z2), 400, 0, 0, 0, 0, 0).unwrap();
+        let a3 = open_drift_run(&conn, Some(z1), 500, 0, 0, 0, 0, 0).unwrap();
+
+        let rows = list_drift_runs(&conn).unwrap();
+        let num = |id: i64| rows.iter().find(|r| r.id == id).unwrap().zone_run_number;
+        // Each zone numbers independently from 1, oldest first.
+        assert_eq!((num(a1), num(a2), num(a3)), (1, 2, 3));
+        assert_eq!((num(b1), num(b2)), (1, 2));
+    }
+
+    #[test]
+    fn zone_run_number_reflows_after_delete() {
+        // The whole point of deriving (not storing) the number: deleting a run
+        // closes the gap rather than leaving a jumpy hole in the list.
+        let conn = in_memory();
+        let z = save_drift_zone(&conn, &zone_input("Zone"), 1000).unwrap();
+        let r1 = open_drift_run(&conn, Some(z), 100, 0, 0, 0, 0, 0).unwrap();
+        let r2 = open_drift_run(&conn, Some(z), 200, 0, 0, 0, 0, 0).unwrap();
+        let r3 = open_drift_run(&conn, Some(z), 300, 0, 0, 0, 0, 0).unwrap();
+        delete_drift_run(&conn, r2).unwrap();
+
+        let rows = list_drift_runs(&conn).unwrap();
+        let num = |id: i64| rows.iter().find(|r| r.id == id).unwrap().zone_run_number;
+        assert_eq!(num(r1), 1);
+        assert_eq!(num(r3), 2); // reflowed 3 -> 2; global id unchanged
     }
 
     #[test]
