@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
-  import type { LayerGroup, Map as LMap, Marker, TileLayer } from 'leaflet';
+  import type { LatLng, LayerGroup, Map as LMap, Marker, Polyline, TileLayer } from 'leaflet';
   import { packet, displayPacket } from '$lib/stores/telemetry';
   import {
     deleteDriftZone,
@@ -68,6 +68,12 @@
   let boundaryLayer = $state<LayerGroup | null>(null);
   let markerLayer = $state<LayerGroup | null>(null);
   let liveMarker = $state<Marker | null>(null);
+  // Imperative refs to the boundary/gate polylines so we can update their geometry
+  // live during a marker drag without recreating the marker being dragged.
+  let leftLine: Polyline | null = null;
+  let rightLine: Polyline | null = null;
+  let startGateLine: Polyline | null = null;
+  let finishGateLine: Polyline | null = null;
   let resizeObserver: ResizeObserver | null = null;
   let unsubscribeShortcut: (() => void) | null = null;
   let lastKnownPoint = $state<ZonePoint | null>(null);
@@ -258,28 +264,32 @@
     if (!map || !L || !boundaryLayer || !markerLayer || !mapUsable) return;
     boundaryLayer.clearLayers();
     markerLayer.clearLayers();
+    leftLine = null;
+    rightLine = null;
+    startGateLine = null;
+    finishGateLine = null;
 
     if (draft.leftBoundary.length > 1) {
-      L.polyline(draft.leftBoundary.map(worldToLatLng), {
+      leftLine = L.polyline(draft.leftBoundary.map(worldToLatLng), {
         color: '#22c55e',
         weight: 5,
         opacity: 0.95,
       }).addTo(boundaryLayer);
     }
     if (draft.rightBoundary.length > 1) {
-      L.polyline(draft.rightBoundary.map(worldToLatLng), {
+      rightLine = L.polyline(draft.rightBoundary.map(worldToLatLng), {
         color: '#3b82f6',
         weight: 5,
         opacity: 0.95,
       }).addTo(boundaryLayer);
     }
     if (draft.leftBoundary.length && draft.rightBoundary.length) {
-      L.polyline([draft.leftBoundary[0], draft.rightBoundary[0]].map(worldToLatLng), {
+      startGateLine = L.polyline([draft.leftBoundary[0], draft.rightBoundary[0]].map(worldToLatLng), {
         color: '#f59e0b',
         weight: 3,
         dashArray: '10 7',
       }).addTo(boundaryLayer);
-      L.polyline([
+      finishGateLine = L.polyline([
         draft.leftBoundary[draft.leftBoundary.length - 1],
         draft.rightBoundary[draft.rightBoundary.length - 1],
       ].map(worldToLatLng), {
@@ -297,6 +307,7 @@
           icon: markerIcon(side, `${side[0].toUpperCase()}${index + 1}`, selected),
         }).addTo(markerLayer!);
         marker.on('click', () => selectPoint(side, index));
+        marker.on('drag', () => updateLinesDuringDrag(side, index, marker.getLatLng()));
         marker.on('dragend', () => {
           const points = [...boundary(side)];
           points[index] = latLngToWorld(marker.getLatLng());
@@ -314,6 +325,27 @@
       }).addTo(markerLayer);
     } else {
       liveMarker = null;
+    }
+  }
+
+  // Live-update polyline geometry while a marker is being dragged. We can't commit to
+  // `draft` here because that would trigger a full redraw and destroy the marker mid-drag,
+  // so we move the affected line vertices imperatively and commit the state on `dragend`.
+  function updateLinesDuringDrag(side: BoundarySide, index: number, latlng: LatLng) {
+    if (!mapUsable) return;
+    // Position of vertex (s, i): the live drag latlng for the moving point, else stored world pos.
+    const at = (s: BoundarySide, i: number): LatLng =>
+      s === side && i === index ? latlng : worldToLatLng(boundary(s)[i]);
+
+    const sideLine = side === 'left' ? leftLine : rightLine;
+    sideLine?.setLatLngs(boundary(side).map((_, i) => at(side, i)));
+
+    if (draft.leftBoundary.length && draft.rightBoundary.length) {
+      startGateLine?.setLatLngs([at('left', 0), at('right', 0)]);
+      finishGateLine?.setLatLngs([
+        at('left', draft.leftBoundary.length - 1),
+        at('right', draft.rightBoundary.length - 1),
+      ]);
     }
   }
 
