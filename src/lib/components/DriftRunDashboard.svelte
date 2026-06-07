@@ -90,6 +90,17 @@
     return ms ? new Date(ms).toLocaleString() : '-';
   }
 
+  function formatShort(ms: number | null) {
+    return ms
+      ? new Date(ms).toLocaleString(undefined, {
+          month: 'short',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+        })
+      : '-';
+  }
+
   function formatDuration(run: DriftRunRow | null) {
     if (!run?.endedAt) return '-';
     return `${Math.max(0, (run.endedAt - run.startedAt) / 1000).toFixed(1)}s`;
@@ -264,6 +275,9 @@
             <span>mult ×{b.maxMultiplier.toFixed(1)}</span>
           </div>
         {/if}
+        {#if scoringRun}
+          <p class="recorded">Recorded {formatDate(scoringRun.startedAt)}</p>
+        {/if}
         <label class="actual-label" for="actual-score">Actual (in-game)</label>
         <div class="score-input">
           <input
@@ -278,12 +292,12 @@
             {savingScore ? 'Saving' : 'Save'}
           </button>
         </div>
-        <p class="score-status">{scoreStatus || recomputeStatus || (scoringRun ? formatDate(scoringRun.startedAt) : 'No completed runs')}</p>
+        <p class="score-status">{scoreStatus || recomputeStatus || (scoringRun ? '' : 'No completed runs')}</p>
       </section>
 
       <section class="history">
         <div class="card-title">
-          <span>Recent Scores</span>
+          <span>Recent Runs · newest first</span>
           <strong>{selectedRuns.length}</strong>
         </div>
         <div class="run-list">
@@ -297,6 +311,9 @@
             >
               <div>
                 <strong>{formatScore(run.computedScore)}</strong>
+                <span class="when">{formatShort(run.startedAt)}</span>
+              </div>
+              <div>
                 <span>act {run.manualScore?.toLocaleString() ?? '—'} · {formatStatus(run)} / {formatDuration(run)}</span>
               </div>
               <div>
@@ -598,6 +615,12 @@
     flex-wrap: wrap;
     gap: 0.4rem 0.75rem;
     padding: 0 0.75rem 0.5rem;
+    color: var(--tx-dim);
+    font-size: 0.66rem;
+    font-variant-numeric: tabular-nums;
+  }
+  .recorded {
+    padding: 0.15rem 0.75rem 0;
     color: var(--tx-dim);
     font-size: 0.66rem;
     font-variant-numeric: tabular-nums;
