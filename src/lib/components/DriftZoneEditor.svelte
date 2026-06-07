@@ -1,6 +1,14 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
-  import type { LatLng, LayerGroup, Map as LMap, Marker, Polyline, TileLayer } from 'leaflet';
+  import type {
+    LatLng,
+    LayerGroup,
+    LeafletMouseEvent,
+    Map as LMap,
+    Marker,
+    Polyline,
+    TileLayer,
+  } from 'leaflet';
   import { packet, displayPacket } from '$lib/stores/telemetry';
   import {
     deleteDriftZone,
@@ -182,7 +190,7 @@
     return [x, y];
   }
 
-  function fromClient(e: PointerEvent): ZonePoint {
+  function fromClient(e: MouseEvent | PointerEvent): ZonePoint {
     const rect = svgEl!.getBoundingClientRect();
     const sx = ((e.clientX - rect.left) / rect.width) * width;
     const sy = ((e.clientY - rect.top) / rect.height) * height;
@@ -254,6 +262,7 @@
     }).addTo(map);
     boundaryLayer = L.layerGroup().addTo(map);
     markerLayer = L.layerGroup().addTo(map);
+    map.on('click', onLeafletMapClick);
     map.setView(
       map.unproject(L.point(config.defaultCenter[0], config.defaultCenter[1]), config.maxZoom),
       config.defaultZoom
@@ -408,6 +417,27 @@
     else draft.rightBoundary = points;
   }
 
+  function appendBoundaryPoint(side: BoundarySide, point: ZonePoint, source: 'map' | 'telemetry') {
+    const nextIndex = boundary(side).length;
+    setBoundary(side, [...boundary(side), { ...point }]);
+    activeSide = side;
+    selectedPoint = { side, index: nextIndex };
+    status =
+      source === 'map'
+        ? `Added ${side} point ${nextIndex + 1} from map click.`
+        : `Captured ${side} point ${nextIndex + 1} from last known telemetry.`;
+  }
+
+  function onLeafletMapClick(e: LeafletMouseEvent) {
+    if (!mapUsable) return;
+    appendBoundaryPoint(activeSide, latLngToWorld(e.latlng), 'map');
+  }
+
+  function onSvgMapPointerUp(e: PointerEvent) {
+    if (!svgEl) return;
+    appendBoundaryPoint(activeSide, fromClient(e), 'map');
+  }
+
   function selectedBoundaryPointLabel(): string {
     if (!selectedPoint) return 'No point selected';
     return `${selectedPoint.side === 'left' ? 'L' : 'R'}${selectedPoint.index + 1}`;
@@ -418,10 +448,10 @@
       status = 'Waiting for the first telemetry world position. Drive briefly, then reopen/click capture.';
       return;
     }
-    setBoundary(side, [...boundary(side), { ...livePoint }]);
+    appendBoundaryPoint(side, livePoint, 'telemetry');
     if (fromShortcut && side !== activeSide) activeSide = side;
     const shortcutLabel = fromShortcut ? ' via shortcut' : '';
-    status = `Captured ${side} point ${boundary(side).length}${shortcutLabel} from last known telemetry.`;
+    if (shortcutLabel) status = `${status.replace(/\.$/, '')}${shortcutLabel}.`;
     setTimeout(fitMapToGeometry, 0);
   }
 
@@ -577,7 +607,7 @@
       <header class="head">
         <div>
           <h2>{selectedId ? 'Edit Drift Zone' : 'New Drift Zone'}</h2>
-          <p>Capture both road edges from live telemetry, then refine points by dragging them.</p>
+          <p>Click the map or capture live telemetry to add road-edge points, then drag to refine.</p>
         </div>
         <button class="close" onclick={onClose}>✕</button>
       </header>
@@ -640,7 +670,15 @@
             role="img"
             aria-label="Drift zone boundary editor"
           >
-            <rect x="0" y="0" width={width} height={height} />
+            <rect
+              class="map-bg"
+              x="0"
+              y="0"
+              width={width}
+              height={height}
+              role="presentation"
+              onpointerup={onSvgMapPointerUp}
+            />
 
             {#if draft.leftBoundary.length > 1}
               <polyline class="boundary left" points={path(draft.leftBoundary)} />
@@ -715,7 +753,7 @@
         <div><strong>{sideLabel('left')}</strong><span>{draft.leftBoundary.length} points</span></div>
         <div><strong>{sideLabel('right')}</strong><span>{draft.rightBoundary.length} points</span></div>
         <div><strong>End gates</strong><span>First &amp; last point pairs — enter either, exit the other</span></div>
-        <div><strong>Editing</strong><span>Drag points to refine; double-click to delete</span></div>
+        <div><strong>Editing</strong><span>Click map to add; drag points to refine</span></div>
       </div>
 
       <footer>
@@ -948,14 +986,16 @@
     background: var(--bg-card);
     font: inherit;
   }
-  rect {
+  .map-bg {
     fill: var(--bg-body);
+    cursor: crosshair;
   }
   .boundary {
     fill: none;
     stroke-width: 5;
     stroke-linecap: round;
     stroke-linejoin: round;
+    pointer-events: none;
   }
   .boundary.left {
     stroke: #22c55e;
@@ -967,6 +1007,7 @@
     fill: none;
     stroke-width: 3;
     stroke-dasharray: 10 7;
+    pointer-events: none;
   }
   .gate.start {
     stroke: #f59e0b;
@@ -1002,6 +1043,7 @@
     fill: #fbbf24;
     stroke: #020617;
     stroke-width: 2;
+    pointer-events: none;
   }
   .details {
     display: grid;

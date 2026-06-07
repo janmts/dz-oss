@@ -31,7 +31,7 @@ Checked items are done; the rest are roughly in priority order.
 ## 🔜 A. Zone authoring tooling — *highest priority*
 *(Need to map all the drift zones before recorded-run viewing is worthwhile.)*
 
-- [ ] **A1. Click-to-add boundary points.** Click the map in the editor to drop a
+- [x] **A1. Click-to-add boundary points.** Click the map in the editor to drop a
   point on the active side, instead of only capturing the car's live position.
   The `latLng↔world` transforms already exist in `DriftZoneEditor.svelte`; this
   is mostly a `map.on('click')` handler appending to the active boundary.
