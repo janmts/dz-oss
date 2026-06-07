@@ -37,8 +37,6 @@ pub struct ScoringParams {
     pub mult_growth_per_s: f64,
     /// Maximum combo multiplier.
     pub mult_cap: f64,
-    /// Convention offset (radians) added to the raw sideslip. Calibrated ≈ 0.
-    pub yaw_offset_rad: f64,
     /// Final scale factor mapping raw points to in-game magnitude.
     pub scale: f64,
 }
@@ -55,9 +53,8 @@ impl Default for ScoringParams {
             base_rate: 1000.0,
             mult_growth_per_s: 0.6,
             mult_cap: 5.0,
-            yaw_offset_rad: 0.0,
             // Calibrated so the one known-scored run (57016) reproduces exactly.
-            scale: 4.258,
+            scale: 2.775,
         }
     }
 }
@@ -86,13 +83,12 @@ pub struct RunScore {
 
 /// Chassis sideslip (drift angle) in **degrees**, always ≥ 0.
 ///
-/// β = angle between where the car points (`yaw`) and where it is actually
-/// moving (world velocity heading). The `atan2(vz, vx) - yaw` form and a ~0
-/// offset were established empirically from recorded runs (scripts/calibrate2).
-pub fn drift_angle_deg(pkt: &TelemetryPacket, yaw_offset_rad: f64) -> f64 {
-    let vel_heading = (pkt.vel_z as f64).atan2(pkt.vel_x as f64);
-    let beta = wrap_pi(vel_heading - pkt.yaw as f64 - yaw_offset_rad);
-    beta.abs().to_degrees()
+/// Forza reports velocity in the **car's local frame**, so sideslip is simply
+/// the angle between lateral (`velX`) and longitudinal (`velZ`) velocity — no
+/// yaw needed. Verified ≈0 (mean 0.03°, std 0.45°) on straight grip driving
+/// across all headings (scripts/frame_test.py).
+pub fn drift_angle_deg(pkt: &TelemetryPacket) -> f64 {
+    (pkt.vel_x as f64).atan2(pkt.vel_z as f64).abs().to_degrees()
 }
 
 /// Rear-axle combined slip: max of the two rear tires' combined slip. Forza's
@@ -157,7 +153,7 @@ pub fn score_run(packets: &[TelemetryPacket], p: &ScoringParams) -> RunScore {
         total_time += dt;
 
         let speed = pkt.speed_ms as f64;
-        let angle = drift_angle_deg(pkt, p.yaw_offset_rad);
+        let angle = drift_angle_deg(pkt);
         let drifting = speed >= p.min_speed_ms
             && angle >= p.min_angle_deg
             && angle <= p.spin_angle_deg
@@ -191,33 +187,19 @@ pub fn score_run(packets: &[TelemetryPacket], p: &ScoringParams) -> RunScore {
     }
 }
 
-/// Wrap radians to (-π, π].
-fn wrap_pi(a: f64) -> f64 {
-    use std::f64::consts::PI;
-    let mut x = (a + PI) % (2.0 * PI);
-    if x < 0.0 {
-        x += 2.0 * PI;
-    }
-    x - PI
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A packet whose world velocity points along +heading rotated by `beta`
-    /// from where the car is pointing (`yaw`), at a given speed, with the rears
-    /// sliding. Lets tests dial in an exact drift angle.
-    fn drifting_packet(yaw: f32, beta_deg: f64, speed: f32) -> TelemetryPacket {
-        // vel_heading = atan2(vz, vx); choose it so wrap(vel_heading - yaw) = beta.
-        let vel_heading = yaw as f64 + beta_deg.to_radians();
-        let (sin, cos) = vel_heading.sin_cos();
+    /// A packet with local-frame velocity at sideslip `beta_deg` and `speed`,
+    /// rears sliding. Lets tests dial in an exact drift angle.
+    fn drifting_packet(beta_deg: f64, speed: f32) -> TelemetryPacket {
+        let b = beta_deg.to_radians();
         let mut p = base_packet();
-        p.yaw = yaw;
         p.speed_ms = speed;
-        // atan2(vz, vx) = vel_heading  ⇒  vx = cos, vz = sin (scaled by speed).
-        p.vel_x = (speed as f64 * cos) as f32;
-        p.vel_z = (speed as f64 * sin) as f32;
+        // angle = atan2(vx, vz)  ⇒  vx = speed·sin β (lateral), vz = speed·cos β.
+        p.vel_x = (speed as f64 * b.sin()) as f32;
+        p.vel_z = (speed as f64 * b.cos()) as f32;
         p.timestamp_ms = 0;
         p.tire_combined_slip_rl = 3.0;
         p.tire_combined_slip_rr = 3.0;
@@ -236,13 +218,10 @@ mod tests {
 
     #[test]
     fn drift_angle_recovers_beta() {
-        // Across several yaws, the computed |β| matches the injected angle.
-        for &yaw in &[0.0_f32, 1.0, -2.0, 3.0] {
-            for &beta in &[15.0_f64, 35.0, 60.0] {
-                let p = drifting_packet(yaw, beta, 20.0);
-                let got = drift_angle_deg(&p, 0.0);
-                assert!((got - beta).abs() < 0.5, "yaw={yaw} beta={beta} got={got}");
-            }
+        for &beta in &[15.0_f64, 35.0, 60.0] {
+            let p = drifting_packet(beta, 20.0);
+            let got = drift_angle_deg(&p);
+            assert!((got - beta).abs() < 0.5, "beta={beta} got={got}");
         }
     }
 
@@ -251,7 +230,7 @@ mod tests {
         // β = 0 ⇒ below min angle ⇒ no points even at speed.
         let params = ScoringParams::default();
         let pkts: Vec<_> = (0..120)
-            .map(|i| at(drifting_packet(0.5, 0.0, 25.0), i * 16))
+            .map(|i| at(drifting_packet(0.0, 25.0), i * 16))
             .collect();
         let r = score_run(&pkts, &params);
         assert_eq!(r.score, 0.0);
@@ -263,7 +242,7 @@ mod tests {
         let params = ScoringParams::default();
         // ~3 s of a steady 40° drift at 20 m/s, 60 Hz.
         let pkts: Vec<_> = (0..180)
-            .map(|i| at(drifting_packet(1.0, 40.0, 20.0), i * 16))
+            .map(|i| at(drifting_packet(40.0, 20.0), i * 16))
             .collect();
         let r = score_run(&pkts, &params);
         assert!(r.score > 0.0);
@@ -280,18 +259,18 @@ mod tests {
         let mut pkts = Vec::new();
         let mut t = 0u32;
         for _ in 0..180 {
-            pkts.push(at(drifting_packet(1.0, 40.0, 20.0), t));
+            pkts.push(at(drifting_packet(40.0, 20.0), t));
             t += 16;
         }
         for _ in 0..120 {
-            pkts.push(at(drifting_packet(1.0, 0.0, 20.0), t)); // straight = break
+            pkts.push(at(drifting_packet(0.0, 20.0), t)); // straight = break
             t += 16;
         }
         let with_break = score_run(&pkts, &params);
         // Sanity: a single continuous drift of equal drift-time scores more,
         // because the multiplier is never reset.
         let continuous: Vec<_> = (0..180)
-            .map(|i| at(drifting_packet(1.0, 40.0, 20.0), i * 16))
+            .map(|i| at(drifting_packet(40.0, 20.0), i * 16))
             .collect();
         let cont = score_run(&continuous, &params);
         assert!(with_break.max_multiplier >= cont.max_multiplier - 1e-9);
@@ -302,7 +281,7 @@ mod tests {
     fn spun_out_angle_does_not_score() {
         let params = ScoringParams::default();
         let pkts: Vec<_> = (0..120)
-            .map(|i| at(drifting_packet(0.0, 120.0, 20.0), i * 16))
+            .map(|i| at(drifting_packet(120.0, 20.0), i * 16))
             .collect();
         let r = score_run(&pkts, &params);
         assert_eq!(r.score, 0.0, "120° is past spin_angle, must not score");
