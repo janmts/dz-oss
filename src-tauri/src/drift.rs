@@ -271,16 +271,17 @@ impl RunnableZone {
         if !row.active || row.left_boundary.len() < 2 || row.right_boundary.len() < 2 {
             return None;
         }
-        let gate_a = gate_or_derived(
-            &row.start_gate,
-            row.left_boundary.first()?,
-            row.right_boundary.first()?,
-        );
-        let gate_b = gate_or_derived(
-            &row.finish_gate,
-            row.left_boundary.last()?,
-            row.right_boundary.last()?,
-        );
+        // The end gates ARE the first/last boundary point pairs — always derived
+        // from the current boundary, never the stored gate (which can go stale
+        // when the boundary is edited after the first save).
+        let gate_a = [
+            Point::from(row.left_boundary.first()?),
+            Point::from(row.right_boundary.first()?),
+        ];
+        let gate_b = [
+            Point::from(row.left_boundary.last()?),
+            Point::from(row.right_boundary.last()?),
+        ];
         let mut polygon: Vec<Point> = row.left_boundary.iter().map(Point::from).collect();
         polygon.extend(row.right_boundary.iter().rev().map(Point::from));
         if polygon.len() < 3 {
@@ -366,17 +367,6 @@ fn score_from_packets(
     (Some(result.score as f32), serde_json::to_string(&result).ok())
 }
 
-fn gate_or_derived(
-    gate: &[db::ZonePoint],
-    left: &db::ZonePoint,
-    right: &db::ZonePoint,
-) -> [Point; 2] {
-    if gate.len() == 2 {
-        [Point::from(&gate[0]), Point::from(&gate[1])]
-    } else {
-        [Point::from(left), Point::from(right)]
-    }
-}
 
 fn packet_point(pkt: &parser::TelemetryPacket) -> Option<Point> {
     if pkt.position_x == 0.0 && pkt.position_z == 0.0 {

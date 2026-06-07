@@ -386,23 +386,16 @@ fn parse_value_json(raw: String) -> serde_json::Value {
 }
 
 fn normalize_zone_input(input: &DriftZoneInput) -> DriftZoneInput {
-    let start_gate = if input.start_gate.len() == 2 {
-        input.start_gate.clone()
-    } else if let (Some(left), Some(right)) =
-        (input.left_boundary.first(), input.right_boundary.first())
-    {
-        vec![left.clone(), right.clone()]
-    } else {
-        Vec::new()
+    // The end gates are always the first/last boundary point pairs. Deriving on
+    // every save (rather than keeping a provided gate) stops them going stale
+    // when the boundary is edited after an earlier save.
+    let start_gate = match (input.left_boundary.first(), input.right_boundary.first()) {
+        (Some(left), Some(right)) => vec![left.clone(), right.clone()],
+        _ => Vec::new(),
     };
-    let finish_gate = if input.finish_gate.len() == 2 {
-        input.finish_gate.clone()
-    } else if let (Some(left), Some(right)) =
-        (input.left_boundary.last(), input.right_boundary.last())
-    {
-        vec![left.clone(), right.clone()]
-    } else {
-        Vec::new()
+    let finish_gate = match (input.left_boundary.last(), input.right_boundary.last()) {
+        (Some(left), Some(right)) => vec![left.clone(), right.clone()],
+        _ => Vec::new(),
     };
     DriftZoneInput {
         id: input.id,
