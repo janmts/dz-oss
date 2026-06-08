@@ -22,6 +22,8 @@ export const driftRunStatus = writable<DriftRunStatus>({
   endedAt: null,
   packetCount: 0,
   invalidReason: null,
+  scoring: false,
+  starveRemainingS: null,
 });
 export const driftZones = writable<DriftZoneRow[]>([]);
 export const settings = writable<AppSettings | null>(null);

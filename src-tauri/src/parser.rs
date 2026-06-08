@@ -43,6 +43,13 @@ pub struct TelemetryPacket {
     pub tire_combined_slip_fr: f32,
     pub tire_combined_slip_rl: f32,
     pub tire_combined_slip_rr: f32,
+    /// Per-wheel surface roughness (0 on smooth tarmac, >0 on grass/dirt/gravel).
+    /// Used by scoring as a tarmac-contact gate: points accrue only while at
+    /// least one tyre is on tarmac.
+    pub surface_rumble_fl: f32,
+    pub surface_rumble_fr: f32,
+    pub surface_rumble_rl: f32,
+    pub surface_rumble_rr: f32,
     pub car_ordinal: i32,
     pub car_class: i32,
     pub car_pi: i32,
@@ -121,7 +128,10 @@ pub fn parse(buf: &[u8]) -> Result<TelemetryPacket, ParseError> {
     skip_f32_fields(&mut c, 4)?; // WheelRotationSpeed
     skip_f32_fields(&mut c, 4)?; // WheelOnRumbleStrip
     skip_f32_fields(&mut c, 4)?; // WheelInPuddleDepth
-    skip_f32_fields(&mut c, 4)?; // SurfaceRumble
+    let surface_rumble_fl = c.read_f32::<LittleEndian>()?; // 148
+    let surface_rumble_fr = c.read_f32::<LittleEndian>()?; // 152
+    let surface_rumble_rl = c.read_f32::<LittleEndian>()?; // 156
+    let surface_rumble_rr = c.read_f32::<LittleEndian>()?; // 160
     let tire_slip_angle_fl = c.read_f32::<LittleEndian>()?;
     let tire_slip_angle_fr = c.read_f32::<LittleEndian>()?;
     let tire_slip_angle_rl = c.read_f32::<LittleEndian>()?;
@@ -212,6 +222,10 @@ pub fn parse(buf: &[u8]) -> Result<TelemetryPacket, ParseError> {
         tire_combined_slip_fr,
         tire_combined_slip_rl,
         tire_combined_slip_rr,
+        surface_rumble_fl,
+        surface_rumble_fr,
+        surface_rumble_rl,
+        surface_rumble_rr,
         car_ordinal,
         car_class,
         car_pi,
@@ -333,6 +347,23 @@ mod tests {
         buf[268..272].copy_from_slice(&212.0f32.to_le_bytes());
         let pkt = parse(&buf).unwrap();
         assert!((pkt.tire_temp_fl - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn parses_surface_rumble() {
+        // SurfaceRumble FL/FR/RL/RR sit at bytes 148/152/156/160.
+        let mut buf = zero_packet(324);
+        buf[148..152].copy_from_slice(&0.0f32.to_le_bytes());
+        buf[152..156].copy_from_slice(&0.6f32.to_le_bytes());
+        buf[156..160].copy_from_slice(&0.3f32.to_le_bytes());
+        buf[160..164].copy_from_slice(&0.5f32.to_le_bytes());
+        let pkt = parse(&buf).unwrap();
+        assert_eq!(pkt.surface_rumble_fl, 0.0);
+        assert!((pkt.surface_rumble_fr - 0.6).abs() < 0.001);
+        assert!((pkt.surface_rumble_rl - 0.3).abs() < 0.001);
+        assert!((pkt.surface_rumble_rr - 0.5).abs() < 0.001);
+        // SurfaceRumble must not bleed into the next field (TireSlipAngle FL @164).
+        assert_eq!(pkt.tire_slip_angle_fl, 0.0);
     }
 
     #[test]

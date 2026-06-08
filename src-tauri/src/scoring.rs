@@ -50,6 +50,13 @@ pub struct ScoringParams {
     pub slip_gate: f64,
     /// Points per second at full angle/speed factors and multiplier 1.0.
     pub base_rate: f64,
+    /// When true, a packet scores only while **at least one tyre is on tarmac**;
+    /// a fully off-track packet (all four wheels on grass/dirt) scores nothing.
+    /// This mirrors FH6: drifting through the scenery earns no points. Validated
+    /// on 236 logged runs — gating all-four-off packets to zero dropped MAE
+    /// 3.66%→3.40% and fixed the deep-grass over-scorers without touching runs
+    /// that merely clip the verge with one wheel. Refit `scale` if toggled.
+    pub require_tarmac_contact: bool,
     /// Multiplier increase per second of sustained, unbroken drift. The default
     /// is 0.0 because the current FH6 drift-zone samples fit better without a
     /// combo-style multiplier.
@@ -76,15 +83,17 @@ impl Default for ScoringParams {
             speed_cap_ms: 60.0,
             slip_gate: 1.0,
             base_rate: 1000.0,
+            require_tarmac_contact: true,
             mult_growth_per_s: 0.0,
             mult_cap: 1.0,
             transition_grace_s: 0.5,
-            // Least-squares fit across valid logged in-game scores (233 runs
+            // Least-squares fit across valid logged in-game scores (236 runs
             // across three zones / 7 cars) with the default no-combo,
-            // angle_power=0.10, above_sweet_decline=0.25 model; re-derive as more
-            // scores are logged. Marker rows (the all-9s placeholder) and invalid
-            // runs are excluded from the fit.
-            scale: 11.024,
+            // angle_power=0.10, above_sweet_decline=0.25 model AND the tarmac gate
+            // on; re-derive as more scores are logged. Marker rows (the all-9s
+            // placeholder) and invalid runs are excluded from the fit. (Without
+            // the tarmac gate the fit was 11.024; enabling it refit to 11.038.)
+            scale: 11.038,
         }
     }
 }
@@ -132,6 +141,40 @@ pub fn drift_angle_deg(pkt: &TelemetryPacket) -> f64 {
 /// combined slip is normalized so ~1.0 is the grip limit; higher ⇒ sliding.
 fn rear_combined_slip(pkt: &TelemetryPacket) -> f64 {
     (pkt.tire_combined_slip_rl.abs() as f64).max(pkt.tire_combined_slip_rr.abs() as f64)
+}
+
+/// SurfaceRumble below this counts the wheel as "on tarmac". A smooth surface
+/// reports exactly 0; grass/dirt/gravel reads well above 0.05, so any cutoff in
+/// (0, 0.05] gives identical results (the signal is effectively binary).
+const TARMAC_RUMBLE_EPS: f32 = 0.05;
+
+/// True if **at least one tyre** is on tarmac. Only a fully off-track packet —
+/// all four wheels on a rough surface — returns false.
+fn on_tarmac(pkt: &TelemetryPacket) -> bool {
+    pkt.surface_rumble_fl <= TARMAC_RUMBLE_EPS
+        || pkt.surface_rumble_fr <= TARMAC_RUMBLE_EPS
+        || pkt.surface_rumble_rl <= TARMAC_RUMBLE_EPS
+        || pkt.surface_rumble_rr <= TARMAC_RUMBLE_EPS
+}
+
+/// Whether the car is sliding hard enough to count as drifting: above the min
+/// speed, drift angle within the [min, spin] band, and the rear axle past the
+/// slip gate. Independent of surface — see [`is_scoring_packet`] for the
+/// points-accruing predicate.
+pub fn is_drifting(pkt: &TelemetryPacket, p: &ScoringParams) -> bool {
+    let speed = pkt.speed_ms as f64;
+    let angle = drift_angle_deg(pkt);
+    speed >= p.min_speed_ms
+        && angle >= p.min_angle_deg
+        && angle <= p.spin_angle_deg
+        && rear_combined_slip(pkt) >= p.slip_gate
+}
+
+/// Whether this packet earns points: drifting **and**, when the tarmac gate is
+/// on, at least one tyre on tarmac. This is the signal the run-abort starvation
+/// timer watches — a run with no scoring packet for too long is dead.
+pub fn is_scoring_packet(pkt: &TelemetryPacket, p: &ScoringParams) -> bool {
+    is_drifting(pkt, p) && (!p.require_tarmac_contact || on_tarmac(pkt))
 }
 
 /// Angle contribution: ramps 0->1 up to the sweet spot using `angle_power`, then
@@ -203,10 +246,7 @@ pub fn score_run(packets: &[TelemetryPacket], p: &ScoringParams) -> RunScore {
         let signed = (pkt.vel_x as f64).atan2(pkt.vel_z as f64).to_degrees();
         let angle = signed.abs();
         let sign = if signed >= 0.0 { 1i8 } else { -1i8 };
-        let drifting = speed >= p.min_speed_ms
-            && angle >= p.min_angle_deg
-            && angle <= p.spin_angle_deg
-            && rear_combined_slip(pkt) >= p.slip_gate;
+        let drifting = is_drifting(pkt, p);
 
         if drifting {
             // Resuming after a dip: count a linked flick only if drifting picked
@@ -228,8 +268,12 @@ pub fn score_run(packets: &[TelemetryPacket], p: &ScoringParams) -> RunScore {
                 1.0
             };
             max_multiplier = max_multiplier.max(multiplier);
-            total +=
-                p.base_rate * angle_factor(angle, p) * speed_factor(speed, p) * multiplier * dt;
+            // Points accrue only with a tyre on tarmac (when the gate is on);
+            // off-track sliding still counts as drift time / continuity below.
+            if !p.require_tarmac_contact || on_tarmac(pkt) {
+                total +=
+                    p.base_rate * angle_factor(angle, p) * speed_factor(speed, p) * multiplier * dt;
+            }
             drift_time += dt;
             angle_sum += angle;
             speed_sum += speed;
@@ -421,6 +465,58 @@ mod tests {
         // long combo while the straighten has to rebuild from 1×.
         assert!(flick.max_multiplier > straighten.max_multiplier + 0.2);
         assert!(flick.score > straighten.score);
+    }
+
+    /// Put all four wheels on a rough surface (fully off-track).
+    fn all_wheels_off_tarmac(mut p: TelemetryPacket) -> TelemetryPacket {
+        p.surface_rumble_fl = 0.6;
+        p.surface_rumble_fr = 0.6;
+        p.surface_rumble_rl = 0.6;
+        p.surface_rumble_rr = 0.6;
+        p
+    }
+
+    #[test]
+    fn fully_off_track_drift_scores_zero() {
+        let params = ScoringParams::default();
+        // 3 s of a steady 40° drift at 20 m/s, but all four wheels in the grass.
+        let pkts: Vec<_> = (0..180)
+            .map(|i| at(all_wheels_off_tarmac(drifting_packet(40.0, 20.0)), i * 16))
+            .collect();
+        let r = score_run(&pkts, &params);
+        assert_eq!(r.score, 0.0, "all-four-off-tarmac must not score");
+        // It still counts as drift time / sliding for the breakdown.
+        assert!(r.drift_time_s > 2.5);
+    }
+
+    #[test]
+    fn one_tyre_on_tarmac_still_scores_fully() {
+        let params = ScoringParams::default();
+        let on_one = |i: u32| {
+            let mut p = all_wheels_off_tarmac(drifting_packet(40.0, 20.0));
+            p.surface_rumble_rl = 0.0; // one rear wheel back on tarmac
+            at(p, i * 16)
+        };
+        let mixed: Vec<_> = (0..180).map(on_one).collect();
+        let all_on: Vec<_> = (0..180).map(|i| at(drifting_packet(40.0, 20.0), i * 16)).collect();
+        let r_mixed = score_run(&mixed, &params);
+        let r_on = score_run(&all_on, &params);
+        assert!(r_mixed.score > 0.0);
+        // One tyre on tarmac earns the same as all four — the gate is all-or-nothing.
+        assert!((r_mixed.score - r_on.score).abs() < 1e-6);
+    }
+
+    #[test]
+    fn tarmac_gate_can_be_disabled() {
+        let params = ScoringParams {
+            require_tarmac_contact: false,
+            ..ScoringParams::default()
+        };
+        let pkts: Vec<_> = (0..180)
+            .map(|i| at(all_wheels_off_tarmac(drifting_packet(40.0, 20.0)), i * 16))
+            .collect();
+        let r = score_run(&pkts, &params);
+        assert!(r.score > 0.0, "with the gate off, off-track drift scores again");
     }
 
     #[test]

@@ -133,6 +133,11 @@ export interface DriftRunStatus {
   endedAt: number | null;
   packetCount: number;
   invalidReason: string | null;
+  /** Latest packet is earning points (drifting with a tyre on tarmac). */
+  scoring: boolean;
+  /** Seconds left before score-starvation aborts the run; null when scoring,
+   *  idle/closed, or the starvation timer is disabled. */
+  starveRemainingS: number | null;
 }
 
 export interface ZonePoint {
@@ -181,6 +186,8 @@ export interface AppSettings {
   mapDefaultZoom: number;
   mapDefaultCenter: [number, number];
   tiresVisible: boolean;
+  /** Seconds a drift run may go without scoring before it aborts. 0 disables. */
+  driftStarveTimeoutS: number;
 }
 
 export type DrivetrainLabel = 'FWD' | 'RWD' | 'AWD';

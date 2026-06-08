@@ -42,6 +42,7 @@
         mapDefaultZoom: 0,
         mapDefaultCenter: [0, 0] as [number, number],
         tiresVisible: true,
+        driftStarveTimeoutS: 5,
       };
       draft = { ...mapDefaults, ...$settings };
     }
@@ -86,6 +87,25 @@
         <input type="checkbox" bind:checked={draft.autoRecord} />
         Auto-record sessions
       </label>
+
+      <fieldset>
+        <legend>Drift Runs</legend>
+        <label>
+          Score-starvation timeout (s)
+          <input
+            type="number"
+            min="0"
+            step="0.5"
+            bind:value={draft.driftStarveTimeoutS}
+          />
+          <span class="hint">
+            A run aborts after this many seconds without earning drift points
+            (the in-game fail condition). <strong>0 disables</strong> — a run then
+            ends only at the finish gate. Watch the live run box turn yellow when
+            the timer is counting to dial this in.
+          </span>
+        </label>
+      </fieldset>
 
       <fieldset>
         <legend>Tire Temp Thresholds (°C)</legend>

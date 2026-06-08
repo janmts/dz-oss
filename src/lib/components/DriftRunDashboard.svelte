@@ -64,6 +64,8 @@
   let activeForSelected = $derived(
     $driftRunStatus.state === 'running' && selectedZone?.id === $driftRunStatus.zoneId
   );
+  // Death-timer counting: live run that isn't currently earning points.
+  let liveStarving = $derived(activeForSelected && !$driftRunStatus.scoring);
   let scoringRun = $derived.by(() => {
     if (selectedRunId !== null) {
       const explicit = selectedRuns.find((run) => run.id === selectedRunId);
@@ -279,10 +281,23 @@
     </main>
 
     <aside class="run-rail">
-      <section class="run-card" class:live={activeForSelected} class:bad={$driftRunStatus.state === 'invalid'}>
+      <section
+        class="run-card"
+        class:live={activeForSelected}
+        class:starving={liveStarving}
+        class:bad={$driftRunStatus.state === 'invalid'}
+      >
         <div class="card-title">
           <span>Current Run</span>
-          <strong>{activeForSelected ? 'LIVE' : statusLabel()}</strong>
+          <strong class:warn={liveStarving}>
+            {#if liveStarving}
+              NO SCORE{#if $driftRunStatus.starveRemainingS != null} · {$driftRunStatus.starveRemainingS.toFixed(1)}s{/if}
+            {:else if activeForSelected}
+              LIVE
+            {:else}
+              {statusLabel()}
+            {/if}
+          </strong>
         </div>
         <div class="metric-grid">
           <div>
@@ -302,6 +317,11 @@
             <strong>{formatDate($driftRunStatus.endedAt)}</strong>
           </div>
         </div>
+        {#if liveStarving}
+          <p class="starving-msg">
+            ⚠ Not scoring — no tyre on tarmac / not drifting{#if $driftRunStatus.starveRemainingS != null} · run ends in {$driftRunStatus.starveRemainingS.toFixed(1)}s{/if}
+          </p>
+        {/if}
         {#if $driftRunStatus.invalidReason}
           <p class="invalid">{$driftRunStatus.invalidReason}</p>
         {/if}
@@ -594,8 +614,21 @@
   .run-card.live {
     border-color: #22c55e;
   }
+  /* Death-timer counting (live but not scoring) — overrides the green .live. */
+  .run-card.starving {
+    border-color: #eab308;
+    box-shadow: 0 0 0 1px #eab308 inset;
+  }
   .run-card.bad {
     border-color: #ef4444;
+  }
+  .card-title strong.warn {
+    color: #eab308;
+  }
+  .starving-msg {
+    color: #eab308;
+    font-size: 0.72rem;
+    padding: 0 0.75rem 0.75rem;
   }
   .card-title {
     display: flex;

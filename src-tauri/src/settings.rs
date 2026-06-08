@@ -49,6 +49,14 @@ pub struct Settings {
     // ── Panel visibility ──────────────────────────────────────────────────────
     #[serde(default = "Settings::default_tires_visible")]
     pub tires_visible: bool,
+
+    // ── Drift runs ──────────────────────────────────────────────────────────
+    /// Seconds a drift run may go without earning points before it aborts
+    /// (score-starvation). 0 disables the timer (a run then ends only on the
+    /// finish gate). FH6's true fail condition; tune against the live "not
+    /// scoring" indicator. Default 5 s — generous; lower as you dial it in.
+    #[serde(default = "Settings::default_drift_starve_timeout_s")]
+    pub drift_starve_timeout_s: f32,
 }
 
 impl Settings {
@@ -63,6 +71,9 @@ impl Settings {
     }
     fn default_tires_visible() -> bool {
         true
+    }
+    fn default_drift_starve_timeout_s() -> f32 {
+        5.0
     }
 }
 
@@ -90,6 +101,7 @@ impl Default for Settings {
             map_default_zoom: 0,
             map_default_center: [0.0, 0.0],
             tires_visible: true,
+            drift_starve_timeout_s: Self::default_drift_starve_timeout_s(),
         }
     }
 }
@@ -153,6 +165,14 @@ mod tests {
             "tireTempOptimal":85.0,"tireTempHot":110.0,"autoRecord":true,"theme":"dark"}"#;
         let s: Settings = serde_json::from_str(legacy).unwrap();
         assert!(s.tires_visible);
+    }
+
+    #[test]
+    fn legacy_json_without_starve_timeout_defaults_to_5() {
+        let legacy = r#"{"port":20440,"useMph":true,"tireTempCold":60.0,
+            "tireTempOptimal":85.0,"tireTempHot":110.0,"autoRecord":true,"theme":"dark"}"#;
+        let s: Settings = serde_json::from_str(legacy).unwrap();
+        assert_eq!(s.drift_starve_timeout_s, 5.0);
     }
 
     #[test]
