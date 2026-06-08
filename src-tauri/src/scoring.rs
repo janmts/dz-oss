@@ -36,6 +36,14 @@ pub struct ScoringParams {
     /// is past the drift gate, angle barely scales the score — speed × time
     /// dominates.
     pub angle_power: f64,
+    /// How far the angle factor declines from 1.0 at the sweet spot down toward
+    /// the spin angle: at `spin_angle_deg` the factor equals `1.0 - this`.
+    /// 0.0 = flat (steep drifts keep full credit). The old hardcoded value was
+    /// 0.5; lowered to 0.25 once steep (>45°) runs from an S2 AWD landed and
+    /// showed the 0.5 decline over-penalized the 45–57° band (the only part of
+    /// this branch the data exercises — max observed ≈57°). Refit `scale` after
+    /// changing.
+    pub above_sweet_decline: f64,
     /// Speed (m/s) at which the speed factor saturates (~134 mph).
     pub speed_cap_ms: f64,
     /// Rear combined-slip threshold (normalized, 1.0 ≈ grip limit) for "sliding".
@@ -64,17 +72,19 @@ impl Default for ScoringParams {
             spin_angle_deg: 90.0,
             sweet_angle_deg: 45.0,
             angle_power: 0.10,
+            above_sweet_decline: 0.25,
             speed_cap_ms: 60.0,
             slip_gate: 1.0,
             base_rate: 1000.0,
             mult_growth_per_s: 0.0,
             mult_cap: 1.0,
             transition_grace_s: 0.5,
-            // Least-squares fit across valid logged in-game scores (110 runs
-            // across three zones) with the default no-combo, angle_power=0.10
-            // model; re-derive as more scores are logged. Marker rows (the
-            // all-9s placeholder) and invalid runs are excluded from the fit.
-            scale: 10.986,
+            // Least-squares fit across valid logged in-game scores (233 runs
+            // across three zones / 7 cars) with the default no-combo,
+            // angle_power=0.10, above_sweet_decline=0.25 model; re-derive as more
+            // scores are logged. Marker rows (the all-9s placeholder) and invalid
+            // runs are excluded from the fit.
+            scale: 11.024,
         }
     }
 }
@@ -124,9 +134,9 @@ fn rear_combined_slip(pkt: &TelemetryPacket) -> f64 {
     (pkt.tire_combined_slip_rl.abs() as f64).max(pkt.tire_combined_slip_rr.abs() as f64)
 }
 
-/// Angle contribution: ramps 0->1 up to the sweet spot using `angle_power`,
-/// then declines linearly to 0.5 at the spin angle (the drop to 0 past spin is
-/// the spin-out break). Zero outside the [min, spin] band.
+/// Angle contribution: ramps 0->1 up to the sweet spot using `angle_power`, then
+/// declines linearly toward `1.0 - above_sweet_decline` at the spin angle (the
+/// drop to 0 past spin is the spin-out break). Zero outside the [min, spin] band.
 fn angle_factor(angle_deg: f64, p: &ScoringParams) -> f64 {
     if angle_deg < p.min_angle_deg || angle_deg > p.spin_angle_deg {
         return 0.0;
@@ -136,11 +146,12 @@ fn angle_factor(angle_deg: f64, p: &ScoringParams) -> f64 {
         let power = p.angle_power.max(1e-6);
         ramp.powf(power)
     } else {
-        // Linear decline from 1.0 at the sweet spot to 0.5 at the spin angle;
-        // anything past spin is already 0 (the guard above). No lower floor is
-        // needed — within (sweet, spin] the expression stays in [0.5, 1.0].
+        // Linear decline from 1.0 at the sweet spot toward (1 - above_sweet_decline)
+        // at the spin angle; anything past spin is already 0 (the guard above).
+        // With the default decline 0.25 the factor stays in [0.75, 1.0] on (sweet,
+        // spin], so no lower floor is needed.
         let span = (p.spin_angle_deg - p.sweet_angle_deg).max(1e-6);
-        1.0 - 0.5 * (angle_deg - p.sweet_angle_deg) / span
+        1.0 - p.above_sweet_decline * (angle_deg - p.sweet_angle_deg) / span
     }
 }
 

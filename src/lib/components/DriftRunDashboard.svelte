@@ -335,9 +335,6 @@
             {#if b.maxMultiplier > 1.01}
               <span>mult ×{b.maxMultiplier.toFixed(1)}</span>
             {/if}
-            {#if b.transitions > 0}
-              <span>links ×{b.transitions}</span>
-            {/if}
           </div>
         {/if}
         {#if scoringRun}
