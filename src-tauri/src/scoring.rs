@@ -20,21 +20,24 @@ use crate::parser::TelemetryPacket;
 pub struct ScoringParams {
     /// Below this speed (m/s) nothing scores.
     pub min_speed_ms: f64,
-    /// Drift angle (deg) must reach this to count as drifting.
+    /// Drift angle (deg) must reach this to count as drifting. Lowered 12→10
+    /// once the tarmac gate removed the off-track over-scorers: those 10–12°
+    /// packets are genuinely scoring slides the game credits, and counting them
+    /// (with the flatter ramp below) erased the shallow under-scoring bias.
     pub min_angle_deg: f64,
     /// Above this angle (deg) the car is treated as spun out — the drift breaks.
     pub spin_angle_deg: f64,
     /// Angle (deg) at which the angle factor peaks; beyond it returns diminish.
     pub sweet_angle_deg: f64,
     /// Exponent for the low-angle ramp up to the sweet spot. 1.0 is linear;
-    /// values <1 give shallow high-speed drifts more credit. The default 0.10
-    /// fits the logged FH6 samples best. The optimum keeps sliding down as more
-    /// low-angle cars are logged: on a 77-run sample the residual still
-    /// correlated +0.71 with avg drift angle at 0.4, and after two shallow-angle
-    /// cars landed (110 runs) it had crept back to +0.39 at 0.20. 0.10 nulls
-    /// that correlation (+0.04) and gives the lowest error. In FH6, once the car
-    /// is past the drift gate, angle barely scales the score — speed × time
-    /// dominates.
+    /// values <1 give shallow high-speed drifts more credit. History tracked the
+    /// optimum sliding down as low-angle cars landed (0.5→0.4→0.20→0.10). Now at
+    /// **0.15, paired with `min_angle_deg`=10 and the tarmac gate** — that combo
+    /// flattened the persistent shallow under-scoring (the <20° band went from
+    /// −8% bias to flat) and roughly halved overall MAE (3.40%→1.68% on 236
+    /// runs). The earlier 0.10 fit could not chase this while off-track runs
+    /// were over-scoring; the tarmac gate unblocked it. In FH6, once past the
+    /// drift gate, angle barely scales the score — speed × time dominates.
     pub angle_power: f64,
     /// How far the angle factor declines from 1.0 at the sweet spot down toward
     /// the spin angle: at `spin_angle_deg` the factor equals `1.0 - this`.
@@ -42,7 +45,11 @@ pub struct ScoringParams {
     /// 0.5; lowered to 0.25 once steep (>45°) runs from an S2 AWD landed and
     /// showed the 0.5 decline over-penalized the 45–57° band (the only part of
     /// this branch the data exercises — max observed ≈57°). Refit `scale` after
-    /// changing.
+    /// changing. ⚠️ STILL THE THINNEST-SUPPORTED LEVER: the steep tail (≥40°
+    /// avg) is only ~8 runs, ALL from one car (S2 AWD ord 3865), and it's the
+    /// one cohort the shallow retune slightly worsened (−4.5%→−6.3%). Steep
+    /// angle is fully confounded with that car — gather steep runs across
+    /// MULTIPLE cars before retuning this; do not chase it on the S2 alone.
     pub above_sweet_decline: f64,
     /// Speed (m/s) at which the speed factor saturates (~134 mph).
     pub speed_cap_ms: f64,
@@ -75,10 +82,10 @@ impl Default for ScoringParams {
     fn default() -> Self {
         Self {
             min_speed_ms: 8.0,
-            min_angle_deg: 12.0,
+            min_angle_deg: 10.0,
             spin_angle_deg: 90.0,
             sweet_angle_deg: 45.0,
-            angle_power: 0.10,
+            angle_power: 0.15,
             above_sweet_decline: 0.25,
             speed_cap_ms: 60.0,
             slip_gate: 1.0,
@@ -88,12 +95,13 @@ impl Default for ScoringParams {
             mult_cap: 1.0,
             transition_grace_s: 0.5,
             // Least-squares fit across valid logged in-game scores (236 runs
-            // across three zones / 7 cars) with the default no-combo,
-            // angle_power=0.10, above_sweet_decline=0.25 model AND the tarmac gate
-            // on; re-derive as more scores are logged. Marker rows (the all-9s
-            // placeholder) and invalid runs are excluded from the fit. (Without
-            // the tarmac gate the fit was 11.024; enabling it refit to 11.038.)
-            scale: 11.038,
+            // across three zones / 7 cars) with the no-combo, min_angle=10,
+            // angle_power=0.15, above_sweet_decline=0.25 model AND the tarmac
+            // gate on; re-derive as more scores are logged. Marker rows (the
+            // all-9s placeholder) and invalid runs are excluded from the fit.
+            // Lineage: 11.024 (no gate) → 11.038 (gate, min12/ap0.10) → 10.814
+            // (gate, min10/ap0.15). The last retune halved MAE to ~1.68%.
+            scale: 10.814,
         }
     }
 }
@@ -517,6 +525,16 @@ mod tests {
             .collect();
         let r = score_run(&pkts, &params);
         assert!(r.score > 0.0, "with the gate off, off-track drift scores again");
+    }
+
+    #[test]
+    fn default_gate_counts_shallow_eleven_degree_drift() {
+        // The retune lowered min_angle 12→10, so an 11° slide now scores.
+        let params = ScoringParams::default();
+        assert_eq!(params.min_angle_deg, 10.0);
+        assert!(angle_factor(11.0, &params) > 0.0);
+        // ...and a 9° slide is still below the gate.
+        assert_eq!(angle_factor(9.0, &params), 0.0);
     }
 
     #[test]
