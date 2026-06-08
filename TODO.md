@@ -43,17 +43,55 @@ Checked items are done; the rest are roughly in priority order.
 
 ## 📊 B. Scoring finetuning — *ongoing, data-driven*
 
+> **Zone id ↔ name** (the deleted "failed" zone was id **1**; ids 2/3/4 never
+> renumbered, so the in-app list of 3 is ids 2–4):
+> | zone_id | name | valid runs | notes |
+> |---|---|---|---|
+> | **2** | TOkyo | 46 | mid-speed |
+> | **3** | RED MOUNTAIN | 73 | best-covered; high-speed |
+> | **4** | Box touge | 13 | **thinnest** — long, technical, low-speed |
+
+**Current status (2026-06-08):** 110 valid scored runs across **5 cars & 3 zones**
+(the calibration notes further down started at *8 runs / 1 zone* — kept as a
+record of the journey). Shipped model is no-combo, `angle_power=0.10`,
+`scale=10.986` → **MAE 2.79%, max 12.8%, bias −0.9%**. Speed term is settled; the
+**angle curve is the live lever** (its optimum has slid 0.5→0.4→0.20→0.10 as
+shallower cars landed). Active to-dos are the **B0** checklist; the bullets below
+are the original breadcrumbs, annotated with how each resolved.
+
+### B0. Data-gathering checklist (2026-06-08, at 110 valid scored / 5 cars)
+
+*Roughly highest-information first. Goal is to break confounds & pin curve ends, not just add volume.*
+
+- [ ] **Isolate uphill effect — matched shallow Transit (ord 1477) up vs down on RED MOUNTAIN (z3).** ~4–5 each direction. Every sub-18° run today is uphill, so we can't tell if the −10–13% on #135/#137 is *grade* or just *shallow angle*. This answers it.
+- [ ] **Get the new S2 AWD (ord 3865) out of zone 3.** It's 17/19 in RED MOUNTAIN (z3) — drive it in **TOkyo (z2, has none)** and **Box touge (z4)**, ~8–10 runs. Decouples its −3.4% car bias from zone 3's −2%.
+- [ ] **More Transit (1477) in TOkyo (z2) & RED MOUNTAIN (z3)**, both modes (long shallow sweeps *and* thrown-around). Currently only 4 / 6 there.
+- [ ] **Fill the shallow tail (<22° avg) across *multiple* cars**, not just the Transit — tests whether `angle_power=0.10` has stabilized or keeps sliding toward a gate.
+- [ ] **Fill the steep tail** — lean on the S2 AWD's high-angle runs; there's ~zero run-avg support above ~40°, so the at/above-sweet curve is unconstrained.
+- [ ] **Box touge (z4) volume** — thinnest zone at 13 valid (≤4/car). A dozen more across cars de-risks the "fits one global scale" claim.
+- [ ] **Let OCR keep capturing** — validated indistinguishable from hand-entered; free volume while you target the above.
+- [ ] After ~20–30 new runs: re-run `score_deepdive.py` / `score_probe.py`, check if the angle-curve optimum moved again, refit scale, **Recompute**.
+
 - [ ] **Log more runs + enter actual in-game scores**, then re-run the tuning
   harness (`scripts/score_model.py`, local/gitignored) and adjust params in
   `ScoringParams::default`.
-- [ ] **Speed weighting** — currently a linear factor capped at 31 m/s (~70 mph),
+- [x] **Speed weighting** — currently a linear factor capped at 31 m/s (~70 mph),
   co-equal with angle. Can't be calibrated yet: all logged runs sit at
   16–21 m/s avg (never near the cap) and speed↔angle are confounded. **Record
   AWD / higher-speed runs** (ideally some fast-but-low-angle) to break the
   confound, then revisit the cap/curve.
-- [ ] **Angle curve** — data currently hints the 30–36° band is slightly
+  → **Resolved 2026-06-08:** did exactly this. Cap is now `speed_cap_ms=60`;
+  runs span ~13–41 m/s avg across zones. Speed term re-confirmed optimal (linear,
+  `speed_power=1.0`, cap doesn't bind). The apparent speed↔err signal was the
+  angle curve in disguise — it shrank as `angle_power` dropped.
+- [x] **Angle curve** — data currently hints the 30–36° band is slightly
   over-weighted (residual vs angle correlation ≈ −0.78). Revisit once more runs
   exist; don't overfit the current 8 points.
+  → **Superseded 2026-06-08:** that −0.78 was 8 Tokyo-only runs under the *old*
+  (buggy, yaw-based) angle formula — not comparable to today. Since the
+  car-local-velocity fix the angle curve has been the main lever, retuned
+  0.5→0.4→0.20→0.10; on 110 runs the residual-vs-angle correlation is ~+0.04
+  (nulled) at `angle_power=0.10`. Still live — see B0.
 - [ ] **Multiplier curve** (`mult_growth_per_s`, `mult_cap`, `transition_grace_s`)
   — tune as more flick-heavy and varied runs come in.
 - [ ] Reminder: **click Recompute** in the drift dashboard after any param change
