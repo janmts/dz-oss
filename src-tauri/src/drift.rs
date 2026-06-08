@@ -27,8 +27,12 @@ struct RunnableZone {
     // so the zone is bidirectional — neither is intrinsically start nor finish.
     gate_a: [Point; 2],
     gate_b: [Point; 2],
-    /// Metres a point may stray outside the polygon and still count as inside,
-    /// to tolerate sparse/corner-cutting boundary geometry. Per-zone tunable.
+    /// Metres a point may stray outside the polygon and still count as inside.
+    /// Retained (and still parsed from the zone config) but no longer gates run
+    /// validity: FH6's real fail condition is score-starvation, not a spatial
+    /// boundary, so [`DriftRunManager::note_packet`] aborts on the starvation
+    /// timer instead. Kept for the `within_slack` helper / possible future use.
+    #[allow(dead_code)]
     slack_m: f64,
     params: scoring::ScoringParams,
 }
@@ -41,6 +45,9 @@ struct ActiveRun {
     finish_gate: [Point; 2],
     started_at: i64,
     packet_count: i64,
+    /// Wall-clock ms of the last packet that earned points. The run aborts if
+    /// this falls more than the configured starvation timeout behind `now`.
+    last_score_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -54,6 +61,13 @@ pub struct DriftRunStatus {
     pub ended_at: Option<i64>,
     pub packet_count: i64,
     pub invalid_reason: Option<String>,
+    /// Whether the latest packet is currently earning points (drifting with a
+    /// tyre on tarmac). False while the "death timer" is counting down.
+    pub scoring: bool,
+    /// Seconds left before the run aborts from score starvation, while running
+    /// and not currently scoring. `None` when scoring, idle, closed, or when the
+    /// starvation timer is disabled.
+    pub starve_remaining_s: Option<f64>,
 }
 
 impl DriftRunStatus {
@@ -67,10 +81,12 @@ impl DriftRunStatus {
             ended_at: None,
             packet_count: 0,
             invalid_reason: None,
+            scoring: false,
+            starve_remaining_s: None,
         }
     }
 
-    fn running(run: &ActiveRun) -> Self {
+    fn running(run: &ActiveRun, scoring: bool, starve_remaining_s: Option<f64>) -> Self {
         Self {
             state: "running".into(),
             run_id: Some(run.id),
@@ -80,6 +96,8 @@ impl DriftRunStatus {
             ended_at: None,
             packet_count: run.packet_count,
             invalid_reason: None,
+            scoring,
+            starve_remaining_s: if scoring { None } else { starve_remaining_s },
         }
     }
 
@@ -93,6 +111,8 @@ impl DriftRunStatus {
             ended_at: Some(ended_at),
             packet_count: run.packet_count,
             invalid_reason,
+            scoring: false,
+            starve_remaining_s: None,
         }
     }
 }
@@ -122,6 +142,7 @@ impl DriftRunManager {
         pkt: &parser::TelemetryPacket,
         raw: &[u8],
         now_ms: i64,
+        starve_timeout_s: f64,
     ) -> Option<DriftRunStatus> {
         let current = packet_point(pkt)?;
         let previous = self.last_point;
@@ -149,14 +170,33 @@ impl DriftRunManager {
                 return Some(status);
             }
 
-            if !within_slack(current, &run.zone.polygon, run.zone.slack_m) {
-                let reason = "left drift zone before finish".to_string();
+            // Every packet while the run is live belongs to it — record it
+            // regardless of whether it's scoring (off-track packets are kept so
+            // re-scoring sees the full run).
+            if let Err(e) = db::insert_drift_run_packet(conn, run.id, pkt.timestamp_ms, raw) {
+                eprintln!("[drift] packet insert error: {e}");
+            } else {
+                run.packet_count += 1;
+            }
+
+            // Score-starvation abort. FH6 ends a run when no drift points have
+            // accrued for a while — NOT when the car leaves a spatial boundary
+            // (the polygon is only used to detect the entry gate-crossing). A
+            // tyre on tarmac off in a side road keeps scoring and stays alive;
+            // wandering into the scenery stops scoring and times out.
+            let scoring = scoring::is_scoring_packet(pkt, &run.zone.params);
+            if scoring {
+                run.last_score_ms = now_ms;
+            }
+            let starve_s = (now_ms - run.last_score_ms).max(0) as f64 / 1000.0;
+            if starve_timeout_s > 0.0 && starve_s > starve_timeout_s {
+                let reason = format!("no drift score for {starve_timeout_s:.0}s");
                 let (score, breakdown) = score_from_packets(conn, run.id, &run.zone.params);
                 let status = DriftRunStatus::closed(run, now_ms, false, Some(reason.clone()));
                 if let Err(e) =
                     db::close_drift_run(conn, run.id, now_ms, false, Some(&reason), score)
                 {
-                    eprintln!("[drift] invalid close error: {e}");
+                    eprintln!("[drift] starvation close error: {e}");
                 }
                 if let Err(e) =
                     db::update_drift_run_score(conn, run.id, score, breakdown.as_deref())
@@ -168,15 +208,10 @@ impl DriftRunManager {
                 return Some(status);
             }
 
-            if let Err(e) = db::insert_drift_run_packet(conn, run.id, pkt.timestamp_ms, raw) {
-                eprintln!("[drift] packet insert error: {e}");
-            } else {
-                run.packet_count += 1;
-                let status = DriftRunStatus::running(run);
-                self.last_status = status.clone();
-                return Some(status);
-            }
-            return None;
+            let remaining = (starve_timeout_s > 0.0).then(|| (starve_timeout_s - starve_s).max(0.0));
+            let status = DriftRunStatus::running(run, scoring, remaining);
+            self.last_status = status.clone();
+            return Some(status);
         }
 
         let Some(previous) = previous else {
@@ -244,13 +279,19 @@ impl DriftRunManager {
                     finish_gate,
                     started_at: now_ms,
                     packet_count: 0,
+                    last_score_ms: now_ms,
                 };
                 if let Err(e) = db::insert_drift_run_packet(conn, id, pkt.timestamp_ms, raw) {
                     eprintln!("[drift] opening packet insert error: {e}");
                 } else {
                     run.packet_count = 1;
                 }
-                let status = DriftRunStatus::running(&run);
+                let scoring = scoring::is_scoring_packet(pkt, &run.zone.params);
+                if scoring {
+                    run.last_score_ms = now_ms;
+                }
+                let remaining = (starve_timeout_s > 0.0).then_some(starve_timeout_s);
+                let status = DriftRunStatus::running(&run, scoring, remaining);
                 self.active = Some(run);
                 self.last_status = status.clone();
                 Some(status)
@@ -515,6 +556,10 @@ mod tests {
             tire_combined_slip_fr: 0.0,
             tire_combined_slip_rl: 0.0,
             tire_combined_slip_rr: 0.0,
+            surface_rumble_fl: 0.0,
+            surface_rumble_fr: 0.0,
+            surface_rumble_rl: 0.0,
+            surface_rumble_rr: 0.0,
             car_ordinal: 3249,
             car_class: 5,
             car_pi: 900,
@@ -557,6 +602,20 @@ mod tests {
             tire_wear_rl: None,
             tire_wear_rr: None,
         }
+    }
+
+    /// A scoring packet at world (x, z): ~30° sideslip at 20 m/s, rears sliding,
+    /// all wheels on tarmac (surface_rumble 0). `is_scoring_packet` is true.
+    fn drifting_packet(x: f32, z: f32, ms: u32) -> parser::TelemetryPacket {
+        let mut p = packet(x, z);
+        p.timestamp_ms = ms;
+        let b = 30f64.to_radians();
+        p.speed_ms = 20.0;
+        p.vel_x = (20.0 * b.sin()) as f32;
+        p.vel_z = (20.0 * b.cos()) as f32;
+        p.tire_combined_slip_rl = 3.0;
+        p.tire_combined_slip_rr = 3.0;
+        p
     }
 
     fn in_memory() -> Connection {
@@ -611,14 +670,14 @@ mod tests {
         let mut mgr = DriftRunManager::new();
         let raw = vec![1u8; 324];
         assert!(mgr
-            .note_packet(&conn, &packet(2.0, -1.0), &raw, 1000)
+            .note_packet(&conn, &packet(2.0, -1.0), &raw, 1000, 0.0)
             .is_none());
         let started = mgr
-            .note_packet(&conn, &packet(2.0, 1.0), &raw, 1100)
+            .note_packet(&conn, &packet(2.0, 1.0), &raw, 1100, 0.0)
             .unwrap();
         assert_eq!(started.state, "running");
         let finished = mgr
-            .note_packet(&conn, &packet(2.0, 11.0), &raw, 2000)
+            .note_packet(&conn, &packet(2.0, 11.0), &raw, 2000, 0.0)
             .unwrap();
         assert_eq!(finished.state, "completed");
         let rows = db::list_drift_runs(&conn).unwrap();
@@ -628,41 +687,21 @@ mod tests {
     }
 
     #[test]
-    fn run_invalidates_when_leaving_geofence() {
+    fn leaving_zone_no_longer_voids_the_run() {
+        // The polygon no longer gates validity — straying outside it keeps the
+        // run alive (starvation disabled here with timeout 0 to isolate this).
         let conn = in_memory();
-        let zone = square_zone();
-        db::save_drift_zone(
-            &conn,
-            &db::DriftZoneInput {
-                id: None,
-                name: "Run".into(),
-                description: None,
-                active: true,
-                left_boundary: zone.left_boundary,
-                right_boundary: zone.right_boundary,
-                start_gate: Vec::new(),
-                finish_gate: Vec::new(),
-                split_gates: Vec::new(),
-                // Zero slack → strict geofence for this test.
-                scoring_config: serde_json::json!({ "boundarySlackM": 0.0 }),
-            },
-            1,
-        )
-        .unwrap();
+        save_square_zone(&conn, 0.0);
         let mut mgr = DriftRunManager::new();
         let raw = vec![1u8; 324];
-        mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 1000);
-        mgr.note_packet(&conn, &packet(2.0, 1.0), &raw, 1100);
-        let invalid = mgr
-            .note_packet(&conn, &packet(8.0, 4.0), &raw, 1300)
+        mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 1000, 0.0);
+        mgr.note_packet(&conn, &packet(2.0, 1.0), &raw, 1100, 0.0);
+        // x=9 is far outside the x=5 edge — previously invalid, now still running.
+        let still = mgr
+            .note_packet(&conn, &packet(9.0, 5.0), &raw, 1300, 0.0)
             .unwrap();
-        assert_eq!(invalid.state, "invalid");
-        let rows = db::list_drift_runs(&conn).unwrap();
-        assert!(!rows[0].valid);
-        assert_eq!(
-            rows[0].invalid_reason.as_deref(),
-            Some("left drift zone before finish")
-        );
+        assert_eq!(still.state, "running");
+        assert!(db::list_drift_runs(&conn).unwrap()[0].valid);
     }
 
     fn save_square_zone(conn: &Connection, slack: f64) -> i64 {
@@ -686,21 +725,62 @@ mod tests {
     }
 
     #[test]
-    fn run_tolerates_boundary_slack() {
-        // With 3 m slack, a 1 m excursion past the edge keeps the run alive; a
-        // 4 m excursion still voids it.
+    fn run_aborts_on_score_starvation() {
+        // No points for longer than the timeout (1 s here) → the run aborts.
         let conn = in_memory();
-        save_square_zone(&conn, 3.0);
+        save_square_zone(&conn, 0.0);
         let mut mgr = DriftRunManager::new();
         let raw = vec![1u8; 324];
-        mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 1000);
-        mgr.note_packet(&conn, &packet(2.0, 1.0), &raw, 1100);
-        // x=6 is 1 m outside the x=5 edge → within slack → still running.
-        let still = mgr.note_packet(&conn, &packet(6.0, 5.0), &raw, 1200).unwrap();
+        mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 1000, 1.0);
+        let started = mgr.note_packet(&conn, &packet(2.0, 1.0), &raw, 1100, 1.0).unwrap();
+        assert_eq!(started.state, "running");
+        // A non-scoring packet 2.1 s after the last score (the run start) → starved.
+        let dead = mgr.note_packet(&conn, &packet(2.0, 5.0), &raw, 3200, 1.0).unwrap();
+        assert_eq!(dead.state, "invalid");
+        assert!(!dead.scoring);
+        let rows = db::list_drift_runs(&conn).unwrap();
+        assert!(!rows[0].valid);
+        assert!(rows[0]
+            .invalid_reason
+            .as_deref()
+            .unwrap()
+            .contains("no drift score"));
+    }
+
+    #[test]
+    fn scoring_packets_prevent_starvation() {
+        // A run that keeps earning points stays alive well past the timeout.
+        let conn = in_memory();
+        save_square_zone(&conn, 0.0);
+        let mut mgr = DriftRunManager::new();
+        let raw = vec![1u8; 324];
+        mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 1000, 1.0);
+        mgr.note_packet(&conn, &packet(2.0, 1.0), &raw, 1100, 1.0);
+        // Scoring packets every 0.5 s for 3 s — each resets the starve timer.
+        let (mut t, mut now) = (1600u32, 1600i64);
+        for _ in 0..6 {
+            let s = mgr
+                .note_packet(&conn, &drifting_packet(2.0, 5.0, t), &raw, now, 1.0)
+                .unwrap();
+            assert_eq!(s.state, "running");
+            assert!(s.scoring);
+            t += 500;
+            now += 500;
+        }
+        assert_eq!(mgr.status().state, "running");
+    }
+
+    #[test]
+    fn starvation_disabled_keeps_run_alive_indefinitely() {
+        // timeout 0 = disabled: a long non-scoring stretch never aborts.
+        let conn = in_memory();
+        save_square_zone(&conn, 0.0);
+        let mut mgr = DriftRunManager::new();
+        let raw = vec![1u8; 324];
+        mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 1000, 0.0);
+        mgr.note_packet(&conn, &packet(2.0, 1.0), &raw, 1100, 0.0);
+        let still = mgr.note_packet(&conn, &packet(2.0, 5.0), &raw, 99000, 0.0).unwrap();
         assert_eq!(still.state, "running");
-        // x=9 is 4 m outside → beyond slack → invalid.
-        let gone = mgr.note_packet(&conn, &packet(9.0, 5.0), &raw, 1300).unwrap();
-        assert_eq!(gone.state, "invalid");
     }
 
     #[test]
@@ -711,10 +791,10 @@ mod tests {
         save_square_zone(&conn, 0.0);
         let mut mgr = DriftRunManager::new();
         let raw = vec![1u8; 324];
-        assert!(mgr.note_packet(&conn, &packet(2.0, 11.0), &raw, 1000).is_none());
-        let started = mgr.note_packet(&conn, &packet(2.0, 9.0), &raw, 1100).unwrap();
+        assert!(mgr.note_packet(&conn, &packet(2.0, 11.0), &raw, 1000, 0.0).is_none());
+        let started = mgr.note_packet(&conn, &packet(2.0, 9.0), &raw, 1100, 0.0).unwrap();
         assert_eq!(started.state, "running");
-        let finished = mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 2000).unwrap();
+        let finished = mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 2000, 0.0).unwrap();
         assert_eq!(finished.state, "completed");
         let rows = db::list_drift_runs(&conn).unwrap();
         assert!(rows[0].valid);
@@ -731,8 +811,8 @@ mod tests {
         let raw = vec![1u8; 324];
         // (-1,5) outside; (1,5) inside, but the segment crosses the left boundary
         // (x=0) mid-zone — not an end gate (z=0 or z=10).
-        assert!(mgr.note_packet(&conn, &packet(-1.0, 5.0), &raw, 1000).is_none());
-        assert!(mgr.note_packet(&conn, &packet(1.0, 5.0), &raw, 1100).is_none());
+        assert!(mgr.note_packet(&conn, &packet(-1.0, 5.0), &raw, 1000, 0.0).is_none());
+        assert!(mgr.note_packet(&conn, &packet(1.0, 5.0), &raw, 1100, 0.0).is_none());
         assert!(db::list_drift_runs(&conn).unwrap().is_empty());
     }
 

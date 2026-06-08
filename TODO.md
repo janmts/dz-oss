@@ -25,6 +25,15 @@ Checked items are done; the rest are roughly in priority order.
     gate (between its two points, like the in-game flags), finish on the other.
   - **End gates always derived** from the current boundary (no stale stored
     state).
+- **Per-wheel tarmac scoring gate** (`scoring.rs`): a packet scores only while
+  ≥1 tyre is on tarmac (per-wheel `SurfaceRumble≈0`); all-four-off (vegetation)
+  scores zero. Validated on 236 runs (MAE 3.66→3.40%); `scale` refit to 11.038.
+  Toggle via `requireTarmacContact` in a zone's `scoring_config`.
+- **Score-starvation run abort** replaces the spatial geofence as the fail
+  condition (FH6 ends a run when no points accrue for X s, not on leaving a
+  boundary). `driftStarveTimeoutS` is a global setting (default 5 s, 0 = off).
+  The live run box turns **yellow** with a countdown while not scoring, to tune
+  X against the game. Boundary slack is retained but no longer voids runs.
 
 ---
 
