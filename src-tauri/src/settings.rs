@@ -53,8 +53,10 @@ pub struct Settings {
     // ── Drift runs ──────────────────────────────────────────────────────────
     /// Seconds a drift run may go without earning points before it aborts
     /// (score-starvation). 0 disables the timer (a run then ends only on the
-    /// finish gate). FH6's true fail condition; tune against the live "not
-    /// scoring" indicator. Default 5 s — generous; lower as you dial it in.
+    /// finish gate). FH6's true fail condition. Default 5 s — play-test
+    /// confirmed to match the in-game abort (~5 s with no scoring), so this is
+    /// the right value, not a placeholder; the live "not scoring" indicator is
+    /// there to verify, not to hunt a number.
     #[serde(default = "Settings::default_drift_starve_timeout_s")]
     pub drift_starve_timeout_s: f32,
 }
