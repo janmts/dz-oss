@@ -101,8 +101,9 @@
           <span class="hint">
             A run aborts after this many seconds without earning drift points
             (the in-game fail condition). <strong>0 disables</strong> — a run then
-            ends only at the finish gate. Watch the live run box turn yellow when
-            the timer is counting to dial this in.
+            ends only at the finish gate. The default <strong>5 s matches FH6</strong>;
+            the live run box turns yellow while the timer counts if you want to
+            see it in action.
           </span>
         </label>
       </fieldset>
