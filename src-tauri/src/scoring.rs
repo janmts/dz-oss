@@ -25,7 +25,13 @@ pub struct ScoringParams {
     /// packets are genuinely scoring slides the game credits, and counting them
     /// (with the flatter ramp below) erased the shallow under-scoring bias.
     pub min_angle_deg: f64,
-    /// Above this angle (deg) the car is treated as spun out — the drift breaks.
+    /// Spin-out cutoff: above this drift angle (deg) the car is treated as spun
+    /// out and scores nothing. Raised 90→120 once wilder runs showed the game
+    /// keeps scoring slides well past 90° (observed up to ~115°); capping at 90
+    /// was zeroing real slide time and under-scoring the 12 runs that reach
+    /// there (+0.10pp MAE to extend it). The decline SLOPE is anchored to 90°
+    /// (see `above_sweet_decline` / `angle_factor`), so raising this cutoff
+    /// extends scoring past 90° without altering the 45–90° band.
     pub spin_angle_deg: f64,
     /// Angle (deg) at which the angle factor peaks; beyond it returns diminish.
     pub sweet_angle_deg: f64,
@@ -39,17 +45,18 @@ pub struct ScoringParams {
     /// were over-scoring; the tarmac gate unblocked it. In FH6, once past the
     /// drift gate, angle barely scales the score — speed × time dominates.
     pub angle_power: f64,
-    /// How far the angle factor declines from 1.0 at the sweet spot down toward
-    /// the spin angle: at `spin_angle_deg` the factor equals `1.0 - this`.
-    /// 0.0 = flat (steep drifts keep full credit). The old hardcoded value was
-    /// 0.5; lowered to 0.25 once steep (>45°) runs from an S2 AWD landed and
-    /// showed the 0.5 decline over-penalized the 45–57° band (the only part of
-    /// this branch the data exercises — max observed ≈57°). Refit `scale` after
-    /// changing. ⚠️ STILL THE THINNEST-SUPPORTED LEVER: the steep tail (≥40°
-    /// avg) is only ~8 runs, ALL from one car (S2 AWD ord 3865), and it's the
-    /// one cohort the shallow retune slightly worsened (−4.5%→−6.3%). Steep
-    /// angle is fully confounded with that car — gather steep runs across
-    /// MULTIPLE cars before retuning this; do not chase it on the S2 alone.
+    /// Decline of the angle factor above the sweet spot, expressed as the drop
+    /// by **90°**: the factor reaches `1.0 - this` at 90° and continues at that
+    /// same per-degree slope until `spin_angle_deg`. (The slope is anchored to
+    /// 90°, NOT to the cutoff, so the cutoff can move without changing the
+    /// curve.) 0.0 = flat. The old hardcoded value was 0.5; lowered to 0.25 once
+    /// steep (>45°) runs from an S2 AWD landed and showed 0.5 over-penalized the
+    /// 45–57° band. Refit `scale` after changing. ⚠️ STILL THE THINNEST-
+    /// SUPPORTED LEVER: the steep tail (≥40° avg) is only ~8 runs, ALL from one
+    /// car (S2 AWD ord 3865), and it's the cohort the shallow retune slightly
+    /// worsened (−4.5%→−6.3%). Steep angle is fully confounded with that car —
+    /// gather steep runs across MULTIPLE cars before retuning this; do not chase
+    /// it on the S2 alone. (Instantaneous angles now observed up to ~115°.)
     pub above_sweet_decline: f64,
     /// Speed (m/s) at which the speed factor saturates (~134 mph).
     pub speed_cap_ms: f64,
@@ -83,7 +90,7 @@ impl Default for ScoringParams {
         Self {
             min_speed_ms: 8.0,
             min_angle_deg: 10.0,
-            spin_angle_deg: 90.0,
+            spin_angle_deg: 120.0,
             sweet_angle_deg: 45.0,
             angle_power: 0.15,
             above_sweet_decline: 0.25,
@@ -94,14 +101,15 @@ impl Default for ScoringParams {
             mult_growth_per_s: 0.0,
             mult_cap: 1.0,
             transition_grace_s: 0.5,
-            // Least-squares fit across valid logged in-game scores (236 runs
+            // Least-squares fit across valid logged in-game scores (237 runs
             // across three zones / 7 cars) with the no-combo, min_angle=10,
-            // angle_power=0.15, above_sweet_decline=0.25 model AND the tarmac
-            // gate on; re-derive as more scores are logged. Marker rows (the
-            // all-9s placeholder) and invalid runs are excluded from the fit.
-            // Lineage: 11.024 (no gate) → 11.038 (gate, min12/ap0.10) → 10.814
-            // (gate, min10/ap0.15). The last retune halved MAE to ~1.68%.
-            scale: 10.814,
+            // angle_power=0.15, above_sweet_decline=0.25, spin_angle=120 model
+            // AND the tarmac gate on; re-derive as more scores are logged.
+            // Marker rows (the all-9s placeholder) and invalid runs are excluded
+            // from the fit. Lineage: 11.024 (no gate) → 11.038 (gate,
+            // min12/ap0.10) → 10.814 (gate, min10/ap0.15) → 10.813 (spin 90→120,
+            // counting slides past 90° — MAE ~1.68%→1.59%).
+            scale: 10.813,
         }
     }
 }
@@ -197,12 +205,16 @@ fn angle_factor(angle_deg: f64, p: &ScoringParams) -> f64 {
         let power = p.angle_power.max(1e-6);
         ramp.powf(power)
     } else {
-        // Linear decline from 1.0 at the sweet spot toward (1 - above_sweet_decline)
-        // at the spin angle; anything past spin is already 0 (the guard above).
-        // With the default decline 0.25 the factor stays in [0.75, 1.0] on (sweet,
-        // spin], so no lower floor is needed.
-        let span = (p.spin_angle_deg - p.sweet_angle_deg).max(1e-6);
-        1.0 - p.above_sweet_decline * (angle_deg - p.sweet_angle_deg) / span
+        // Linear decline from 1.0 at the sweet spot at a FIXED rate: it reaches
+        // (1 - above_sweet_decline) at 90° and continues at that same slope up to
+        // spin_angle_deg (past which the guard above returns 0). Anchoring the
+        // slope to 90° rather than to spin_angle_deg decouples "how fast credit
+        // falls off" from "where a drift counts as spun out", so the cutoff can
+        // be raised past 90° (the game scores slides to ~115°) without changing
+        // the well-fit 45–90° band. Clamp at 0 for safety on extreme configs.
+        const DECLINE_REF_DEG: f64 = 90.0;
+        let span = (DECLINE_REF_DEG - p.sweet_angle_deg).max(1e-6);
+        (1.0 - p.above_sweet_decline * (angle_deg - p.sweet_angle_deg) / span).max(0.0)
     }
 }
 
@@ -541,10 +553,22 @@ mod tests {
     fn spun_out_angle_does_not_score() {
         let params = ScoringParams::default();
         let pkts: Vec<_> = (0..120)
-            .map(|i| at(drifting_packet(120.0, 20.0), i * 16))
+            .map(|i| at(drifting_packet(150.0, 20.0), i * 16))
             .collect();
         let r = score_run(&pkts, &params);
-        assert_eq!(r.score, 0.0, "120° is past spin_angle, must not score");
+        assert_eq!(r.score, 0.0, "150° is past spin_angle (120), must not score");
+    }
+
+    #[test]
+    fn drift_past_ninety_still_scores_but_decline_anchor_holds() {
+        // spin_angle is 120: a 100° slide is past the old 90° cap but still
+        // scores (the game credits slides to ~115°); 130° is spun out → 0.
+        let params = ScoringParams::default();
+        assert!(angle_factor(100.0, &params) > 0.0);
+        assert_eq!(angle_factor(130.0, &params), 0.0);
+        // Raising the cutoff must NOT change the 45–90° band: the decline is
+        // anchored at 90°, so factor(90°) is exactly 1 − above_sweet_decline.
+        assert!((angle_factor(90.0, &params) - (1.0 - params.above_sweet_decline)).abs() < 1e-9);
     }
 
     #[test]
