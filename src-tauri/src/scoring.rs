@@ -56,14 +56,18 @@ pub struct ScoringParams {
     /// by **90°**: the factor reaches `1.0 - this` at 90° and continues at that
     /// same per-degree slope until `spin_angle_deg`. (The slope is anchored to
     /// 90°, NOT to the cutoff, so the cutoff can move without changing the
-    /// curve.) 0.0 = flat. The old hardcoded value was 0.5; lowered to 0.25 once
-    /// steep (>45°) runs from an S2 AWD landed and showed 0.5 over-penalized the
-    /// 45–57° band. Refit `scale` after changing. ⚠️ STILL THE THINNEST-
-    /// SUPPORTED LEVER: the steep tail (≥40° avg) is only ~8 runs, ALL from one
-    /// car (S2 AWD ord 3865), and it's the cohort the shallow retune slightly
-    /// worsened (−4.5%→−6.3%). Steep angle is fully confounded with that car —
-    /// gather steep runs across MULTIPLE cars before retuning this; do not chase
-    /// it on the S2 alone. (Instantaneous angles now observed up to ~115°.)
+    /// curve.) 0.0 = flat plateau; NEGATIVE = the factor RISES above the sweet
+    /// spot. Lineage: hardcoded 0.5 → 0.25 (S2 AWD steep runs) → **0.0** here.
+    /// The 0.0 came from per-FRAME VISION ground truth: OCR'ing the on-screen
+    /// drift score every frame gives points/sec directly, and across 3 high-angle
+    /// runs (cars 3999 RWD + 3859, zones 2 & 3) the game's true credit is FLAT
+    /// (≈1.0) from 45° out past 100° — it does NOT decline. This de-confounds the
+    /// old "steep tail = one S2" worry: the under-credit appears within a single
+    /// run (correct at <45°, low above) and across many cars in the 250-run
+    /// integral (bias correlates −0.5 with steep-angle exposure). Flattening
+    /// 0.25→0.0 cut DB MAE 1.78%→1.65%. Vision+integral actually favour a SLIGHT
+    /// rise (≈−0.07); shipped at 0.0 (conservative — keeps factor ≤1) pending more
+    /// cars. Refit `scale` after changing. (Angles observed up to ~115°.)
     pub above_sweet_decline: f64,
     /// Speed (m/s) at which the speed factor saturates (~134 mph).
     pub speed_cap_ms: f64,
@@ -100,7 +104,7 @@ impl Default for ScoringParams {
             spin_angle_deg: 120.0,
             sweet_angle_deg: 45.0,
             angle_power: 0.15,
-            above_sweet_decline: 0.25,
+            above_sweet_decline: 0.0,
             speed_cap_ms: 60.0,
             slip_gate: 1.0,
             base_rate: 1000.0,
@@ -108,16 +112,16 @@ impl Default for ScoringParams {
             mult_growth_per_s: 0.0,
             mult_cap: 1.0,
             transition_grace_s: 0.5,
-            // Least-squares fit across valid logged in-game scores (242 runs
-            // across three zones / 7 cars) with the no-combo, min_angle=10,
-            // angle_power=0.15, above_sweet_decline=0.25, spin_angle=120,
+            // Least-squares fit across valid logged in-game scores (253 runs
+            // across three zones / 7+ cars) with the no-combo, min_angle=10,
+            // angle_power=0.15, above_sweet_decline=0.0, spin_angle=120,
             // min_speed=1.5 model AND the tarmac gate on; re-derive as more
             // scores are logged. Marker rows (the all-9s placeholder) and invalid
             // runs are excluded from the fit. Lineage: 11.024 (no gate) → 11.038
             // (gate, min12/ap0.10) → 10.814 (gate, min10/ap0.15) → 10.813 (spin
-            // 90→120) → 10.803 (min_speed 8→1.5, now scoring low-speed burnout
-            // drifts). Normal-run MAE ~1.61%; ~1.68% incl. the 5 burnout runs.
-            scale: 10.803,
+            // 90→120) → 10.803 (min_speed 8→1.5) → 10.745 (decline 0.25→0.0 from
+            // per-frame vision). DB MAE ~1.65% (was ~1.78% at decline 0.25).
+            scale: 10.745,
         }
     }
 }
@@ -589,6 +593,19 @@ mod tests {
         // Raising the cutoff must NOT change the 45–90° band: the decline is
         // anchored at 90°, so factor(90°) is exactly 1 − above_sweet_decline.
         assert!((angle_factor(90.0, &params) - (1.0 - params.above_sweet_decline)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn default_angle_factor_is_flat_above_sweet() {
+        // above_sweet_decline defaults to 0.0 (per-frame vision ground truth shows
+        // the game's angle credit does NOT fall off above the 45° sweet spot), so
+        // the factor holds at 1.0 from the sweet spot out to the spin cutoff.
+        let params = ScoringParams::default();
+        assert_eq!(params.above_sweet_decline, 0.0);
+        for a in [45.0, 60.0, 90.0, 115.0] {
+            assert!((angle_factor(a, &params) - 1.0).abs() < 1e-9,
+                    "expected flat 1.0 at {a}°, got {}", angle_factor(a, &params));
+        }
     }
 
     #[test]
