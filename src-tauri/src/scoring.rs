@@ -18,7 +18,14 @@ use crate::parser::TelemetryPacket;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ScoringParams {
-    /// Below this speed (m/s) nothing scores.
+    /// Below this speed (m/s) nothing scores. Lowered 8→1.5 once burnout "cheese"
+    /// runs (slow, lightly-angled, rear lit) showed FH6 scores moving drifts far
+    /// below the old ~18 mph floor — the game's only speed requirement is that the
+    /// car is actually moving. 1.5 m/s (~3.4 mph) calibrated on 5 such runs across
+    /// 2 cars (reproduces them within ~5%); kept above ~0.5 m/s so the
+    /// `atan2(velX,velZ)` drift angle stays meaningful (it's noise at true v≈0,
+    /// where stationary/dead-straight burnouts correctly score nothing and starve
+    /// out). Barely affects normal runs (almost none drift below 8 m/s).
     pub min_speed_ms: f64,
     /// Drift angle (deg) must reach this to count as drifting. Lowered 12→10
     /// once the tarmac gate removed the off-track over-scorers: those 10–12°
@@ -88,7 +95,7 @@ pub struct ScoringParams {
 impl Default for ScoringParams {
     fn default() -> Self {
         Self {
-            min_speed_ms: 8.0,
+            min_speed_ms: 1.5,
             min_angle_deg: 10.0,
             spin_angle_deg: 120.0,
             sweet_angle_deg: 45.0,
@@ -101,15 +108,16 @@ impl Default for ScoringParams {
             mult_growth_per_s: 0.0,
             mult_cap: 1.0,
             transition_grace_s: 0.5,
-            // Least-squares fit across valid logged in-game scores (237 runs
+            // Least-squares fit across valid logged in-game scores (242 runs
             // across three zones / 7 cars) with the no-combo, min_angle=10,
-            // angle_power=0.15, above_sweet_decline=0.25, spin_angle=120 model
-            // AND the tarmac gate on; re-derive as more scores are logged.
-            // Marker rows (the all-9s placeholder) and invalid runs are excluded
-            // from the fit. Lineage: 11.024 (no gate) → 11.038 (gate,
-            // min12/ap0.10) → 10.814 (gate, min10/ap0.15) → 10.813 (spin 90→120,
-            // counting slides past 90° — MAE ~1.68%→1.59%).
-            scale: 10.813,
+            // angle_power=0.15, above_sweet_decline=0.25, spin_angle=120,
+            // min_speed=1.5 model AND the tarmac gate on; re-derive as more
+            // scores are logged. Marker rows (the all-9s placeholder) and invalid
+            // runs are excluded from the fit. Lineage: 11.024 (no gate) → 11.038
+            // (gate, min12/ap0.10) → 10.814 (gate, min10/ap0.15) → 10.813 (spin
+            // 90→120) → 10.803 (min_speed 8→1.5, now scoring low-speed burnout
+            // drifts). Normal-run MAE ~1.61%; ~1.68% incl. the 5 burnout runs.
+            scale: 10.803,
         }
     }
 }
@@ -547,6 +555,18 @@ mod tests {
         assert!(angle_factor(11.0, &params) > 0.0);
         // ...and a 9° slide is still below the gate.
         assert_eq!(angle_factor(9.0, &params), 0.0);
+    }
+
+    #[test]
+    fn low_speed_angled_drift_scores_with_lowered_floor() {
+        // min_speed is 1.5: a 3 m/s angled slide (burnout-cheese regime) now
+        // scores; a 1 m/s crawl is still below the floor and scores nothing.
+        let params = ScoringParams::default();
+        assert_eq!(params.min_speed_ms, 1.5);
+        let slow: Vec<_> = (0..120).map(|i| at(drifting_packet(20.0, 3.0), i * 16)).collect();
+        assert!(score_run(&slow, &params).score > 0.0, "3 m/s angled drift should score");
+        let crawl: Vec<_> = (0..120).map(|i| at(drifting_packet(20.0, 1.0), i * 16)).collect();
+        assert_eq!(score_run(&crawl, &params).score, 0.0, "1 m/s is below the floor");
     }
 
     #[test]
