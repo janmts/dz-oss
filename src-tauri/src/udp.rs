@@ -92,13 +92,16 @@ fn handle_drift_run(
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64;
-    // Read the live (settings-tab adjustable) starvation timeout before taking
-    // the other locks; save_settings updates this in place so it takes effect
-    // without a restart.
-    let starve_timeout_s = state.settings.lock().unwrap().drift_starve_timeout_s as f64;
+    // Read the live (settings-tab adjustable) knobs before taking the other
+    // locks; save_settings updates these in place so they take effect without
+    // a restart.
+    let (starve_timeout_s, preroll_s) = {
+        let s = state.settings.lock().unwrap();
+        (s.drift_starve_timeout_s as f64, s.drift_preroll_s as f64)
+    };
     let mut drift = state.drift_manager.lock().unwrap();
     let db = state.db.lock().unwrap();
-    if let Some(status) = drift.note_packet(&db, pkt, raw, now_ms, starve_timeout_s) {
+    if let Some(status) = drift.note_packet(&db, pkt, raw, now_ms, starve_timeout_s, preroll_s) {
         let _ = tx.send(ServerEvent::DriftRunStatus(status));
     }
 }
