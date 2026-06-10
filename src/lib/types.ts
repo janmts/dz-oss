@@ -188,6 +188,8 @@ export interface AppSettings {
   tiresVisible: boolean;
   /** Seconds a drift run may go without scoring before it aborts. 0 disables. */
   driftStarveTimeoutS: number;
+  /** Seconds of pre-run telemetry stored as each run's approach trail. 0 disables. */
+  driftPrerollS: number;
 }
 
 export type DrivetrainLabel = 'FWD' | 'RWD' | 'AWD';

@@ -59,6 +59,16 @@ pub struct Settings {
     /// there to verify, not to hunt a number.
     #[serde(default = "Settings::default_drift_starve_timeout_s")]
     pub drift_starve_timeout_s: f32,
+    /// Seconds of telemetry kept as a PRE-ROLL trail before each drift run.
+    /// While no run is active the detector buffers raw packets; when a run
+    /// starts (gate crossing) the buffer is stored alongside the run in
+    /// `drift_run_preroll_packets`. Pure analysis data: it shows how the car
+    /// approached the start gate (e.g. how long a drift had been established —
+    /// the game only starts crediting an already-initiated drift ~0.5 s after
+    /// the gate, so entry style measurably changes scores). Scoring and
+    /// Recompute never read it. 0 disables the trail.
+    #[serde(default = "Settings::default_drift_preroll_s")]
+    pub drift_preroll_s: f32,
 }
 
 impl Settings {
@@ -76,6 +86,9 @@ impl Settings {
     }
     fn default_drift_starve_timeout_s() -> f32 {
         5.0
+    }
+    fn default_drift_preroll_s() -> f32 {
+        10.0
     }
 }
 
@@ -104,6 +117,7 @@ impl Default for Settings {
             map_default_center: [0.0, 0.0],
             tires_visible: true,
             drift_starve_timeout_s: Self::default_drift_starve_timeout_s(),
+            drift_preroll_s: Self::default_drift_preroll_s(),
         }
     }
 }
@@ -175,6 +189,14 @@ mod tests {
             "tireTempOptimal":85.0,"tireTempHot":110.0,"autoRecord":true,"theme":"dark"}"#;
         let s: Settings = serde_json::from_str(legacy).unwrap();
         assert_eq!(s.drift_starve_timeout_s, 5.0);
+    }
+
+    #[test]
+    fn legacy_json_without_preroll_defaults_to_10() {
+        let legacy = r#"{"port":20440,"useMph":true,"tireTempCold":60.0,
+            "tireTempOptimal":85.0,"tireTempHot":110.0,"autoRecord":true,"theme":"dark"}"#;
+        let s: Settings = serde_json::from_str(legacy).unwrap();
+        assert_eq!(s.drift_preroll_s, 10.0);
     }
 
     #[test]

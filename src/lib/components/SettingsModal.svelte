@@ -43,6 +43,7 @@
         mapDefaultCenter: [0, 0] as [number, number],
         tiresVisible: true,
         driftStarveTimeoutS: 5,
+        driftPrerollS: 10,
       };
       draft = { ...mapDefaults, ...$settings };
     }
@@ -104,6 +105,22 @@
             ends only at the finish gate. The default <strong>5 s matches FH6</strong>;
             the live run box turns yellow while the timer counts if you want to
             see it in action.
+          </span>
+        </label>
+        <label>
+          Pre-roll trail (s)
+          <input
+            type="number"
+            min="0"
+            step="1"
+            bind:value={draft.driftPrerollS}
+          />
+          <span class="hint">
+            Seconds of telemetry kept from <strong>before</strong> each run
+            starts, stored alongside it — shows how the car approached the
+            start gate (e.g. how long the drift was already established, which
+            changes when the game starts crediting). Analysis-only: never
+            affects scores. <strong>0 disables</strong>.
           </span>
         </label>
       </fieldset>

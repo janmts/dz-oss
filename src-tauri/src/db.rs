@@ -99,6 +99,12 @@ fn migrate(conn: &Connection) {
             timestamp_ms INTEGER NOT NULL,
             data BLOB NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS drift_run_preroll_packets (
+            id INTEGER PRIMARY KEY,
+            run_id INTEGER NOT NULL REFERENCES drift_runs(id) ON DELETE CASCADE,
+            timestamp_ms INTEGER NOT NULL,
+            data BLOB NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS drift_run_splits (
             id INTEGER PRIMARY KEY,
             run_id INTEGER NOT NULL REFERENCES drift_runs(id) ON DELETE CASCADE,
@@ -121,6 +127,7 @@ fn migrate(conn: &Connection) {
         CREATE INDEX IF NOT EXISTS idx_drift_runs_zone_started ON drift_runs(zone_id, started_at DESC);
         CREATE INDEX IF NOT EXISTS idx_drift_runs_car_started ON drift_runs(car_ordinal, started_at DESC);
         CREATE INDEX IF NOT EXISTS idx_drift_packets_run ON drift_run_packets(run_id);
+        CREATE INDEX IF NOT EXISTS idx_drift_preroll_run ON drift_run_preroll_packets(run_id);
         CREATE INDEX IF NOT EXISTS idx_drift_splits_run ON drift_run_splits(run_id);",
     );
     // Per-run scoring breakdown (avg/max angle, drift time, multiplier, …) as
@@ -612,6 +619,38 @@ pub fn get_drift_run_packets(conn: &Connection, run_id: i64) -> Result<Vec<Vec<u
     rows.collect()
 }
 
+/// Store the pre-roll trail (telemetry buffered BEFORE the start gate) for a
+/// run in one transaction. Analysis-only data: shows how the car approached
+/// the gate (drift age at entry, line, speed); scoring/Recompute never read it.
+pub fn insert_drift_run_preroll(
+    conn: &Connection,
+    run_id: i64,
+    packets: &[(u32, Vec<u8>)],
+) -> Result<()> {
+    if packets.is_empty() {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+    {
+        let mut stmt = tx.prepare(
+            "INSERT INTO drift_run_preroll_packets (run_id, timestamp_ms, data) VALUES (?1, ?2, ?3)",
+        )?;
+        for (ts, data) in packets {
+            stmt.execute(rusqlite::params![run_id, ts, data])?;
+        }
+    }
+    tx.commit()
+}
+
+/// Pre-roll packet blobs for a run, in time order.
+pub fn get_drift_run_preroll(conn: &Connection, run_id: i64) -> Result<Vec<Vec<u8>>> {
+    let mut stmt = conn.prepare(
+        "SELECT data FROM drift_run_preroll_packets WHERE run_id=?1 ORDER BY timestamp_ms ASC",
+    )?;
+    let rows = stmt.query_map([run_id], |r| r.get::<_, Vec<u8>>(0))?;
+    rows.collect()
+}
+
 /// (run_id, zone_id) for every run — lets the recompute pass pick the right
 /// per-zone scoring config without loading full rows.
 pub fn list_drift_run_refs(conn: &Connection) -> Result<Vec<(i64, Option<i64>)>> {
@@ -660,6 +699,10 @@ pub fn set_drift_run_manual_score(
 /// was actually deleted (false if the id didn't exist).
 pub fn delete_drift_run(conn: &Connection, run_id: i64) -> Result<bool> {
     conn.execute("DELETE FROM drift_run_packets WHERE run_id=?1", [run_id])?;
+    conn.execute(
+        "DELETE FROM drift_run_preroll_packets WHERE run_id=?1",
+        [run_id],
+    )?;
     conn.execute("DELETE FROM drift_run_splits WHERE run_id=?1", [run_id])?;
     conn.execute("DELETE FROM drift_run_scores WHERE run_id=?1", [run_id])?;
     let affected = conn.execute("DELETE FROM drift_runs WHERE id=?1", [run_id])?;
@@ -672,6 +715,7 @@ pub fn delete_drift_run(conn: &Connection, run_id: i64) -> Result<bool> {
 pub fn delete_invalid_drift_runs(conn: &Connection) -> Result<usize> {
     let child = "WHERE run_id IN (SELECT id FROM drift_runs WHERE valid=0)";
     conn.execute(&format!("DELETE FROM drift_run_packets {child}"), [])?;
+    conn.execute(&format!("DELETE FROM drift_run_preroll_packets {child}"), [])?;
     conn.execute(&format!("DELETE FROM drift_run_splits {child}"), [])?;
     conn.execute(&format!("DELETE FROM drift_run_scores {child}"), [])?;
     let affected = conn.execute("DELETE FROM drift_runs WHERE valid=0", [])?;
@@ -970,6 +1014,7 @@ mod tests {
             "drift_zones",
             "drift_runs",
             "drift_run_packets",
+            "drift_run_preroll_packets",
             "drift_run_splits",
             "drift_run_scores",
         ] {
@@ -1140,6 +1185,7 @@ mod tests {
         let id = open_drift_run(&conn, None, 123, 1, 2, 300, 1, 7).unwrap();
         insert_drift_run_packet(&conn, id, 1000, &vec![1u8; 324]).unwrap();
         insert_drift_run_packet(&conn, id, 1016, &vec![2u8; 324]).unwrap();
+        insert_drift_run_preroll(&conn, id, &[(900, vec![3u8; 324])]).unwrap();
         set_drift_run_manual_score(&conn, id, 50_000, None, 1000).unwrap();
 
         assert!(delete_drift_run(&conn, id).unwrap());
@@ -1151,6 +1197,13 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
+        let preroll: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM drift_run_preroll_packets WHERE run_id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
         let scores: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM drift_run_scores WHERE run_id=?1",
@@ -1158,9 +1211,26 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!((pkts, scores), (0, 0));
+        assert_eq!((pkts, preroll, scores), (0, 0, 0));
         // Deleting a non-existent id is a no-op that reports false.
         assert!(!delete_drift_run(&conn, 99_999).unwrap());
+    }
+
+    #[test]
+    fn preroll_roundtrips_in_time_order() {
+        let conn = in_memory();
+        let id = open_drift_run(&conn, None, 123, 1, 2, 300, 1, 7).unwrap();
+        // Inserted out of order; read back sorted by timestamp.
+        insert_drift_run_preroll(&conn, id, &[(500, vec![5u8; 324]), (100, vec![1u8; 324])])
+            .unwrap();
+        let got = get_drift_run_preroll(&conn, id).unwrap();
+        assert_eq!(got, vec![vec![1u8; 324], vec![5u8; 324]]);
+        // Empty input is a no-op, not an error.
+        insert_drift_run_preroll(&conn, id, &[]).unwrap();
+        assert_eq!(get_drift_run_preroll(&conn, id).unwrap().len(), 2);
+        // Pre-roll does NOT count toward the run's packet_count (analysis-only).
+        let rows = list_drift_runs(&conn).unwrap();
+        assert_eq!(rows[0].packet_count, 0);
     }
 
     #[test]
@@ -1170,6 +1240,7 @@ mod tests {
         close_drift_run(&conn, good, 100, true, None, Some(1000.0)).unwrap();
         let bad = open_drift_run(&conn, None, 2, 2, 2, 2, 2, 2).unwrap();
         insert_drift_run_packet(&conn, bad, 1000, &vec![3u8; 324]).unwrap();
+        insert_drift_run_preroll(&conn, bad, &[(900, vec![4u8; 324])]).unwrap();
         set_drift_run_manual_score(&conn, bad, 9_999_999, Some("marker"), 1000).unwrap();
         close_drift_run(&conn, bad, 200, false, Some("left zone"), Some(0.0)).unwrap();
 
@@ -1186,6 +1257,13 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(leftover, 0);
+        let leftover_preroll: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM drift_run_preroll_packets WHERE run_id=?1",
+                [bad],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!((leftover, leftover_preroll), (0, 0));
     }
 }

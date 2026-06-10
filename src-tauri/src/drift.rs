@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use rusqlite::Connection;
 use serde::Serialize;
 
@@ -121,6 +123,16 @@ pub struct DriftRunManager {
     active: Option<ActiveRun>,
     last_point: Option<Point>,
     last_status: DriftRunStatus,
+    /// Rolling PRE-ROLL trail: raw packets seen while NO run is active, as
+    /// (packet timestamp_ms, wall-clock ms, raw bytes), oldest first. When a
+    /// run starts the buffer is stored alongside it (drift_run_preroll_packets)
+    /// so analysis can see how the car approached the gate — e.g. how long its
+    /// drift had been established, which measurably changes when the game
+    /// starts crediting. Disjoint from drift_run_packets by construction:
+    /// in-run packets are never buffered, and the buffer is cleared once
+    /// flushed (a back-to-back re-entry gets a trail reaching back only to the
+    /// previous run's end). ~64 Hz × 10 s × 324 B ≈ 200 KB of RAM at default.
+    preroll: VecDeque<(u32, i64, Vec<u8>)>,
 }
 
 impl DriftRunManager {
@@ -129,6 +141,7 @@ impl DriftRunManager {
             active: None,
             last_point: None,
             last_status: DriftRunStatus::idle(),
+            preroll: VecDeque::new(),
         }
     }
 
@@ -143,6 +156,7 @@ impl DriftRunManager {
         raw: &[u8],
         now_ms: i64,
         starve_timeout_s: f64,
+        preroll_s: f64,
     ) -> Option<DriftRunStatus> {
         let current = packet_point(pkt)?;
         let previous = self.last_point;
@@ -214,13 +228,20 @@ impl DriftRunManager {
             return Some(status);
         }
 
+        // Idle: keep the pre-roll trail current. The packet is appended AFTER
+        // the gate check below, so a run-opening packet (already stored as the
+        // run's first packet) never lands in its own trail.
+        self.trim_preroll(now_ms, preroll_s);
+
         let Some(previous) = previous else {
+            self.push_preroll(pkt.timestamp_ms, now_ms, raw, preroll_s);
             return None;
         };
         let zones = match db::list_drift_zones(conn) {
             Ok(zones) => zones,
             Err(e) => {
                 eprintln!("[drift] zone list error: {e}");
+                self.push_preroll(pkt.timestamp_ms, now_ms, raw, preroll_s);
                 return None;
             }
         };
@@ -259,6 +280,7 @@ impl DriftRunManager {
             });
 
         let Some((zone, _entry, finish_gate)) = started else {
+            self.push_preroll(pkt.timestamp_ms, now_ms, raw, preroll_s);
             return None;
         };
 
@@ -281,6 +303,16 @@ impl DriftRunManager {
                     packet_count: 0,
                     last_score_ms: now_ms,
                 };
+                // Attach the buffered approach trail to the run, then drop it —
+                // a flushed trail belongs to exactly one run.
+                let trail: Vec<(u32, Vec<u8>)> = self
+                    .preroll
+                    .drain(..)
+                    .map(|(ts, _, data)| (ts, data))
+                    .collect();
+                if let Err(e) = db::insert_drift_run_preroll(conn, id, &trail) {
+                    eprintln!("[drift] preroll insert error: {e}");
+                }
                 if let Err(e) = db::insert_drift_run_packet(conn, id, pkt.timestamp_ms, raw) {
                     eprintln!("[drift] opening packet insert error: {e}");
                 } else {
@@ -300,6 +332,27 @@ impl DriftRunManager {
                 eprintln!("[drift] open error: {e}");
                 None
             }
+        }
+    }
+
+    /// Append a packet to the pre-roll trail (no-op when the trail is disabled).
+    fn push_preroll(&mut self, timestamp_ms: u32, now_ms: i64, raw: &[u8], preroll_s: f64) {
+        if preroll_s <= 0.0 {
+            return;
+        }
+        self.preroll.push_back((timestamp_ms, now_ms, raw.to_vec()));
+    }
+
+    /// Drop trail entries older than the window (all of them if disabled —
+    /// covers the setting being turned down/off while idle).
+    fn trim_preroll(&mut self, now_ms: i64, preroll_s: f64) {
+        if preroll_s <= 0.0 {
+            self.preroll.clear();
+            return;
+        }
+        let cutoff = now_ms - (preroll_s * 1000.0) as i64;
+        while matches!(self.preroll.front(), Some((_, t, _)) if *t < cutoff) {
+            self.preroll.pop_front();
         }
     }
 }
@@ -670,14 +723,14 @@ mod tests {
         let mut mgr = DriftRunManager::new();
         let raw = vec![1u8; 324];
         assert!(mgr
-            .note_packet(&conn, &packet(2.0, -1.0), &raw, 1000, 0.0)
+            .note_packet(&conn, &packet(2.0, -1.0), &raw, 1000, 0.0, 10.0)
             .is_none());
         let started = mgr
-            .note_packet(&conn, &packet(2.0, 1.0), &raw, 1100, 0.0)
+            .note_packet(&conn, &packet(2.0, 1.0), &raw, 1100, 0.0, 10.0)
             .unwrap();
         assert_eq!(started.state, "running");
         let finished = mgr
-            .note_packet(&conn, &packet(2.0, 11.0), &raw, 2000, 0.0)
+            .note_packet(&conn, &packet(2.0, 11.0), &raw, 2000, 0.0, 10.0)
             .unwrap();
         assert_eq!(finished.state, "completed");
         let rows = db::list_drift_runs(&conn).unwrap();
@@ -694,11 +747,11 @@ mod tests {
         save_square_zone(&conn, 0.0);
         let mut mgr = DriftRunManager::new();
         let raw = vec![1u8; 324];
-        mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 1000, 0.0);
-        mgr.note_packet(&conn, &packet(2.0, 1.0), &raw, 1100, 0.0);
+        mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 1000, 0.0, 10.0);
+        mgr.note_packet(&conn, &packet(2.0, 1.0), &raw, 1100, 0.0, 10.0);
         // x=9 is far outside the x=5 edge — previously invalid, now still running.
         let still = mgr
-            .note_packet(&conn, &packet(9.0, 5.0), &raw, 1300, 0.0)
+            .note_packet(&conn, &packet(9.0, 5.0), &raw, 1300, 0.0, 10.0)
             .unwrap();
         assert_eq!(still.state, "running");
         assert!(db::list_drift_runs(&conn).unwrap()[0].valid);
@@ -731,11 +784,11 @@ mod tests {
         save_square_zone(&conn, 0.0);
         let mut mgr = DriftRunManager::new();
         let raw = vec![1u8; 324];
-        mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 1000, 1.0);
-        let started = mgr.note_packet(&conn, &packet(2.0, 1.0), &raw, 1100, 1.0).unwrap();
+        mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 1000, 1.0, 10.0);
+        let started = mgr.note_packet(&conn, &packet(2.0, 1.0), &raw, 1100, 1.0, 10.0).unwrap();
         assert_eq!(started.state, "running");
         // A non-scoring packet 2.1 s after the last score (the run start) → starved.
-        let dead = mgr.note_packet(&conn, &packet(2.0, 5.0), &raw, 3200, 1.0).unwrap();
+        let dead = mgr.note_packet(&conn, &packet(2.0, 5.0), &raw, 3200, 1.0, 10.0).unwrap();
         assert_eq!(dead.state, "invalid");
         assert!(!dead.scoring);
         let rows = db::list_drift_runs(&conn).unwrap();
@@ -754,13 +807,13 @@ mod tests {
         save_square_zone(&conn, 0.0);
         let mut mgr = DriftRunManager::new();
         let raw = vec![1u8; 324];
-        mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 1000, 1.0);
-        mgr.note_packet(&conn, &packet(2.0, 1.0), &raw, 1100, 1.0);
+        mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 1000, 1.0, 10.0);
+        mgr.note_packet(&conn, &packet(2.0, 1.0), &raw, 1100, 1.0, 10.0);
         // Scoring packets every 0.5 s for 3 s — each resets the starve timer.
         let (mut t, mut now) = (1600u32, 1600i64);
         for _ in 0..6 {
             let s = mgr
-                .note_packet(&conn, &drifting_packet(2.0, 5.0, t), &raw, now, 1.0)
+                .note_packet(&conn, &drifting_packet(2.0, 5.0, t), &raw, now, 1.0, 10.0)
                 .unwrap();
             assert_eq!(s.state, "running");
             assert!(s.scoring);
@@ -777,9 +830,9 @@ mod tests {
         save_square_zone(&conn, 0.0);
         let mut mgr = DriftRunManager::new();
         let raw = vec![1u8; 324];
-        mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 1000, 0.0);
-        mgr.note_packet(&conn, &packet(2.0, 1.0), &raw, 1100, 0.0);
-        let still = mgr.note_packet(&conn, &packet(2.0, 5.0), &raw, 99000, 0.0).unwrap();
+        mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 1000, 0.0, 10.0);
+        mgr.note_packet(&conn, &packet(2.0, 1.0), &raw, 1100, 0.0, 10.0);
+        let still = mgr.note_packet(&conn, &packet(2.0, 5.0), &raw, 99000, 0.0, 10.0).unwrap();
         assert_eq!(still.state, "running");
     }
 
@@ -791,10 +844,10 @@ mod tests {
         save_square_zone(&conn, 0.0);
         let mut mgr = DriftRunManager::new();
         let raw = vec![1u8; 324];
-        assert!(mgr.note_packet(&conn, &packet(2.0, 11.0), &raw, 1000, 0.0).is_none());
-        let started = mgr.note_packet(&conn, &packet(2.0, 9.0), &raw, 1100, 0.0).unwrap();
+        assert!(mgr.note_packet(&conn, &packet(2.0, 11.0), &raw, 1000, 0.0, 10.0).is_none());
+        let started = mgr.note_packet(&conn, &packet(2.0, 9.0), &raw, 1100, 0.0, 10.0).unwrap();
         assert_eq!(started.state, "running");
-        let finished = mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 2000, 0.0).unwrap();
+        let finished = mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 2000, 0.0, 10.0).unwrap();
         assert_eq!(finished.state, "completed");
         let rows = db::list_drift_runs(&conn).unwrap();
         assert!(rows[0].valid);
@@ -811,8 +864,8 @@ mod tests {
         let raw = vec![1u8; 324];
         // (-1,5) outside; (1,5) inside, but the segment crosses the left boundary
         // (x=0) mid-zone — not an end gate (z=0 or z=10).
-        assert!(mgr.note_packet(&conn, &packet(-1.0, 5.0), &raw, 1000, 0.0).is_none());
-        assert!(mgr.note_packet(&conn, &packet(1.0, 5.0), &raw, 1100, 0.0).is_none());
+        assert!(mgr.note_packet(&conn, &packet(-1.0, 5.0), &raw, 1000, 0.0, 10.0).is_none());
+        assert!(mgr.note_packet(&conn, &packet(1.0, 5.0), &raw, 1100, 0.0, 10.0).is_none());
         assert!(db::list_drift_runs(&conn).unwrap().is_empty());
     }
 
@@ -824,5 +877,79 @@ mod tests {
         let mut incomplete = square_zone();
         incomplete.right_boundary.clear();
         assert!(RunnableZone::from_row(&incomplete).is_none());
+    }
+
+    #[test]
+    fn preroll_trail_is_stored_with_the_run() {
+        let conn = in_memory();
+        save_square_zone(&conn, 0.0);
+        let mut mgr = DriftRunManager::new();
+        let raw_old = vec![7u8; 324];
+        let raw_new = vec![8u8; 324];
+        let raw_run = vec![9u8; 324];
+        // One idle packet that will fall out of the 10s window, one inside it.
+        let mut p = packet(2.0, -3.0);
+        p.timestamp_ms = 100;
+        mgr.note_packet(&conn, &p, &raw_old, 1_000, 0.0, 10.0);
+        let mut p = packet(2.0, -1.0);
+        p.timestamp_ms = 200;
+        mgr.note_packet(&conn, &p, &raw_new, 50_000, 0.0, 10.0);
+        // Gate crossing opens the run; this packet belongs to the run itself.
+        let started = mgr
+            .note_packet(&conn, &packet(2.0, 1.0), &raw_run, 50_100, 0.0, 10.0)
+            .unwrap();
+        assert_eq!(started.state, "running");
+        let run_id = started.run_id.unwrap();
+        let trail = db::get_drift_run_preroll(&conn, run_id).unwrap();
+        assert_eq!(trail.len(), 1, "only the in-window idle packet");
+        assert_eq!(trail[0], raw_new);
+        // The opening packet went to drift_run_packets, not the trail.
+        assert_eq!(db::get_drift_run_packets(&conn, run_id).unwrap().len(), 1);
+        assert_eq!(db::get_drift_run_packets(&conn, run_id).unwrap()[0], raw_run);
+    }
+
+    #[test]
+    fn preroll_trail_is_consumed_by_the_run_it_opens() {
+        // In-run packets are never buffered and a flushed trail is dropped, so
+        // a back-to-back second run only gets the packets between the runs.
+        let conn = in_memory();
+        save_square_zone(&conn, 0.0);
+        let mut mgr = DriftRunManager::new();
+        let raw = vec![1u8; 324];
+        let between = vec![2u8; 324];
+        mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 1_000, 0.0, 10.0);
+        let first = mgr
+            .note_packet(&conn, &packet(2.0, 1.0), &raw, 1_100, 0.0, 10.0)
+            .unwrap();
+        assert_eq!(first.state, "running");
+        let done = mgr
+            .note_packet(&conn, &packet(2.0, 11.0), &raw, 2_000, 0.0, 10.0)
+            .unwrap();
+        assert_eq!(done.state, "completed");
+        // One idle packet between the runs, then re-enter through the far gate.
+        mgr.note_packet(&conn, &packet(2.0, 10.5), &between, 2_100, 0.0, 10.0);
+        let second = mgr
+            .note_packet(&conn, &packet(2.0, 9.0), &raw, 2_200, 0.0, 10.0)
+            .unwrap();
+        assert_eq!(second.state, "running");
+        let trail = db::get_drift_run_preroll(&conn, second.run_id.unwrap()).unwrap();
+        assert_eq!(trail.len(), 1, "trail reaches back only to the previous run's end");
+        assert_eq!(trail[0], between);
+    }
+
+    #[test]
+    fn preroll_disabled_keeps_no_trail() {
+        let conn = in_memory();
+        save_square_zone(&conn, 0.0);
+        let mut mgr = DriftRunManager::new();
+        let raw = vec![1u8; 324];
+        mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 1_000, 0.0, 0.0);
+        let started = mgr
+            .note_packet(&conn, &packet(2.0, 1.0), &raw, 1_100, 0.0, 0.0)
+            .unwrap();
+        assert_eq!(started.state, "running");
+        assert!(db::get_drift_run_preroll(&conn, started.run_id.unwrap())
+            .unwrap()
+            .is_empty());
     }
 }
