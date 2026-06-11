@@ -24,6 +24,9 @@ export const driftRunStatus = writable<DriftRunStatus>({
   invalidReason: null,
   scoring: false,
   starveRemainingS: null,
+  angleDeg: null,
+  speedMs: null,
+  directionFlips: null,
 });
 export const driftZones = writable<DriftZoneRow[]>([]);
 export const settings = writable<AppSettings | null>(null);

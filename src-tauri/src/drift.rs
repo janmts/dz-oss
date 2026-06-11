@@ -50,6 +50,13 @@ struct ActiveRun {
     /// Wall-clock ms of the last packet that earned points. The run aborts if
     /// this falls more than the configured starvation timeout behind `now`.
     last_score_ms: i64,
+    /// Drift-direction sign (+1/−1) latched at the last scoring packet; 0 until
+    /// the run first scores. Drives the live flip counter.
+    score_sign: i8,
+    /// Signed-direction reversals between consecutive scoring packets so far —
+    /// the live "flip count" instrument (same definition as the stored
+    /// `directionFlips` breakdown field).
+    direction_flips: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -70,6 +77,14 @@ pub struct DriftRunStatus {
     /// and not currently scoring. `None` when scoring, idle, closed, or when the
     /// starvation timer is disabled.
     pub starve_remaining_s: Option<f64>,
+    /// Live signed drift angle (°) of the latest packet — positive one way,
+    /// negative the other. `None` when idle or closed.
+    pub angle_deg: Option<f64>,
+    /// Live speed (m/s) of the latest packet. `None` when idle or closed.
+    pub speed_ms: Option<f64>,
+    /// Direction flips (signed-angle reversals between scoring packets) so far
+    /// in this run. `None` when idle.
+    pub direction_flips: Option<u32>,
 }
 
 impl DriftRunStatus {
@@ -85,10 +100,18 @@ impl DriftRunStatus {
             invalid_reason: None,
             scoring: false,
             starve_remaining_s: None,
+            angle_deg: None,
+            speed_ms: None,
+            direction_flips: None,
         }
     }
 
-    fn running(run: &ActiveRun, scoring: bool, starve_remaining_s: Option<f64>) -> Self {
+    fn running(
+        run: &ActiveRun,
+        scoring: bool,
+        starve_remaining_s: Option<f64>,
+        pkt: &parser::TelemetryPacket,
+    ) -> Self {
         Self {
             state: "running".into(),
             run_id: Some(run.id),
@@ -100,6 +123,9 @@ impl DriftRunStatus {
             invalid_reason: None,
             scoring,
             starve_remaining_s: if scoring { None } else { starve_remaining_s },
+            angle_deg: Some(scoring::drift_angle_signed_deg(pkt)),
+            speed_ms: Some(pkt.speed_ms as f64),
+            direction_flips: Some(run.direction_flips),
         }
     }
 
@@ -115,6 +141,9 @@ impl DriftRunStatus {
             invalid_reason,
             scoring: false,
             starve_remaining_s: None,
+            angle_deg: None,
+            speed_ms: None,
+            direction_flips: Some(run.direction_flips),
         }
     }
 }
@@ -201,6 +230,15 @@ impl DriftRunManager {
             let scoring = scoring::is_scoring_packet(pkt, &run.zone.params);
             if scoring {
                 run.last_score_ms = now_ms;
+                let sign = if scoring::drift_angle_signed_deg(pkt) >= 0.0 {
+                    1i8
+                } else {
+                    -1i8
+                };
+                if run.score_sign != 0 && sign != run.score_sign {
+                    run.direction_flips += 1;
+                }
+                run.score_sign = sign;
             }
             let starve_s = (now_ms - run.last_score_ms).max(0) as f64 / 1000.0;
             if starve_timeout_s > 0.0 && starve_s > starve_timeout_s {
@@ -223,7 +261,7 @@ impl DriftRunManager {
             }
 
             let remaining = (starve_timeout_s > 0.0).then(|| (starve_timeout_s - starve_s).max(0.0));
-            let status = DriftRunStatus::running(run, scoring, remaining);
+            let status = DriftRunStatus::running(run, scoring, remaining, pkt);
             self.last_status = status.clone();
             return Some(status);
         }
@@ -302,6 +340,8 @@ impl DriftRunManager {
                     started_at: now_ms,
                     packet_count: 0,
                     last_score_ms: now_ms,
+                    score_sign: 0,
+                    direction_flips: 0,
                 };
                 // Attach the buffered approach trail to the run, then drop it —
                 // a flushed trail belongs to exactly one run.
@@ -321,9 +361,14 @@ impl DriftRunManager {
                 let scoring = scoring::is_scoring_packet(pkt, &run.zone.params);
                 if scoring {
                     run.last_score_ms = now_ms;
+                    run.score_sign = if scoring::drift_angle_signed_deg(pkt) >= 0.0 {
+                        1
+                    } else {
+                        -1
+                    };
                 }
                 let remaining = (starve_timeout_s > 0.0).then_some(starve_timeout_s);
-                let status = DriftRunStatus::running(&run, scoring, remaining);
+                let status = DriftRunStatus::running(&run, scoring, remaining, pkt);
                 self.active = Some(run);
                 self.last_status = status.clone();
                 Some(status)

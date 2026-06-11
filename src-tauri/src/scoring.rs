@@ -163,19 +163,28 @@ pub struct RunScore {
     pub max_multiplier: f64,
     /// Number of flicks (direction changes that bridged a short out-of-band dip).
     pub transitions: usize,
+    /// Drift-direction sign changes between consecutive *scoring* packets — the
+    /// "flip count" the tuning analyses use (weave jitter shows up here). Unlike
+    /// `transitions` it has no grace window: every signed-angle reversal while
+    /// banking counts.
+    pub direction_flips: usize,
 }
 
-/// Chassis sideslip (drift angle) in **degrees**, always ≥ 0.
+/// Signed chassis sideslip (drift angle) in **degrees** — positive when sliding
+/// one way, negative the other; the live instrument and flip counting need the
+/// sign.
 ///
 /// Forza reports velocity in the **car's local frame**, so sideslip is simply
 /// the angle between lateral (`velX`) and longitudinal (`velZ`) velocity — no
 /// yaw needed. Verified ≈0 (mean 0.03°, std 0.45°) on straight grip driving
 /// across all headings (scripts/frame_test.py).
+pub fn drift_angle_signed_deg(pkt: &TelemetryPacket) -> f64 {
+    (pkt.vel_x as f64).atan2(pkt.vel_z as f64).to_degrees()
+}
+
+/// Chassis sideslip (drift angle) in **degrees**, always ≥ 0.
 pub fn drift_angle_deg(pkt: &TelemetryPacket) -> f64 {
-    (pkt.vel_x as f64)
-        .atan2(pkt.vel_z as f64)
-        .abs()
-        .to_degrees()
+    drift_angle_signed_deg(pkt).abs()
 }
 
 /// Rear-axle combined slip: max of the two rear tires' combined slip. Forza's
@@ -288,6 +297,8 @@ pub fn score_run(packets: &[TelemetryPacket], p: &ScoringParams) -> RunScore {
     let mut out_time = 0.0; // time since the drift last dipped out of band
     let mut last_sign = 0i8; // direction of the last in-band drift (+1 / −1)
     let mut transitions = 0usize;
+    let mut score_sign = 0i8; // direction latched at the last *scoring* packet
+    let mut direction_flips = 0usize;
     let mut prev_ms: Option<u32> = None;
 
     for pkt in packets {
@@ -329,6 +340,10 @@ pub fn score_run(packets: &[TelemetryPacket], p: &ScoringParams) -> RunScore {
             if !p.require_tarmac_contact || on_tarmac(pkt, p) {
                 total +=
                     p.base_rate * angle_factor(angle, p) * speed_factor(speed, p) * multiplier * dt;
+                if score_sign != 0 && sign != score_sign {
+                    direction_flips += 1;
+                }
+                score_sign = sign;
             }
             drift_time += dt;
             angle_sum += angle;
@@ -362,6 +377,7 @@ pub fn score_run(packets: &[TelemetryPacket], p: &ScoringParams) -> RunScore {
         },
         max_multiplier,
         transitions,
+        direction_flips,
     }
 }
 
@@ -447,6 +463,46 @@ mod tests {
         assert_eq!(r.max_multiplier, 1.0);
         assert!((r.avg_angle_deg - 40.0).abs() < 1.0);
         assert!(r.drift_time_s > 2.5 && r.drift_time_s < 3.1);
+    }
+
+    #[test]
+    fn direction_flips_count_signed_reversals_while_scoring() {
+        let params = ScoringParams::default();
+        // Weave: 1 s at +25°, 1 s at −25°, repeated — 3 reversals. A steady run
+        // of the same length counts zero. (drifting_packet keeps all wheels on
+        // tarmac, so every in-band packet scores.)
+        let mut weave = Vec::new();
+        for seg in 0..4 {
+            let beta = if seg % 2 == 0 { 25.0 } else { -25.0 };
+            for i in 0..60u32 {
+                weave.push(at(drifting_packet(beta, 15.0), (seg * 60 + i) * 16));
+            }
+        }
+        assert_eq!(score_run(&weave, &params).direction_flips, 3);
+
+        let steady: Vec<_> = (0..240)
+            .map(|i| at(drifting_packet(25.0, 15.0), i * 16))
+            .collect();
+        assert_eq!(score_run(&steady, &params).direction_flips, 0);
+
+        // A sub-gate dip (β=0 for a stretch) between two same-direction segments
+        // is not a flip; the same dip into the OPPOSITE direction is one.
+        let mut dip_same = Vec::new();
+        let mut dip_flip = Vec::new();
+        for i in 0..60u32 {
+            dip_same.push(at(drifting_packet(25.0, 15.0), i * 16));
+            dip_flip.push(at(drifting_packet(25.0, 15.0), i * 16));
+        }
+        for i in 60..90u32 {
+            dip_same.push(at(drifting_packet(0.0, 15.0), i * 16));
+            dip_flip.push(at(drifting_packet(0.0, 15.0), i * 16));
+        }
+        for i in 90..150u32 {
+            dip_same.push(at(drifting_packet(25.0, 15.0), i * 16));
+            dip_flip.push(at(drifting_packet(-25.0, 15.0), i * 16));
+        }
+        assert_eq!(score_run(&dip_same, &params).direction_flips, 0);
+        assert_eq!(score_run(&dip_flip, &params).direction_flips, 1);
     }
 
     #[test]

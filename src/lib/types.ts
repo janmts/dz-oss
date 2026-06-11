@@ -100,6 +100,9 @@ export interface DriftScoreBreakdown {
   avgSpeedMs: number;
   maxMultiplier: number;
   transitions: number;
+  /** Signed-direction reversals between scoring packets (weave jitter counts).
+   *  Absent on breakdowns stored before the field existed — Recompute backfills. */
+  directionFlips?: number;
 }
 
 export interface DriftRunRow {
@@ -138,6 +141,12 @@ export interface DriftRunStatus {
   /** Seconds left before score-starvation aborts the run; null when scoring,
    *  idle/closed, or the starvation timer is disabled. */
   starveRemainingS: number | null;
+  /** Live signed drift angle (°) of the latest packet; null when idle/closed. */
+  angleDeg: number | null;
+  /** Live speed (m/s) of the latest packet; null when idle/closed. */
+  speedMs: number | null;
+  /** Direction flips so far in this run; null when idle. */
+  directionFlips: number | null;
 }
 
 export interface ZonePoint {
