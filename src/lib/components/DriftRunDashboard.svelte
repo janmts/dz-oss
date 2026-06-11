@@ -299,6 +299,31 @@
             {/if}
           </strong>
         </div>
+        {#if activeForSelected}
+          <!-- Live play-test instruments: signed drift angle, speed in the
+               model's native unit, and the run's flip count (same definition as
+               the stored directionFlips breakdown / the tuning scripts). -->
+          <div class="live-instruments">
+            <div class="inst">
+              <span>Angle</span>
+              <strong class="big"
+                >{$driftRunStatus.angleDeg != null
+                  ? `${$driftRunStatus.angleDeg >= 0 ? '+' : ''}${$driftRunStatus.angleDeg.toFixed(1)}°`
+                  : '–'}</strong
+              >
+            </div>
+            <div class="inst">
+              <span>Speed</span>
+              <strong class="big"
+                >{$driftRunStatus.speedMs != null ? `${$driftRunStatus.speedMs.toFixed(1)} m/s` : '–'}</strong
+              >
+            </div>
+            <div class="inst">
+              <span>Flips</span>
+              <strong class="big">{$driftRunStatus.directionFlips ?? 0}</strong>
+            </div>
+          </div>
+        {/if}
         <div class="metric-grid">
           <div>
             <span>Zone</span>
@@ -352,6 +377,9 @@
             <span>drift {b.driftTimeS.toFixed(1)}s / {b.totalTimeS.toFixed(1)}s</span>
             <span>angle {b.avgAngleDeg.toFixed(0)}° avg · {b.maxAngleDeg.toFixed(0)}° max</span>
             <span>speed {b.avgSpeedMs.toFixed(1)} m/s</span>
+            {#if b.directionFlips !== undefined}
+              <span>flips {b.directionFlips}</span>
+            {/if}
             {#if b.maxMultiplier > 1.01}
               <span>mult ×{b.maxMultiplier.toFixed(1)}</span>
             {/if}
@@ -649,6 +677,29 @@
     color: var(--tx-hi);
     font-size: 0.72rem;
     font-variant-numeric: tabular-nums;
+  }
+  .live-instruments {
+    display: grid;
+    grid-template-columns: 1.2fr 1.2fr 0.8fr;
+    gap: 0.5rem;
+    padding: 0.65rem 0.75rem 0;
+  }
+  .live-instruments .inst {
+    min-width: 0;
+    display: grid;
+    gap: 0.1rem;
+  }
+  .live-instruments span {
+    color: var(--tx-dim);
+    font-size: 0.62rem;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+  }
+  .live-instruments strong.big {
+    color: var(--tx-hi, #e5e7eb);
+    font-size: 1.25rem;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
   }
   .metric-grid {
     display: grid;
