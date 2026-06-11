@@ -1,9 +1,9 @@
 {
-  "name": "fh6-tel",
-  "version": "1.2.2",
-  "description": "Forza Horizon 6 telemetry dashboard — real-time UDP display and session recording",
-  "author": "BanHammer <chrisnelson@bssecure.net>",
-  "homepage": "https://github.com/TheBanHammer/fh6-tel",
+  "name": "dz-oss",
+  "version": "0.1.0",
+  "description": "DZ-OSS — Forza Horizon 6 drift-scoring workbench, real-time telemetry, and session recording",
+  "author": "janmts <contact@janmts.com>",
+  "homepage": "https://github.com/janmts/dz-oss",
   "type": "module",
   "scripts": {
     "dev": "vite dev",

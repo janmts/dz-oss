@@ -4,22 +4,11 @@ The repo root `Dockerfile` builds a self-contained image of the headless
 telemetry server (dashboard + UDP ingest), with the frontend embedded. Built on
 Debian bullseye (glibc 2.31) so it runs anywhere modern.
 
-## Pull the published image (recommended)
+## Build the image
 
-Each release pushes an image to GHCR:
-
-```bash
-docker pull ghcr.io/thebanhammer/fh6-tel-serve:latest
-# or a specific version:  ghcr.io/thebanhammer/fh6-tel-serve:1.2.0
-```
-
-(If the package is private, make it public under the repo's *Packages* settings,
-or `docker login ghcr.io` first.)
-
-## Build it yourself
+No prebuilt image is published — build it from the repo root (build context = repo root):
 
 ```bash
-# from the repo root (build context = repo root)
 docker build -t fh6-tel-serve .
 ```
 

@@ -57,7 +57,7 @@
 
 <header class="topbar">
   <div class="brand">
-    <span class="wordmark">FH6<i>/</i>TEL</span>
+    <span class="wordmark">DZ<i>-</i>OSS</span>
     <span class="status" title={connected ? 'Receiving telemetry' : 'Waiting for telemetry'}>
       <span class="dot" class:live={connected}></span>
       <span class="status-label">{connected ? 'LIVE' : 'WAIT'}</span>
