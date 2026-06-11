@@ -1,0 +1,115 @@
+/* ════════════════════════════════════════════════════════════════════════
+   FH6-TEL design system — graphite + amber
+   Single source of truth for color, type and shape tokens.
+   Aesthetic: modern data-logger (MoTeC/AiM lineage) with clean-minimal
+   restraint — flat layered graphite surfaces, hairline borders, mono
+   numerals, one quiet amber accent.
+   ════════════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* ── Surfaces: warm graphite ramp, deepest → most elevated ── */
+  --bg-body:     #0f1012;
+  --bg-panel:    #141518;
+  --bg-card:     #18191d;
+  --bg-elevated: #1e2024;
+  --bg-track:    #26282d;
+
+  /* ── Borders: hairlines, barely-there → structural ── */
+  --bd-dim:      #222428;
+  --bd-subtle:   #2a2c31;
+  --bd-muted:    #34373d;
+  --bd-strong:   #44484f;
+
+  /* ── Text ramp ── */
+  --tx-hi:    #f2f2f0;
+  --tx-mid:   #d7d7d3;
+  --tx-lo:    #a5a5a0;
+  --tx-dim:   #7c7d78;
+  --tx-xdim:  #5c5d59;
+  --tx-ghost: #454641;
+
+  /* ── Accent: restrained instrument amber ── */
+  --ac:        #d2a24c;
+  --ac-bright: #ecc274;
+  --ac-dim:    #41331c;
+  --ac-wash:   color-mix(in srgb, var(--ac) 12%, transparent);
+
+  /* ── Status (desaturated, no Tailwind neon) ── */
+  --ok:     #84b577;
+  --warn:   #dd9a47;
+  --bad:    #d56c62;
+  --bad-tx: #e49d96;
+  --info:   #82a7c8;
+  --violet: #a995cf;
+
+  /* ── Map / zone semantics ── */
+  --map-left:  #84b577;
+  --map-right: #82a7c8;
+  --gate-a:    #d2a24c;
+  --gate-b:    #d56c62;
+  --gate-split:#a995cf;
+  --live-dot:  #ecc274;
+
+  /* ── Attitude indicator ── */
+  --adi-sky:    #20262e;
+  --adi-ground: #2b211a;
+
+  /* ── Type ── */
+  --font-ui:   'Inter Variable', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono Variable', 'Cascadia Mono', Consolas, monospace;
+
+  /* ── Shape: data-logger sharp ── */
+  --r-xs: 2px;
+  --r-sm: 3px;
+  --r-md: 4px;
+  --r-lg: 6px;
+}
+
+/* ── Reset & base ───────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--bg-body);
+  color: var(--tx-hi);
+  font-family: var(--font-ui);
+  overflow: hidden;
+  height: 100vh;
+  width: 100vw;
+}
+
+/* ── Slim themed scrollbars (WebView2/Chromium + Firefox) ───────────────── */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--bd-strong) transparent;
+}
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: var(--bd-strong);
+  border-radius: 4px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--tx-ghost);
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-corner { background: transparent; }
+
+/* ── Shared utility classes (usable from any component's markup) ────────── */
+
+/* Numeric readout: always mono + tabular */
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Small uppercase section/field label — the system's signature caption */
+.cap {
+  font-family: var(--font-ui);
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--tx-dim);
+}

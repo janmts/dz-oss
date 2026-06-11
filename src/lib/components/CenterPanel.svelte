@@ -1,5 +1,6 @@
 <script lang="ts">
   import { displayPacket, speedMph, speedKph, rpmPercent } from '$lib/stores/telemetry';
+  import { themeColor } from '$lib/theme';
   import AttitudeIndicator from './AttitudeIndicator.svelte';
   import SteeringIndicator from './SteeringIndicator.svelte';
 
@@ -37,7 +38,11 @@
   let gDotX = $derived(Math.min(Math.max(latG  / G_MAX, -1), 1) * 50 + 50);
   let gDotY = $derived(Math.min(Math.max(-longG / G_MAX, -1), 1) * 50 + 50);
   let gMag  = $derived(Math.hypot(latG, longG));
-  let gDotColor = $derived(gMag > 1.5 ? '#ef4444' : gMag > 0.8 ? '#f59e0b' : '#22c55e');
+  let gDotColor = $derived(
+    gMag > 1.5 ? themeColor('--bad', '#d56c62')
+    : gMag > 0.8 ? themeColor('--warn', '#dd9a47')
+    : themeColor('--ok', '#84b577')
+  );
 
   // Inputs
   let throttleFrac = $derived((pkt?.throttle ?? 0) / 255);
@@ -50,7 +55,8 @@
   <svg viewBox="0 0 320 265" class="gauge-svg">
     <!-- Redline zone (last 10%) subtle red band -->
     <circle cx={CX} cy={CY} r={R}
-      fill="none" stroke="rgba(239,68,68,0.12)" stroke-width="20" stroke-linecap="round"
+      fill="none" stroke-width="20" stroke-linecap="round"
+      style="stroke: color-mix(in srgb, var(--bad) 14%, transparent);"
       stroke-dasharray="{0.1 * bgArc} {C - 0.1 * bgArc}"
       transform="rotate({ROT + 0.9 * 270}, {CX}, {CY})"
     />
@@ -64,37 +70,34 @@
     <!-- RPM fill — accent colour, red at redline -->
     <circle cx={CX} cy={CY} r={R}
       fill="none" stroke-width="20" stroke-linecap="round"
-      style="stroke: {isRedline ? '#ef4444' : 'var(--ac)'}; transition: stroke-dasharray 40ms linear, stroke 80ms ease;"
+      style="stroke: {isRedline ? 'var(--bad)' : 'var(--ac)'}; transition: stroke-dasharray 40ms linear, stroke 80ms ease;"
       stroke-dasharray="{rpmArc} {C - rpmArc}"
       transform="rotate({ROT}, {CX}, {CY})"
     />
 
     <!-- Speed -->
     <text x={CX} y={CY - 14}
-      text-anchor="middle" font-size="66" font-weight="900"
-      class="speed-text"
-      font-family="'Segoe UI', system-ui, sans-serif"
-      style="font-variant-numeric: tabular-nums;">
+      text-anchor="middle" font-size="62" font-weight="650"
+      class="speed-text">
       {speed}
     </text>
     <text x={CX} y={CY + 10}
-      text-anchor="middle" font-size="11" font-weight="700"
+      text-anchor="middle" font-size="10" font-weight="600"
       class="unit-text"
-      font-family="'Segoe UI', system-ui, sans-serif"
       letter-spacing="4">
       {unit}
     </text>
 
     <!-- Gear box -->
-    <rect x={CX - 27} y={CY + 22} width="54" height="46" rx="8"
+    <rect x={CX - 27} y={CY + 22} width="54" height="46" rx="4"
       class="gear-box"
-      style="stroke: {isRedline ? '#ef4444' : 'var(--bd-muted)'};"
+      style="stroke: {isRedline ? 'var(--bad)' : 'var(--bd-muted)'};"
       stroke-width="2"
     />
     <text x={CX} y={CY + 58}
-      text-anchor="middle" font-size="32" font-weight="900"
-      style="fill: {isRedline ? '#ef4444' : 'var(--tx-mid)'};"
-      font-family="'Segoe UI', system-ui, sans-serif">
+      text-anchor="middle" font-size="30" font-weight="650"
+      class="gear-text"
+      style="fill: {isRedline ? 'var(--bad)' : 'var(--tx-mid)'};">
       {gearLabel}
     </text>
 
@@ -106,7 +109,7 @@
       <line
         x1={CX + inner * Math.cos(angle)} y1={CY + inner * Math.sin(angle)}
         x2={CX + outer * Math.cos(angle)} y2={CY + outer * Math.sin(angle)}
-        style="stroke: {tick >= 9 ? '#ef4444' : 'var(--bd-muted)'};"
+        style="stroke: {tick >= 9 ? 'var(--bad)' : 'var(--bd-muted)'};"
         stroke-width={tick % 5 === 0 ? 2.5 : 1.5}
         stroke-linecap="round"
       />
@@ -203,10 +206,15 @@
     height: 100%;
   }
 
-  /* SVG colours */
+  /* SVG colours & type */
   .rpm-track  { stroke: var(--bg-track); }
-  .speed-text { fill: var(--tx-hi); }
-  .unit-text  { fill: var(--tx-xdim); }
+  .speed-text {
+    fill: var(--tx-hi);
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+  .unit-text  { fill: var(--tx-xdim); font-family: var(--font-ui); }
+  .gear-text  { font-family: var(--font-mono); }
   .gear-box   { fill: var(--bg-elevated); }
 
   .bottom-row {
@@ -258,9 +266,10 @@
   .g-readout { display: flex; flex-direction: column; gap: 0.1rem; }
   .g-axis {
     font-size: clamp(0.44rem, 0.9vw, 0.56rem);
-    font-weight: 700;
+    font-weight: 600;
     color: var(--tx-xdim);
     letter-spacing: 0.05em;
+    font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
   }
 
@@ -290,16 +299,17 @@
     min-width: 0;
     border: 1px solid var(--bd-subtle);
   }
-  .input-fill { height: 100%; border-radius: 4px; transition: width 40ms linear; }
-  .input-fill.thr { background: #22c55e; }
-  .input-fill.brk { background: #ef4444; }
-  .input-fill.clt { background: #a855f7; }
+  .input-fill { height: 100%; border-radius: 3px; transition: width 40ms linear; }
+  .input-fill.thr { background: var(--ok); }
+  .input-fill.brk { background: var(--bad); }
+  .input-fill.clt { background: var(--violet); }
   .input-val {
     font-size: clamp(0.4rem, 0.82vw, 0.52rem);
-    font-weight: 700;
+    font-weight: 600;
     color: var(--tx-xdim);
     width: 1.8rem;
     text-align: right;
+    font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
     flex-shrink: 0;
   }
@@ -314,9 +324,13 @@
     flex-shrink: 0;
     transition: background 80ms, box-shadow 80ms;
   }
-  .hb-led.hb-on { background: #f97316; box-shadow: 0 0 7px #f97316aa; border-color: #c2410c; }
+  .hb-led.hb-on {
+    background: var(--warn);
+    box-shadow: 0 0 7px color-mix(in srgb, var(--warn) 65%, transparent);
+    border-color: color-mix(in srgb, var(--warn) 60%, var(--bg-body));
+  }
   .hb-text { color: var(--tx-ghost); }
-  .hb-text.hb-active { color: #f97316; }
+  .hb-text.hb-active { color: var(--warn); }
 
   /* Boost LED */
   .bst-led {
@@ -328,9 +342,13 @@
     flex-shrink: 0;
     transition: background 80ms, box-shadow 80ms;
   }
-  .bst-led.bst-on { background: #a855f7; box-shadow: 0 0 7px #a855f7aa; border-color: #7e22ce; }
+  .bst-led.bst-on {
+    background: var(--violet);
+    box-shadow: 0 0 7px color-mix(in srgb, var(--violet) 65%, transparent);
+    border-color: color-mix(in srgb, var(--violet) 60%, var(--bg-body));
+  }
   .bst-val { color: var(--tx-ghost); transition: color 0.15s; }
-  .bst-val.bst-active { color: #d8b4fe; }
+  .bst-val.bst-active { color: color-mix(in srgb, var(--violet) 70%, white); }
   .bst-unit {
     font-size: clamp(0.36rem, 0.72vw, 0.46rem);
     font-weight: 700;
@@ -343,8 +361,9 @@
   .rpm-readout { display: flex; align-items: baseline; gap: 0.3rem; margin-top: 0.1rem; }
   .rpm-num {
     font-size: clamp(0.68rem, 1.6vw, 1rem);
-    font-weight: 800;
+    font-weight: 650;
     color: var(--tx-lo);
+    font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
   }
   .rpm-unit {

@@ -95,8 +95,9 @@
   .adi-readouts { display: flex; gap: 0.5rem; }
   .adi-val {
     font-size: clamp(0.42rem, 0.85vw, 0.54rem);
-    font-weight: 700;
+    font-weight: 600;
     color: var(--tx-xdim);
+    font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
     letter-spacing: 0.04em;
   }

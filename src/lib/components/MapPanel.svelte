@@ -4,6 +4,7 @@
   import TrackMap from './TrackMap.svelte';
   import { effectiveMapConfig } from '$lib/mapDefaults';
   import { xyzSimpleCRS } from '$lib/mapCrs';
+  import { LAP_PALETTE, themeColor } from '$lib/theme';
   import type { TelemetryPacket, AppSettings } from '$lib/types';
 
   let {
@@ -26,9 +27,7 @@
     compact?: boolean;
   } = $props();
 
-  const LAP_COLORS = [
-    '#3b82f6', '#22c55e', '#f59e0b', '#a855f7', '#ef4444', '#06b6d4', '#ec4899',
-  ];
+  const LAP_COLORS = LAP_PALETTE;
 
   // Resolves to the FH6 Japan preset unless the user opted into overriding.
   let cfg = $derived(effectiveMapConfig(settings));
@@ -137,7 +136,7 @@
       const flush = () => {
         if (seg.length > 1) {
           L!.polyline(seg, {
-            color: colorByLap ? LAP_COLORS[lap % LAP_COLORS.length] : '#3b82f6',
+            color: colorByLap ? LAP_COLORS[lap % LAP_COLORS.length] : themeColor('--ac', '#d2a24c'),
             weight: compact ? 2 : 3,
             opacity: 0.9,
           }).addTo(polylineLayer!);
@@ -170,8 +169,8 @@
         html:
           `<svg width="${sz}" height="${sz}" viewBox="0 0 24 24">` +
           `<path transform="rotate(${headingDeg} 12 12)" ` +
-          `d="M12 2 L19 21 L12 15 L5 21 Z" fill="#fbbf24" ` +
-          `stroke="#000" stroke-width="1.5" stroke-linejoin="round"/></svg>`,
+          `d="M12 2 L19 21 L12 15 L5 21 Z" fill="${themeColor('--live-dot', '#ecc274')}" ` +
+          `stroke="${themeColor('--bg-body', '#0f1012')}" stroke-width="1.5" stroke-linejoin="round"/></svg>`,
         iconSize: [sz, sz],
         iconAnchor: [sz / 2, sz / 2],
       });
@@ -236,7 +235,7 @@
   .map-host {
     width: 100%;
     aspect-ratio: 1;
-    border-radius: 4px;
+    border-radius: var(--r-sm);
     overflow: hidden;
     background: var(--bg-card);
   }

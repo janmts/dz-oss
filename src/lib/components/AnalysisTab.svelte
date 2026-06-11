@@ -4,6 +4,7 @@
   import 'uplot/dist/uPlot.min.css';
   import type { TelemetryPacket, SessionLap } from '$lib/types';
   import { splitLaps, buildLapChips, metricGroups, buildChart, LAP_PALETTE } from '$lib/analysis';
+  import { themeColor } from '$lib/theme';
 
   let {
     packets,
@@ -184,8 +185,8 @@
           })),
         ],
         axes: [
-          { stroke: '#6b7280', grid: { stroke: '#1f2937' } },
-          { stroke: '#6b7280', grid: { stroke: '#1f2937' } },
+          { stroke: themeColor('--tx-dim', '#7c7d78'), grid: { stroke: themeColor('--bd-subtle', '#2a2c31') } },
+          { stroke: themeColor('--tx-dim', '#7c7d78'), grid: { stroke: themeColor('--bd-subtle', '#2a2c31') } },
         ],
       };
 
@@ -227,10 +228,11 @@
     gap: 0.4rem;
     background: var(--bg-card);
     border: 1px solid var(--bd-dim);
-    border-radius: 999px;
+    border-radius: var(--r-sm);
     color: var(--tx-dim);
-    font-size: 0.78rem;
-    padding: 0.3rem 0.7rem;
+    font-family: inherit;
+    font-size: 0.74rem;
+    padding: 0.28rem 0.6rem;
     cursor: pointer;
   }
   .chip.on {
@@ -239,9 +241,9 @@
     background: color-mix(in srgb, var(--chip) 16%, transparent);
   }
   .chip .dot {
-    width: 9px;
-    height: 9px;
-    border-radius: 50%;
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
     background: var(--chip);
     opacity: 0.4;
   }
@@ -249,6 +251,7 @@
     opacity: 1;
   }
   .chip-time {
+    font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
     color: var(--tx-mid);
   }
@@ -256,7 +259,7 @@
     font-size: 0.62rem;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    color: #d8b4fe;
+    color: color-mix(in srgb, var(--violet) 70%, white);
   }
   .charts {
     display: flex;

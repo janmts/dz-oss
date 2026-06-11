@@ -18,8 +18,6 @@
   import { CAR_CLASS_LABELS, DRIVETRAIN_LABELS, type DriftRunRow, type DriftZoneRow } from '$lib/types';
   import DriftZoneMap from './DriftZoneMap.svelte';
 
-  let { onClose }: { onClose: () => void } = $props();
-
   let selectedId = $state<number | null>(null);
   let scoreDraft = $state('');
   let noteDraft = $state('');
@@ -228,356 +226,324 @@
   }
 </script>
 
-<div class="overlay" role="dialog" aria-modal="true">
-  <div class="dashboard">
-    <aside class="zone-rail">
-      <header class="rail-head">
+<div class="dashboard">
+  <aside class="zone-rail">
+    <header class="rail-head">
+      <span class="cap">Zones</span>
+      <span class="state mono" data-state={$driftRunStatus.state}>{statusLabel()}</span>
+    </header>
+
+    <div class="zone-list">
+      {#each $driftZones as zone}
+        <button
+          class="zone-row"
+          class:active={zone.id === selectedZone?.id}
+          onclick={() => selectZone(zone)}
+        >
+          <span class="zone-name">{zone.name}</span>
+          <span class="zone-meta">
+            {zoneCompleteness(zone)} · {zone.active ? 'Active' : 'Inactive'}
+          </span>
+          <span class="zone-points mono">{zone.leftBoundary.length}L / {zone.rightBoundary.length}R</span>
+        </button>
+      {:else}
+        <p class="empty">No zones saved yet.</p>
+      {/each}
+    </div>
+  </aside>
+
+  <main class="map-stage">
+    <header class="stage-head">
+      <h2>{selectedZone?.name ?? 'Drift Zone'}</h2>
+      <div class="legend">
+        <span><i class="left"></i>Left</span>
+        <span><i class="right"></i>Right</span>
+        <span><i class="start"></i>Gate A</span>
+        <span><i class="finish"></i>Gate B</span>
+        <span><i class="split"></i>Split</span>
+      </div>
+    </header>
+
+    <div class="map-shell">
+      {#if $settings}
+        <DriftZoneMap zone={selectedZone} settings={$settings} livePacket={$displayPacket} />
+      {/if}
+    </div>
+  </main>
+
+  <aside class="run-rail">
+    <section
+      class="run-card"
+      class:live={activeForSelected}
+      class:starving={liveStarving}
+      class:bad={$driftRunStatus.state === 'invalid'}
+    >
+      <div class="card-title">
+        <span class="cap">Current Run</span>
+        <strong class="mono" class:warn={liveStarving}>
+          {#if liveStarving}
+            NO SCORE{#if $driftRunStatus.starveRemainingS != null} · {$driftRunStatus.starveRemainingS.toFixed(1)}s{/if}
+          {:else if activeForSelected}
+            LIVE
+          {:else}
+            {statusLabel()}
+          {/if}
+        </strong>
+      </div>
+      {#if activeForSelected}
+        <!-- Live play-test instruments: signed drift angle, speed in the
+             model's native unit, and the run's flip count (same definition as
+             the stored directionFlips breakdown / the tuning scripts). -->
+        <div class="live-instruments">
+          <div class="inst">
+            <span class="cap">Angle</span>
+            <strong class="big mono"
+              >{$driftRunStatus.angleDeg != null
+                ? `${$driftRunStatus.angleDeg >= 0 ? '+' : ''}${$driftRunStatus.angleDeg.toFixed(1)}°`
+                : '–'}</strong
+            >
+          </div>
+          <div class="inst">
+            <span class="cap">Speed</span>
+            <strong class="big mono"
+              >{$driftRunStatus.speedMs != null ? `${$driftRunStatus.speedMs.toFixed(1)} m/s` : '–'}</strong
+            >
+          </div>
+          <div class="inst">
+            <span class="cap">Flips</span>
+            <strong class="big mono">{$driftRunStatus.directionFlips ?? 0}</strong>
+          </div>
+        </div>
+      {/if}
+      <div class="metric-grid">
         <div>
-          <h2>Drift</h2>
-          <span>{statusLabel()}</span>
+          <span class="cap">Zone</span>
+          <strong>{$driftRunStatus.zoneName ?? selectedZone?.name ?? '-'}</strong>
         </div>
-        <button class="close narrow" onclick={onClose}>x</button>
-      </header>
-
-      <div class="zone-list">
-        {#each $driftZones as zone}
-          <button
-            class="zone-row"
-            class:active={zone.id === selectedZone?.id}
-            onclick={() => selectZone(zone)}
-          >
-            <span class="zone-name">{zone.name}</span>
-            <span class="zone-meta">
-              {zoneCompleteness(zone)} / {zone.active ? 'Active' : 'Inactive'}
-            </span>
-            <span class="zone-points">{zone.leftBoundary.length}L / {zone.rightBoundary.length}R</span>
-          </button>
-        {:else}
-          <p class="empty">No zones saved yet.</p>
-        {/each}
+        <div>
+          <span class="cap">Packets</span>
+          <strong class="mono">{$driftRunStatus.packetCount}</strong>
+        </div>
+        <div>
+          <span class="cap">Started</span>
+          <strong class="mono">{formatDate($driftRunStatus.startedAt)}</strong>
+        </div>
+        <div>
+          <span class="cap">Ended</span>
+          <strong class="mono">{formatDate($driftRunStatus.endedAt)}</strong>
+        </div>
       </div>
-    </aside>
+      {#if liveStarving}
+        <p class="starving-msg">
+          ⚠ Not scoring — no tyre on tarmac / not drifting{#if $driftRunStatus.starveRemainingS != null} · run ends in {$driftRunStatus.starveRemainingS.toFixed(1)}s{/if}
+        </p>
+      {/if}
+      {#if $driftRunStatus.invalidReason}
+        <p class="invalid">{$driftRunStatus.invalidReason}</p>
+      {/if}
+    </section>
 
-    <main class="map-stage">
-      <header class="stage-head">
-        <div class="title-block">
-          <h2>{selectedZone?.name ?? 'Drift Zone'}</h2>
-          <div class="legend">
-            <span><i class="left"></i>Left</span>
-            <span><i class="right"></i>Right</span>
-            <span><i class="start"></i>Gate A</span>
-            <span><i class="finish"></i>Gate B</span>
-            <span><i class="split"></i>Split</span>
-          </div>
+    <section class="score-card">
+      <div class="card-title">
+        <span class="cap">Score {scoringRun ? `#${scoringRun.zoneRunNumber}` : ''}</span>
+        <button class="ghost" disabled={recomputing} onclick={recompute} title="Re-score all runs from saved telemetry">
+          {recomputing ? 'Rescoring…' : '↻ Recompute'}
+        </button>
+      </div>
+      <div class="score-readout">
+        <div class="computed">
+          <span class="cap">Computed</span>
+          <strong class="mono">{formatScore(scoringRun?.computedScore)}</strong>
         </div>
-        <button class="close wide" onclick={onClose}>x</button>
-      </header>
-
-      <div class="map-shell">
-        {#if $settings}
-          <DriftZoneMap zone={selectedZone} settings={$settings} livePacket={$displayPacket} />
+        {#if scoreDelta}
+          <div class="delta" class:over={scoreDelta.diff > 0} class:under={scoreDelta.diff < 0}>
+            <span class="cap">vs actual</span>
+            <strong class="mono">{scoreDelta.diff > 0 ? '+' : ''}{scoreDelta.diff.toLocaleString()} ({scoreDelta.pct.toFixed(0)}%)</strong>
+          </div>
         {/if}
       </div>
-    </main>
-
-    <aside class="run-rail">
-      <section
-        class="run-card"
-        class:live={activeForSelected}
-        class:starving={liveStarving}
-        class:bad={$driftRunStatus.state === 'invalid'}
-      >
-        <div class="card-title">
-          <span>Current Run</span>
-          <strong class:warn={liveStarving}>
-            {#if liveStarving}
-              NO SCORE{#if $driftRunStatus.starveRemainingS != null} · {$driftRunStatus.starveRemainingS.toFixed(1)}s{/if}
-            {:else if activeForSelected}
-              LIVE
-            {:else}
-              {statusLabel()}
-            {/if}
-          </strong>
-        </div>
-        {#if activeForSelected}
-          <!-- Live play-test instruments: signed drift angle, speed in the
-               model's native unit, and the run's flip count (same definition as
-               the stored directionFlips breakdown / the tuning scripts). -->
-          <div class="live-instruments">
-            <div class="inst">
-              <span>Angle</span>
-              <strong class="big"
-                >{$driftRunStatus.angleDeg != null
-                  ? `${$driftRunStatus.angleDeg >= 0 ? '+' : ''}${$driftRunStatus.angleDeg.toFixed(1)}°`
-                  : '–'}</strong
-              >
-            </div>
-            <div class="inst">
-              <span>Speed</span>
-              <strong class="big"
-                >{$driftRunStatus.speedMs != null ? `${$driftRunStatus.speedMs.toFixed(1)} m/s` : '–'}</strong
-              >
-            </div>
-            <div class="inst">
-              <span>Flips</span>
-              <strong class="big">{$driftRunStatus.directionFlips ?? 0}</strong>
-            </div>
-          </div>
-        {/if}
-        <div class="metric-grid">
-          <div>
-            <span>Zone</span>
-            <strong>{$driftRunStatus.zoneName ?? selectedZone?.name ?? '-'}</strong>
-          </div>
-          <div>
-            <span>Packets</span>
-            <strong>{$driftRunStatus.packetCount}</strong>
-          </div>
-          <div>
-            <span>Started</span>
-            <strong>{formatDate($driftRunStatus.startedAt)}</strong>
-          </div>
-          <div>
-            <span>Ended</span>
-            <strong>{formatDate($driftRunStatus.endedAt)}</strong>
-          </div>
-        </div>
-        {#if liveStarving}
-          <p class="starving-msg">
-            ⚠ Not scoring — no tyre on tarmac / not drifting{#if $driftRunStatus.starveRemainingS != null} · run ends in {$driftRunStatus.starveRemainingS.toFixed(1)}s{/if}
-          </p>
-        {/if}
-        {#if $driftRunStatus.invalidReason}
-          <p class="invalid">{$driftRunStatus.invalidReason}</p>
-        {/if}
-      </section>
-
-      <section class="score-card">
-        <div class="card-title">
-          <span>Score {scoringRun ? `#${scoringRun.zoneRunNumber}` : ''}</span>
-          <button class="ghost" disabled={recomputing} onclick={recompute} title="Re-score all runs from saved telemetry">
-            {recomputing ? 'Rescoring…' : '↻ Recompute'}
-          </button>
-        </div>
-        <div class="score-readout">
-          <div class="computed">
-            <span>Computed</span>
-            <strong>{formatScore(scoringRun?.computedScore)}</strong>
-          </div>
-          {#if scoreDelta}
-            <div class="delta" class:over={scoreDelta.diff > 0} class:under={scoreDelta.diff < 0}>
-              <span>vs actual</span>
-              <strong>{scoreDelta.diff > 0 ? '+' : ''}{scoreDelta.diff.toLocaleString()} ({scoreDelta.pct.toFixed(0)}%)</strong>
-            </div>
+      {#if scoringRun?.scoreBreakdown}
+        {@const b = scoringRun.scoreBreakdown}
+        <div class="breakdown mono">
+          <span>drift {b.driftTimeS.toFixed(1)}s / {b.totalTimeS.toFixed(1)}s</span>
+          <span>angle {b.avgAngleDeg.toFixed(0)}° avg · {b.maxAngleDeg.toFixed(0)}° max</span>
+          <span>speed {b.avgSpeedMs.toFixed(1)} m/s</span>
+          {#if b.directionFlips !== undefined}
+            <span>flips {b.directionFlips}</span>
+          {/if}
+          {#if b.maxMultiplier > 1.01}
+            <span>mult ×{b.maxMultiplier.toFixed(1)}</span>
           {/if}
         </div>
-        {#if scoringRun?.scoreBreakdown}
-          {@const b = scoringRun.scoreBreakdown}
-          <div class="breakdown">
-            <span>drift {b.driftTimeS.toFixed(1)}s / {b.totalTimeS.toFixed(1)}s</span>
-            <span>angle {b.avgAngleDeg.toFixed(0)}° avg · {b.maxAngleDeg.toFixed(0)}° max</span>
-            <span>speed {b.avgSpeedMs.toFixed(1)} m/s</span>
-            {#if b.directionFlips !== undefined}
-              <span>flips {b.directionFlips}</span>
-            {/if}
-            {#if b.maxMultiplier > 1.01}
-              <span>mult ×{b.maxMultiplier.toFixed(1)}</span>
-            {/if}
-          </div>
-        {/if}
-        {#if scoringRun}
-          <p class="recorded">Recorded {formatDate(scoringRun.startedAt)} · global #{scoringRun.id}</p>
-        {/if}
-        <label class="actual-label" for="actual-score">Actual (in-game)</label>
-        <div class="score-input">
-          <input
-            id="actual-score"
-            bind:this={scoreInput}
-            inputmode="numeric"
-            placeholder="Enter in-game score"
-            bind:value={scoreDraft}
-            disabled={!scoringRun || savingScore}
-            onkeydown={(e) => e.key === 'Enter' && saveScore()}
-          />
-          <button class="primary" disabled={!scoringRun || savingScore} onclick={saveScore}>
-            {savingScore ? 'Saving' : 'Save'}
-          </button>
-        </div>
-        <div class="note-row">
-          <input
-            class="note-input"
-            placeholder="Note — car / style / tag (saved with score)"
-            bind:value={noteDraft}
-            disabled={!scoringRun || savingScore}
-            onkeydown={(e) => e.key === 'Enter' && saveScore()}
-          />
-        </div>
-        <p class="score-status">{scoreStatus || recomputeStatus || (scoringRun ? '' : 'No completed runs')}</p>
-      </section>
+      {/if}
+      {#if scoringRun}
+        <p class="recorded mono">Recorded {formatDate(scoringRun.startedAt)} · global #{scoringRun.id}</p>
+      {/if}
+      <label class="actual-label cap" for="actual-score">Actual (in-game)</label>
+      <div class="score-input">
+        <input
+          id="actual-score"
+          class="mono"
+          bind:this={scoreInput}
+          inputmode="numeric"
+          placeholder="Enter in-game score"
+          bind:value={scoreDraft}
+          disabled={!scoringRun || savingScore}
+          onkeydown={(e) => e.key === 'Enter' && saveScore()}
+        />
+        <button class="primary" disabled={!scoringRun || savingScore} onclick={saveScore}>
+          {savingScore ? 'Saving' : 'Save'}
+        </button>
+      </div>
+      <div class="note-row">
+        <input
+          class="note-input"
+          placeholder="Note — car / style / tag (saved with score)"
+          bind:value={noteDraft}
+          disabled={!scoringRun || savingScore}
+          onkeydown={(e) => e.key === 'Enter' && saveScore()}
+        />
+      </div>
+      <p class="score-status">{scoreStatus || recomputeStatus || (scoringRun ? '' : 'No completed runs')}</p>
+    </section>
 
-      <section class="history">
-        <div class="card-title">
-          <span>Recent Runs · newest first</span>
-          <div class="title-actions">
-            {#if invalidCount > 0}
-              <button
-                class="ghost danger"
-                disabled={purging}
-                onclick={purgeInvalid}
-                title="Permanently delete every invalid run across all zones"
-              >
-                {purging ? 'Purging…' : `Purge ${invalidCount} invalid`}
-              </button>
-            {/if}
-            <strong>{selectedRuns.length}</strong>
+    <section class="history">
+      <div class="card-title">
+        <span class="cap">Recent Runs · newest first</span>
+        <div class="title-actions">
+          {#if invalidCount > 0}
+            <button
+              class="ghost danger"
+              disabled={purging}
+              onclick={purgeInvalid}
+              title="Permanently delete every invalid run across all zones"
+            >
+              {purging ? 'Purging…' : `Purge ${invalidCount} invalid`}
+            </button>
+          {/if}
+          <strong class="mono">{selectedRuns.length}</strong>
+        </div>
+      </div>
+      <div class="run-list">
+        {#each selectedRuns as run}
+          <div class="run-row-wrap" class:invalid={!run.valid}>
+            <button
+              class="run-row"
+              class:active={run.id === scoringRun?.id}
+              onclick={() => {
+                selectedRunId = run.id;
+              }}
+            >
+              <div>
+                <strong class="mono">{formatScore(run.computedScore)}</strong>
+                <span class="when mono">#{run.zoneRunNumber} · {formatShort(run.startedAt)}</span>
+              </div>
+              <div>
+                <span class="mono">act {run.manualScore?.toLocaleString() ?? '—'} · {formatStatus(run)} / {formatDuration(run)}</span>
+              </div>
+              <div>
+                <span>{carName(run.carOrdinal)}</span>
+                <small>{CAR_CLASS_LABELS[run.carClass] ?? '?'} {run.carPi} / {DRIVETRAIN_LABELS[run.drivetrainType] ?? '?'}</small>
+              </div>
+              {#if run.manualNotes}
+                <div class="note-line" title={run.manualNotes}>{run.manualNotes}</div>
+              {/if}
+            </button>
+            <button
+              class="run-del"
+              aria-label="Delete run #{run.zoneRunNumber}"
+              title="Delete this run permanently"
+              onclick={() => removeRun(run)}
+            >×</button>
           </div>
-        </div>
-        <div class="run-list">
-          {#each selectedRuns as run}
-            <div class="run-row-wrap" class:invalid={!run.valid}>
-              <button
-                class="run-row"
-                class:active={run.id === scoringRun?.id}
-                onclick={() => {
-                  selectedRunId = run.id;
-                }}
-              >
-                <div>
-                  <strong>{formatScore(run.computedScore)}</strong>
-                  <span class="when">#{run.zoneRunNumber} · {formatShort(run.startedAt)}</span>
-                </div>
-                <div>
-                  <span>act {run.manualScore?.toLocaleString() ?? '—'} · {formatStatus(run)} / {formatDuration(run)}</span>
-                </div>
-                <div>
-                  <span>{carName(run.carOrdinal)}</span>
-                  <small>{CAR_CLASS_LABELS[run.carClass] ?? '?'} {run.carPi} / {DRIVETRAIN_LABELS[run.drivetrainType] ?? '?'}</small>
-                </div>
-                {#if run.manualNotes}
-                  <div class="note-line" title={run.manualNotes}>{run.manualNotes}</div>
-                {/if}
-              </button>
-              <button
-                class="run-del"
-                aria-label="Delete run #{run.zoneRunNumber}"
-                title="Delete this run permanently"
-                onclick={() => removeRun(run)}
-              >×</button>
-            </div>
-          {:else}
-            <p class="empty">No runs for this zone.</p>
-          {/each}
-        </div>
-      </section>
-    </aside>
-  </div>
+        {:else}
+          <p class="empty">No runs for this zone.</p>
+        {/each}
+      </div>
+    </section>
+  </aside>
 </div>
 
 <style>
-  .overlay {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.76);
-    z-index: 120;
-    padding: 1.5rem;
-  }
   .dashboard {
-    width: min(1360px, 100%);
-    height: min(900px, 100%);
-    margin: 0 auto;
+    min-height: 0;
     display: grid;
-    grid-template-columns: 260px minmax(420px, 1fr) 320px;
-    background: var(--bg-panel);
-    border: 1px solid var(--bd-muted);
-    border-radius: 10px;
+    grid-template-columns: 240px minmax(420px, 1fr) 330px;
+    background: var(--bg-body);
     overflow: hidden;
-    box-shadow: 0 20px 80px rgba(0, 0, 0, 0.55);
   }
   .zone-rail,
   .run-rail {
     min-height: 0;
-    background: var(--bg-card);
+    background: var(--bg-panel);
     display: flex;
     flex-direction: column;
   }
   .zone-rail {
-    border-right: 1px solid var(--bd-dim);
+    border-right: 1px solid var(--bd-subtle);
   }
   .run-rail {
-    border-left: 1px solid var(--bd-dim);
-    padding: 0.75rem;
-    gap: 0.75rem;
+    border-left: 1px solid var(--bd-subtle);
+    padding: 0.7rem;
+    gap: 0.7rem;
   }
-  .rail-head,
-  .stage-head {
+  .rail-head {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 0.75rem;
-    padding: 0.9rem 1rem;
+    padding: 0.75rem 0.9rem;
     border-bottom: 1px solid var(--bd-dim);
   }
-  .rail-head h2,
-  .stage-head h2 {
-    margin: 0;
-    color: var(--tx-hi);
-    font-size: 1rem;
-  }
-  .rail-head span {
-    color: var(--ac);
+  .state {
     font-size: 0.62rem;
-    font-weight: 800;
-    letter-spacing: 0.12em;
-  }
-  .close {
-    background: none;
-    border: 1px solid var(--bd-muted);
-    border-radius: 4px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
     color: var(--tx-dim);
-    cursor: pointer;
-    line-height: 1;
-    padding: 0.25rem 0.45rem;
   }
-  .close:hover {
-    color: var(--tx-hi);
-    border-color: var(--bd-strong);
-  }
-  .close.narrow {
-    display: none;
-  }
+  .state[data-state="running"]   { color: var(--ok); }
+  .state[data-state="completed"] { color: var(--ac); }
+  .state[data-state="invalid"]   { color: var(--bad); }
+
   .zone-list {
     min-height: 0;
     overflow-y: auto;
-    padding: 0.6rem;
+    padding: 0.55rem;
     display: flex;
     flex-direction: column;
-    gap: 0.35rem;
+    gap: 0.3rem;
   }
   .zone-row,
   .run-row {
     text-align: left;
     border: 1px solid var(--bd-dim);
-    background: var(--bg-panel);
+    background: var(--bg-card);
     color: var(--tx-mid);
-    border-radius: 6px;
+    border-radius: var(--r-md);
     cursor: pointer;
+    font-family: inherit;
   }
   .zone-row {
-    padding: 0.6rem;
+    padding: 0.55rem 0.6rem;
     display: grid;
-    gap: 0.18rem;
+    gap: 0.16rem;
+  }
+  .zone-row:hover,
+  .run-row:hover {
+    border-color: var(--bd-muted);
   }
   .zone-row.active,
   .run-row.active {
-    border-color: var(--ac);
+    border-color: color-mix(in srgb, var(--ac) 55%, var(--bg-panel));
+    box-shadow: inset 2px 0 0 var(--ac);
   }
   .zone-name {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     color: var(--tx-mid);
-    font-size: 0.84rem;
-    font-weight: 700;
+    font-size: 0.8rem;
+    font-weight: 600;
   }
   .zone-meta,
   .zone-points,
@@ -586,162 +552,156 @@
   .run-row span,
   .run-row small {
     color: var(--tx-dim);
-    font-size: 0.68rem;
+    font-size: 0.66rem;
   }
   .map-stage {
     min-width: 0;
     min-height: 0;
     display: flex;
     flex-direction: column;
-    background: var(--bg-panel);
+    background: var(--bg-body);
   }
   .stage-head {
-    padding: 0.75rem 1rem;
-  }
-  .title-block {
-    min-width: 0;
     display: flex;
-    flex-direction: column;
-    gap: 0.35rem;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.6rem 1rem;
+    border-bottom: 1px solid var(--bd-dim);
+  }
+  .stage-head h2 {
+    margin: 0;
+    color: var(--tx-hi);
+    font-size: 0.92rem;
+    font-weight: 650;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .legend {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.55rem;
+    gap: 0.6rem;
     color: var(--tx-dim);
-    font-size: 0.68rem;
+    font-size: 0.64rem;
+    flex-shrink: 0;
   }
   .legend span {
     display: inline-flex;
     align-items: center;
-    gap: 0.25rem;
+    gap: 0.28rem;
   }
   .legend i {
-    width: 16px;
-    height: 3px;
-    border-radius: 2px;
+    width: 14px;
+    height: 2px;
+    border-radius: 1px;
     display: inline-block;
   }
-  .legend .left { background: #22c55e; }
-  .legend .right { background: #3b82f6; }
-  .legend .start { background: #f59e0b; }
-  .legend .finish { background: #ef4444; }
-  .legend .split { background: #a855f7; }
+  .legend .left   { background: var(--map-left); }
+  .legend .right  { background: var(--map-right); }
+  .legend .start  { background: var(--gate-a); }
+  .legend .finish { background: var(--gate-b); }
+  .legend .split  { background: var(--gate-split); }
   .map-shell {
     flex: 1;
     min-height: 0;
-    padding: 0.8rem;
+    padding: 0.7rem;
   }
   .run-card,
   .score-card,
   .history {
-    background: var(--bg-panel);
+    background: var(--bg-card);
     border: 1px solid var(--bd-dim);
-    border-radius: 8px;
+    border-radius: var(--r-md);
   }
   .run-card.live {
-    border-color: #22c55e;
+    border-color: color-mix(in srgb, var(--ok) 60%, var(--bg-panel));
   }
   /* Death-timer counting (live but not scoring) — overrides the green .live. */
   .run-card.starving {
-    border-color: #eab308;
-    box-shadow: 0 0 0 1px #eab308 inset;
+    border-color: var(--warn);
+    box-shadow: 0 0 0 1px var(--warn) inset;
   }
   .run-card.bad {
-    border-color: #ef4444;
+    border-color: color-mix(in srgb, var(--bad) 60%, var(--bg-panel));
   }
   .card-title strong.warn {
-    color: #eab308;
+    color: var(--warn);
   }
   .starving-msg {
-    color: #eab308;
-    font-size: 0.72rem;
-    padding: 0 0.75rem 0.75rem;
+    color: var(--warn);
+    font-size: 0.7rem;
+    padding: 0 0.7rem 0.7rem;
   }
   .card-title {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 0.75rem;
-    padding: 0.65rem 0.75rem;
+    padding: 0.55rem 0.7rem;
     border-bottom: 1px solid var(--bd-dim);
-  }
-  .card-title span {
-    color: var(--tx-dim);
-    font-size: 0.62rem;
-    font-weight: 800;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
   }
   .card-title strong {
     color: var(--tx-hi);
-    font-size: 0.72rem;
-    font-variant-numeric: tabular-nums;
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
   }
   .live-instruments {
     display: grid;
     grid-template-columns: 1.2fr 1.2fr 0.8fr;
     gap: 0.5rem;
-    padding: 0.65rem 0.75rem 0;
+    padding: 0.6rem 0.7rem 0;
   }
   .live-instruments .inst {
     min-width: 0;
     display: grid;
-    gap: 0.1rem;
-  }
-  .live-instruments span {
-    color: var(--tx-dim);
-    font-size: 0.62rem;
-    text-transform: uppercase;
-    letter-spacing: 0.07em;
+    gap: 0.12rem;
   }
   .live-instruments strong.big {
-    color: var(--tx-hi, #e5e7eb);
-    font-size: 1.25rem;
-    font-variant-numeric: tabular-nums;
+    color: var(--tx-hi);
+    font-size: 1.3rem;
+    font-weight: 600;
     white-space: nowrap;
   }
   .metric-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 0.5rem;
-    padding: 0.75rem;
+    padding: 0.7rem;
   }
   .metric-grid div {
     min-width: 0;
     display: grid;
-    gap: 0.2rem;
-  }
-  .metric-grid span {
-    color: var(--tx-dim);
-    font-size: 0.62rem;
-    text-transform: uppercase;
-    letter-spacing: 0.07em;
+    gap: 0.18rem;
   }
   .metric-grid strong {
     color: var(--tx-mid);
-    font-size: 0.78rem;
+    font-size: 0.72rem;
+    font-weight: 550;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
   .invalid {
-    color: #fca5a5;
-    font-size: 0.75rem;
-    padding: 0 0.75rem 0.75rem;
+    color: var(--bad-tx);
+    font-size: 0.72rem;
+    padding: 0 0.7rem 0.7rem;
   }
   .score-card {
-    padding-bottom: 0.65rem;
+    padding-bottom: 0.6rem;
   }
   button.ghost {
     background: none;
     border: 1px solid var(--bd-muted);
-    border-radius: 4px;
+    border-radius: var(--r-sm);
     color: var(--tx-dim);
     cursor: pointer;
-    font-size: 0.6rem;
-    font-weight: 700;
-    letter-spacing: 0.05em;
+    font-family: inherit;
+    font-size: 0.58rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
     padding: 0.2rem 0.4rem;
     text-transform: uppercase;
   }
@@ -750,8 +710,8 @@
     border-color: var(--bd-strong);
   }
   button.ghost.danger:hover:not(:disabled) {
-    color: #fca5a5;
-    border-color: #ef4444;
+    color: var(--bad-tx);
+    border-color: var(--bad);
   }
   .title-actions {
     display: flex;
@@ -763,102 +723,98 @@
     align-items: baseline;
     justify-content: space-between;
     gap: 0.75rem;
-    padding: 0.6rem 0.75rem 0.35rem;
+    padding: 0.6rem 0.7rem 0.35rem;
   }
   .score-readout .computed {
     display: grid;
-    gap: 0.1rem;
-  }
-  .score-readout .computed span,
-  .score-readout .delta span {
-    color: var(--tx-dim);
-    font-size: 0.6rem;
-    text-transform: uppercase;
-    letter-spacing: 0.07em;
+    gap: 0.12rem;
   }
   .score-readout .computed strong {
     color: var(--tx-hi);
-    font-size: 1.5rem;
-    font-variant-numeric: tabular-nums;
+    font-size: 1.55rem;
+    font-weight: 650;
     line-height: 1;
   }
   .score-readout .delta {
     display: grid;
-    gap: 0.1rem;
+    gap: 0.12rem;
     text-align: right;
   }
   .score-readout .delta strong {
-    font-size: 0.85rem;
-    font-variant-numeric: tabular-nums;
+    font-size: 0.82rem;
     color: var(--tx-mid);
   }
   .score-readout .delta.over strong {
-    color: #f59e0b;
+    color: var(--warn);
   }
   .score-readout .delta.under strong {
-    color: #60a5fa;
+    color: var(--info);
   }
   .breakdown {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.4rem 0.75rem;
-    padding: 0 0.75rem 0.5rem;
+    gap: 0.35rem 0.7rem;
+    padding: 0 0.7rem 0.5rem;
     color: var(--tx-dim);
-    font-size: 0.66rem;
-    font-variant-numeric: tabular-nums;
+    font-size: 0.62rem;
   }
   .recorded {
-    padding: 0.15rem 0.75rem 0;
+    padding: 0.15rem 0.7rem 0;
     color: var(--tx-dim);
-    font-size: 0.66rem;
-    font-variant-numeric: tabular-nums;
+    font-size: 0.62rem;
   }
   .actual-label {
     display: block;
-    padding: 0.35rem 0.75rem 0;
-    color: var(--tx-dim);
-    font-size: 0.6rem;
-    text-transform: uppercase;
-    letter-spacing: 0.07em;
+    padding: 0.4rem 0.7rem 0;
   }
   .score-input {
     display: grid;
     grid-template-columns: 1fr auto;
     gap: 0.5rem;
-    padding: 0.4rem 0.75rem 0.45rem;
+    padding: 0.4rem 0.7rem 0.45rem;
   }
   input {
     min-width: 0;
     background: var(--bg-body);
     border: 1px solid var(--bd-muted);
-    border-radius: 5px;
+    border-radius: var(--r-sm);
     color: var(--tx-hi);
-    padding: 0.45rem 0.55rem;
-    font: inherit;
+    padding: 0.42rem 0.55rem;
+    font-family: inherit;
+    font-size: 0.78rem;
+  }
+  input:focus {
+    outline: none;
+    border-color: color-mix(in srgb, var(--ac) 60%, var(--bg-panel));
   }
   button.primary {
     background: var(--ac);
     border: 1px solid var(--ac);
-    border-radius: 5px;
+    border-radius: var(--r-sm);
     color: var(--bg-body);
     cursor: pointer;
-    font-size: 0.78rem;
-    font-weight: 700;
-    padding: 0.45rem 0.7rem;
+    font-family: inherit;
+    font-size: 0.74rem;
+    font-weight: 650;
+    padding: 0.42rem 0.7rem;
+  }
+  button.primary:hover:not(:disabled) {
+    background: var(--ac-bright);
+    border-color: var(--ac-bright);
   }
   button:disabled {
     opacity: 0.45;
     cursor: default;
   }
   .note-row {
-    padding: 0 0.75rem 0.3rem;
+    padding: 0 0.7rem 0.3rem;
   }
   .note-input {
     width: 100%;
-    font-size: 0.78rem;
+    font-size: 0.74rem;
   }
   .score-status {
-    padding: 0 0.75rem;
+    padding: 0 0.7rem;
   }
   .history {
     flex: 1;
@@ -872,12 +828,12 @@
     padding: 0.5rem;
     display: flex;
     flex-direction: column;
-    gap: 0.35rem;
+    gap: 0.3rem;
   }
   .run-row {
-    padding: 0.55rem;
+    padding: 0.5rem 0.55rem;
     display: grid;
-    gap: 0.35rem;
+    gap: 0.3rem;
   }
   .run-row-wrap {
     display: flex;
@@ -893,21 +849,21 @@
   }
   .run-del {
     flex: 0 0 auto;
-    width: 1.9rem;
+    width: 1.8rem;
     display: flex;
     align-items: center;
     justify-content: center;
     border: 1px solid var(--bd-dim);
-    background: var(--bg-panel);
-    border-radius: 6px;
+    background: var(--bg-card);
+    border-radius: var(--r-md);
     color: var(--tx-dim);
     cursor: pointer;
-    font-size: 1rem;
+    font-size: 0.95rem;
     line-height: 1;
   }
   .run-del:hover {
-    color: #fca5a5;
-    border-color: #ef4444;
+    color: var(--bad-tx);
+    border-color: var(--bad);
   }
   .run-row div {
     min-width: 0;
@@ -918,13 +874,13 @@
   }
   .run-row strong {
     color: var(--tx-hi);
-    font-size: 0.95rem;
-    font-variant-numeric: tabular-nums;
+    font-size: 0.9rem;
+    font-weight: 600;
   }
   .run-row .note-line {
     display: block;
     color: var(--ac);
-    font-size: 0.66rem;
+    font-size: 0.64rem;
     font-style: italic;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -936,9 +892,6 @@
   }
 
   @media (max-width: 980px) {
-    .overlay {
-      padding: 0.75rem;
-    }
     .dashboard {
       grid-template-columns: 1fr;
       grid-template-rows: auto minmax(360px, 1fr) minmax(260px, 0.8fr);
@@ -946,19 +899,13 @@
     }
     .zone-rail {
       border-right: 0;
-      border-bottom: 1px solid var(--bd-dim);
+      border-bottom: 1px solid var(--bd-subtle);
       max-height: 190px;
     }
     .run-rail {
       border-left: 0;
-      border-top: 1px solid var(--bd-dim);
+      border-top: 1px solid var(--bd-subtle);
       min-height: 320px;
-    }
-    .close.narrow {
-      display: inline-block;
-    }
-    .close.wide {
-      display: none;
     }
     .zone-list {
       display: grid;
