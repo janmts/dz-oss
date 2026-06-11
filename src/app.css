@@ -36,6 +36,7 @@
 
   /* ── Status (desaturated, no Tailwind neon) ── */
   --ok:     #84b577;
+  --ok-bright: #8fe07f;
   --warn:   #dd9a47;
   --bad:    #d56c62;
   --bad-tx: #e49d96;

@@ -117,6 +117,15 @@
     return ms ? new Date(ms).toLocaleString() : '-';
   }
 
+  // Current-run cells stack time over date so neither truncates in the rail.
+  function formatTimePart(ms: number | null) {
+    return ms ? new Date(ms).toLocaleTimeString() : '-';
+  }
+
+  function formatDatePart(ms: number | null) {
+    return ms ? new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : '';
+  }
+
   function formatShort(ms: number | null) {
     return ms
       ? new Date(ms).toLocaleString(undefined, {
@@ -385,20 +394,30 @@
         </div>
         <div>
           <span class="cap">Started</span>
-          <strong class="mono">{formatDate($driftRunStatus.startedAt)}</strong>
+          <strong class="mono">{formatTimePart($driftRunStatus.startedAt)}</strong>
+          {#if $driftRunStatus.startedAt}
+            <small class="date-sub mono">{formatDatePart($driftRunStatus.startedAt)}</small>
+          {/if}
         </div>
         <div>
           <span class="cap">Ended</span>
-          <strong class="mono">{formatDate($driftRunStatus.endedAt)}</strong>
+          <strong class="mono">{formatTimePart($driftRunStatus.endedAt)}</strong>
+          {#if $driftRunStatus.endedAt}
+            <small class="date-sub mono">{formatDatePart($driftRunStatus.endedAt)}</small>
+          {/if}
         </div>
       </div>
-      {#if liveStarving}
-        <p class="starving-msg">
-          ⚠ Not scoring — no tyre on tarmac / not drifting{#if $driftRunStatus.starveRemainingS != null} · run ends in {$driftRunStatus.starveRemainingS.toFixed(1)}s{/if}
-        </p>
-      {/if}
-      {#if $driftRunStatus.invalidReason}
-        <p class="invalid">{$driftRunStatus.invalidReason}</p>
+      {#if liveStarving || $driftRunStatus.invalidReason}
+        <div class="run-foot">
+          {#if liveStarving}
+            <p class="starving-msg">
+              ⚠ Not scoring — no tyre on tarmac / not drifting{#if $driftRunStatus.starveRemainingS != null} · run ends in {$driftRunStatus.starveRemainingS.toFixed(1)}s{/if}
+            </p>
+          {/if}
+          {#if $driftRunStatus.invalidReason}
+            <p class="invalid-msg">{$driftRunStatus.invalidReason}</p>
+          {/if}
+        </div>
       {/if}
     </section>
   </aside>
@@ -663,17 +682,28 @@
     flex: 1;
     min-height: 0;
     overflow-y: auto;
+    display: flex;
+    flex-direction: column;
     background: var(--bg-card);
     border: 1px solid var(--bd-dim);
     border-radius: var(--r-md);
   }
+  /* Corner-of-the-eye glanceable: bright 2px ring + soft glow while live. */
   .run-card.live {
-    border-color: color-mix(in srgb, var(--ok) 60%, var(--bg-panel));
+    border-color: var(--ok-bright);
+    box-shadow:
+      0 0 0 1px var(--ok-bright) inset,
+      0 0 16px color-mix(in srgb, var(--ok-bright) 22%, transparent);
+  }
+  .run-card.live .card-title strong:not(.warn) {
+    color: var(--ok-bright);
   }
   /* Death-timer counting (live but not scoring) — overrides the green .live. */
   .run-card.starving {
     border-color: var(--warn);
-    box-shadow: 0 0 0 1px var(--warn) inset;
+    box-shadow:
+      0 0 0 1px var(--warn) inset,
+      0 0 16px color-mix(in srgb, var(--warn) 22%, transparent);
   }
   .run-card.bad {
     border-color: color-mix(in srgb, var(--bad) 60%, var(--bg-panel));
@@ -681,10 +711,16 @@
   .card-title strong.warn {
     color: var(--warn);
   }
+  /* Status strips pinned to the card's bottom edge. */
+  .run-foot {
+    margin-top: auto;
+  }
   .starving-msg {
     color: var(--warn);
     font-size: 0.72rem;
-    padding: 0 0.8rem 0.8rem;
+    padding: 0.55rem 0.8rem;
+    background: color-mix(in srgb, var(--warn) 9%, transparent);
+    border-top: 1px solid color-mix(in srgb, var(--warn) 40%, var(--bg-panel));
   }
   .card-title {
     display: flex;
@@ -799,10 +835,19 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .invalid {
+  .metric-grid .date-sub {
+    color: var(--tx-dim);
+    font-size: 0.62rem;
+  }
+  /* Named -msg so it can never collide with the history's .run-row-wrap.invalid
+     state class — that collision was the long-standing "shrunken invalid row"
+     bug (the message's padding/font-size leaked onto the row wrapper). */
+  .invalid-msg {
     color: var(--bad-tx);
     font-size: 0.72rem;
-    padding: 0 0.8rem 0.8rem;
+    padding: 0.55rem 0.8rem;
+    background: color-mix(in srgb, var(--bad) 9%, transparent);
+    border-top: 1px solid color-mix(in srgb, var(--bad) 40%, var(--bg-panel));
   }
 
   /* ── Map stage ── */
@@ -1060,6 +1105,15 @@
   .run-row-wrap .run-row {
     flex: 1;
     min-width: 0;
+  }
+  /* Invalid runs: identical geometry to every other row — the dull red
+     outline alone is the at-a-glance failure marker. */
+  .run-row-wrap.invalid .run-row {
+    border-color: color-mix(in srgb, var(--bad) 42%, var(--bg-panel));
+    background: color-mix(in srgb, var(--bad) 4%, var(--bg-panel));
+  }
+  .run-row-wrap.invalid .run-row:hover {
+    border-color: color-mix(in srgb, var(--bad) 62%, var(--bg-panel));
   }
   .run-row-wrap.invalid .run-row strong {
     color: var(--tx-dim);
