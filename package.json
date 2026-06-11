@@ -22,7 +22,6 @@
     "@tauri-apps/plugin-opener": "^2",
     "@tauri-apps/plugin-process": "^2",
     "@tauri-apps/plugin-updater": "^2",
-    "fh6-tel": "file:../fh6-tel",
     "leaflet": "^1.9.4",
     "uplot": "^1.6.32"
   },
