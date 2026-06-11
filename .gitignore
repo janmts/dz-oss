@@ -12,6 +12,9 @@ vite.config.ts.timestamp-*
 scripts/*
 !scripts/download-map-tiles.mjs
 docs/*
+# but track the public docs referenced from the README
+!docs/headless-server.md
+!docs/img/
 .superpowers
 # Prebuilt headless-server binary artifacts (produced ad hoc / by Docker)
 /fh6-tel-serve-*

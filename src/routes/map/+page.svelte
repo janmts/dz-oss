@@ -51,7 +51,7 @@
   });
 </script>
 
-<svelte:head><title>Track Map — FH6 Telemetry</title></svelte:head>
+<svelte:head><title>Track Map — DZ-OSS</title></svelte:head>
 
 <div class="map-window">
   {#if $settings}

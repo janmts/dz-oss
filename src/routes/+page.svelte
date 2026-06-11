@@ -70,7 +70,7 @@
         }
         await new WebviewWindow('map', {
           url: '/map',
-          title: 'Track Map — FH6 Telemetry',
+          title: 'Track Map — DZ-OSS',
           width: 500,
           height: 520,
           resizable: true,

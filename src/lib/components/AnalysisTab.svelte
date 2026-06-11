@@ -62,7 +62,7 @@
 
   function formatLap(seconds: number) {
     const m = Math.floor(seconds / 60);
-    const s = (seconds % 60).toFixed(1).padStart(4, '0');
+    const s = (seconds % 60).toFixed(3).padStart(6, '0');
     return `${m}:${s}`;
   }
 
