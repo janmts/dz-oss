@@ -86,8 +86,10 @@
       >
         {copied ? 'Copied!' : carLabel}
       </span>
-      <span class="badge class-badge" data-class={classLabel}>{classLabel}</span>
-      <span class="badge mono">{piLabel}</span>
+      <span class="pi-pill" data-class={classLabel}>
+        <span class="pi-class">{classLabel}</span>
+        <span class="pi-num mono">{piLabel}</span>
+      </span>
       <span class="badge">{driveLabel}</span>
     </div>
 
@@ -223,14 +225,43 @@
     flex-shrink: 0;
     white-space: nowrap;
   }
-  /* Class badge colours are semantic — desaturated to match the system */
-  .class-badge[data-class="X"]  { color: var(--bad);    border-color: color-mix(in srgb, var(--bad) 45%, var(--bg-panel)); }
-  .class-badge[data-class="S2"] { color: var(--warn);   border-color: color-mix(in srgb, var(--warn) 45%, var(--bg-panel)); }
-  .class-badge[data-class="S1"] { color: var(--ac);     border-color: color-mix(in srgb, var(--ac) 45%, var(--bg-panel)); }
-  .class-badge[data-class="A"]  { color: var(--ok);     border-color: color-mix(in srgb, var(--ok) 45%, var(--bg-panel)); }
-  .class-badge[data-class="B"]  { color: var(--info);   border-color: color-mix(in srgb, var(--info) 45%, var(--bg-panel)); }
-  .class-badge[data-class="C"]  { color: var(--violet); border-color: color-mix(in srgb, var(--violet) 45%, var(--bg-panel)); }
-  .class-badge[data-class="D"]  { color: var(--tx-lo);  border-color: var(--bd-subtle); }
+  /* Class + PI pill — uses the game's own class colours (the one place the
+     muted system steps aside, since players read these hues at a glance). */
+  .pi-pill {
+    --class-c: var(--bd-strong);
+    display: inline-flex;
+    align-items: stretch;
+    border: 1px solid color-mix(in srgb, var(--class-c) 60%, var(--bg-panel));
+    border-radius: var(--r-xs);
+    overflow: hidden;
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+  .pi-pill[data-class="D"]  { --class-c: #4fa7e2; }
+  .pi-pill[data-class="C"]  { --class-c: #f2d23d; }
+  .pi-pill[data-class="B"]  { --class-c: #f2913d; }
+  .pi-pill[data-class="A"]  { --class-c: #e84f4f; }
+  .pi-pill[data-class="S1"] { --class-c: #c45fe8; }
+  .pi-pill[data-class="S2"] { --class-c: #44c5f2; }
+  .pi-pill[data-class="X"]  { --class-c: #4fe26b; }
+  .pi-class {
+    background: var(--class-c);
+    color: var(--bg-body);
+    font-size: clamp(0.55rem, 1.1vw, 0.62rem);
+    font-weight: 750;
+    padding: 0.12rem 0.3rem;
+    display: flex;
+    align-items: center;
+  }
+  .pi-num {
+    background: color-mix(in srgb, var(--class-c) 14%, var(--bg-panel));
+    color: color-mix(in srgb, var(--class-c) 80%, white);
+    font-size: clamp(0.55rem, 1.1vw, 0.62rem);
+    font-weight: 650;
+    padding: 0.12rem 0.32rem;
+    display: flex;
+    align-items: center;
+  }
 
   .panel-toggles { display: flex; align-items: center; gap: 0.25rem; }
   .panel-chip {

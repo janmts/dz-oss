@@ -238,6 +238,8 @@
     border-radius: var(--r-sm);
     overflow: hidden;
     background: var(--bg-card);
+    /* Keep leaflet's pane z-indexes from escaping above app overlays. */
+    isolation: isolate;
   }
   .map-host.compact {
     aspect-ratio: 1;

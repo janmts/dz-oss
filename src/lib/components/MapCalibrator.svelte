@@ -222,7 +222,9 @@
 <style>
   .overlay {
     position: fixed; inset: 0; background: rgba(0, 0, 0, 0.75);
-    display: flex; align-items: center; justify-content: center; z-index: 130;
+    display: flex; align-items: center; justify-content: center;
+    /* Above the settings modal (1200) that opens it. */
+    z-index: 1300;
   }
   .cal {
     width: min(1100px, 96vw); height: min(760px, 94vh);

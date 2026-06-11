@@ -23,9 +23,9 @@
   /* ── Text ramp ── */
   --tx-hi:    #f2f2f0;
   --tx-mid:   #d7d7d3;
-  --tx-lo:    #a5a5a0;
-  --tx-dim:   #7c7d78;
-  --tx-xdim:  #5c5d59;
+  --tx-lo:    #aaaaa5;
+  --tx-dim:   #8a8b85;
+  --tx-xdim:  #61625e;
   --tx-ghost: #454641;
 
   /* ── Accent: restrained instrument amber ── */
@@ -107,7 +107,7 @@ body {
 /* Small uppercase section/field label — the system's signature caption */
 .cap {
   font-family: var(--font-ui);
-  font-size: 0.6rem;
+  font-size: 0.62rem;
   font-weight: 600;
   letter-spacing: 0.12em;
   text-transform: uppercase;

@@ -264,7 +264,7 @@
   .lap-bar { height: clamp(2.5rem, 5.5vh, 4rem); flex-shrink: 0; }
 
   .update-bar {
-    position: fixed; top: 0; left: 0; right: 0; z-index: 300;
+    position: fixed; top: 0; left: 0; right: 0; z-index: 1500;
     display: flex; align-items: center; gap: 0.75rem;
     padding: 0.35rem 1rem;
     background: var(--ac-dim); border-bottom: 1px solid var(--ac);
@@ -285,7 +285,7 @@
 
   .toast-stack {
     position: fixed; bottom: 4rem; left: 50%; transform: translateX(-50%);
-    display: flex; flex-direction: column; gap: 0.5rem; z-index: 200;
+    display: flex; flex-direction: column; gap: 0.5rem; z-index: 1400;
     pointer-events: none;
   }
   .toast {

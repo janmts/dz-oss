@@ -548,11 +548,14 @@
   .zone-meta,
   .zone-points,
   .empty,
-  .score-status,
-  .run-row span,
-  .run-row small {
+  .score-status {
     color: var(--tx-dim);
     font-size: 0.66rem;
+  }
+  .run-row span,
+  .run-row small {
+    color: var(--tx-lo);
+    font-size: 0.7rem;
   }
   .map-stage {
     min-width: 0;
@@ -607,6 +610,9 @@
     flex: 1;
     min-height: 0;
     padding: 0.7rem;
+    /* Contain leaflet's internal z-indexes (panes go up to ~1000) so they
+       can't stack above app-level overlays like the settings modal. */
+    isolation: isolate;
   }
   .run-card,
   .score-card,
@@ -678,7 +684,7 @@
   }
   .metric-grid strong {
     color: var(--tx-mid);
-    font-size: 0.72rem;
+    font-size: 0.74rem;
     font-weight: 550;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -755,13 +761,13 @@
     flex-wrap: wrap;
     gap: 0.35rem 0.7rem;
     padding: 0 0.7rem 0.5rem;
-    color: var(--tx-dim);
-    font-size: 0.62rem;
+    color: var(--tx-lo);
+    font-size: 0.71rem;
   }
   .recorded {
     padding: 0.15rem 0.7rem 0;
-    color: var(--tx-dim);
-    font-size: 0.62rem;
+    color: var(--tx-lo);
+    font-size: 0.67rem;
   }
   .actual-label {
     display: block;

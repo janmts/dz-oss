@@ -304,6 +304,8 @@
     overflow: hidden;
     display: flex;
     flex-direction: column;
+    /* Keep leaflet's pane z-indexes from escaping above app overlays. */
+    isolation: isolate;
   }
   .leaflet-host {
     width: 100%;

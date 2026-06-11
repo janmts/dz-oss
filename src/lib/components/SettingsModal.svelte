@@ -211,7 +211,9 @@
 <style>
   .overlay {
     position: fixed; inset: 0; background: rgba(0,0,0,0.65);
-    display: flex; align-items: center; justify-content: center; z-index: 100;
+    display: flex; align-items: center; justify-content: center;
+    /* Above leaflet panes/controls (which z-index up to ~1000). */
+    z-index: 1200;
   }
   .modal {
     background: var(--bg-panel); border: 1px solid var(--bd-muted); border-radius: var(--r-lg);

@@ -953,6 +953,8 @@
     border-radius: var(--r-md);
     overflow: hidden;
     background: var(--bg-body);
+    /* Keep leaflet's pane z-indexes from escaping above app overlays. */
+    isolation: isolate;
   }
   svg {
     display: block;
