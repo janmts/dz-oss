@@ -5,6 +5,14 @@ use serde::Serialize;
 
 use crate::{db, parser, scoring};
 
+/// Inter-arrival gap (wall-clock ms) above which a run treats the elapsed time
+/// as a telemetry stall — a pause, alt-tab, menu, or UDP stall — rather than
+/// genuine in-game non-scoring time. Telemetry is a fixed ~64 Hz tick
+/// (~15.6 ms between packets), and even a long burst of UDP loss stays well
+/// under this, so anything larger is a delivery stop, not the car failing to
+/// score. Such time is excluded from the starvation timer (see `note_packet`).
+const STALL_GAP_MS: i64 = 500;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Point {
     pub x: f64,
@@ -50,6 +58,11 @@ struct ActiveRun {
     /// Wall-clock ms of the last packet that earned points. The run aborts if
     /// this falls more than the configured starvation timeout behind `now`.
     last_score_ms: i64,
+    /// Wall-clock ms of the previous packet seen during this run (scoring or
+    /// not). Drives stall detection: telemetry is a fixed ~64 Hz tick, so a gap
+    /// far larger than that means delivery stopped — a pause, alt-tab, menu, or
+    /// UDP stall — frozen time that must not count toward starvation.
+    last_packet_ms: i64,
     /// Drift-direction sign (+1/−1) latched at the last scoring packet; 0 until
     /// the run first scores. Drives the live flip counter.
     score_sign: i8,
@@ -222,6 +235,20 @@ impl DriftRunManager {
                 run.packet_count += 1;
             }
 
+            // Exclude paused/stalled wall-clock time from the starvation timer.
+            // While the game is paused (or alt-tabbed, in a menu, or briefly
+            // UDP-stalled) NO packets arrive, yet the wall clock keeps running.
+            // The first packet after the stall would otherwise see the entire
+            // gap as non-scoring time and abort instantly on resume. A gap far
+            // larger than the ~64 Hz tick can't be in-game time, so roll the
+            // last-score stamp forward by the gap (capped at now) — only
+            // continuous, in-game non-scoring time counts toward the timeout.
+            let gap_ms = now_ms - run.last_packet_ms;
+            if gap_ms > STALL_GAP_MS {
+                run.last_score_ms = (run.last_score_ms + gap_ms).min(now_ms);
+            }
+            run.last_packet_ms = now_ms;
+
             // Score-starvation abort. FH6 ends a run when no drift points have
             // accrued for a while — NOT when the car leaves a spatial boundary
             // (the polygon is only used to detect the entry gate-crossing). A
@@ -340,6 +367,7 @@ impl DriftRunManager {
                     started_at: now_ms,
                     packet_count: 0,
                     last_score_ms: now_ms,
+                    last_packet_ms: now_ms,
                     score_sign: 0,
                     direction_flips: 0,
                 };
@@ -825,6 +853,9 @@ mod tests {
     #[test]
     fn run_aborts_on_score_starvation() {
         // No points for longer than the timeout (1 s here) → the run aborts.
+        // Packets arrive at a realistic sub-stall cadence (100 ms) so this is
+        // genuine in-game starvation, not a telemetry stall the gap-skip would
+        // absorb (see `pause_does_not_abort_run_on_resume`).
         let conn = in_memory();
         save_square_zone(&conn, 0.0);
         let mut mgr = DriftRunManager::new();
@@ -832,10 +863,18 @@ mod tests {
         mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 1000, 1.0, 10.0);
         let started = mgr.note_packet(&conn, &packet(2.0, 1.0), &raw, 1100, 1.0, 10.0).unwrap();
         assert_eq!(started.state, "running");
-        // A non-scoring packet 2.1 s after the last score (the run start) → starved.
-        let dead = mgr.note_packet(&conn, &packet(2.0, 5.0), &raw, 3200, 1.0, 10.0).unwrap();
-        assert_eq!(dead.state, "invalid");
-        assert!(!dead.scoring);
+        // Non-scoring packets every 100 ms; once >1 s has elapsed with no score
+        // the run starves. Bounded loop so a logic regression can't hang.
+        let mut now = 1200i64;
+        let mut last = started;
+        while last.state == "running" && now <= 4000 {
+            last = mgr
+                .note_packet(&conn, &packet(2.0, 5.0), &raw, now, 1.0, 10.0)
+                .unwrap();
+            now += 100;
+        }
+        assert_eq!(last.state, "invalid");
+        assert!(!last.scoring);
         let rows = db::list_drift_runs(&conn).unwrap();
         assert!(!rows[0].valid);
         assert!(rows[0]
@@ -843,6 +882,45 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("no drift score"));
+    }
+
+    #[test]
+    fn pause_does_not_abort_run_on_resume() {
+        // A pause freezes telemetry: no packets arrive for the pause duration
+        // while the wall clock keeps advancing. The first packet after a pause
+        // longer than the timeout must NOT trip the starvation abort — under
+        // the old wall-clock logic it saw the whole pause as non-scoring time
+        // and killed the run instantly (issue #19).
+        let conn = in_memory();
+        save_square_zone(&conn, 0.0);
+        let mut mgr = DriftRunManager::new();
+        let raw = vec![1u8; 324];
+        mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 1000, 5.0, 10.0);
+        // Enter scoring, then a couple of packets at normal ~64 Hz cadence.
+        let started = mgr
+            .note_packet(&conn, &drifting_packet(2.0, 1.0, 100), &raw, 1100, 5.0, 10.0)
+            .unwrap();
+        assert_eq!(started.state, "running");
+        assert!(started.scoring);
+        mgr.note_packet(&conn, &drifting_packet(2.0, 2.0, 116), &raw, 1116, 5.0, 10.0);
+        // Pause for 30 s (>> the 5 s timeout), then resume with a NON-scoring
+        // packet — the worst case, since there's no fresh score to reset the
+        // timer. The stall window is excluded, so the run survives.
+        let resumed = mgr
+            .note_packet(&conn, &packet(2.0, 3.0), &raw, 31_116, 5.0, 10.0)
+            .unwrap();
+        assert_eq!(resumed.state, "running");
+        // Genuine starvation still bites: ~64 Hz non-scoring packets after the
+        // resume accumulate past the timeout and abort the run.
+        let mut now = 31_216i64;
+        let mut last = resumed;
+        while last.state == "running" && now <= 40_000 {
+            last = mgr
+                .note_packet(&conn, &packet(2.0, 5.0), &raw, now, 5.0, 10.0)
+                .unwrap();
+            now += 100;
+        }
+        assert_eq!(last.state, "invalid");
     }
 
     #[test]
