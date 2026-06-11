@@ -11,6 +11,7 @@ vite.config.ts.timestamp-*
 .claude/
 scripts/*
 !scripts/download-map-tiles.mjs
+!scripts/check-car-ordinals.mjs
 docs/*
 # but track the public docs referenced from the README
 !docs/headless-server.md
@@ -18,3 +19,4 @@ docs/*
 .superpowers
 # Prebuilt headless-server binary artifacts (produced ad hoc / by Docker)
 /fh6-tel-serve-*
+/ONYX_FH6_Vehicle_Database_From_GameAssets_v1
