@@ -126,12 +126,12 @@
   }
   .badge {
     background: var(--ac);
-    color: #fff;
-    font-size: 0.65rem;
+    color: var(--bg-body);
+    font-size: 0.62rem;
     font-weight: 700;
-    letter-spacing: 0.06em;
+    letter-spacing: 0.1em;
     padding: 0.15rem 0.4rem;
-    border-radius: 3px;
+    border-radius: var(--r-xs);
   }
   .label {
     color: var(--tx-lo);
@@ -148,7 +148,7 @@
   }
   .play {
     background: var(--ac);
-    color: #fff;
+    color: var(--bg-body);
     border: none;
     border-radius: 50%;
     width: 2rem;
@@ -162,9 +162,11 @@
     line-height: 1;
     padding: 0;
   }
+  .play:hover { background: var(--ac-bright); }
   .time {
     color: var(--tx-dim);
     font-size: 0.72rem;
+    font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
     min-width: 3rem;
     text-align: center;
@@ -182,27 +184,30 @@
     background: var(--bg-elevated);
     border: 1px solid var(--bd-dim);
     color: var(--tx-dim);
-    font-size: 0.7rem;
+    font-size: 0.68rem;
+    font-family: var(--font-mono);
     padding: 0.2rem 0.4rem;
-    border-radius: 4px;
+    border-radius: var(--r-sm);
     cursor: pointer;
   }
   .speeds button.active {
-    border-color: var(--ac);
-    color: var(--tx-hi);
+    border-color: color-mix(in srgb, var(--ac) 55%, var(--bg-panel));
+    color: var(--ac);
+    background: var(--ac-wash);
   }
   .exit {
     background: none;
-    border: 1px solid var(--bd-subtle);
+    border: 1px solid var(--bd-muted);
     color: var(--tx-lo);
     font-size: 0.75rem;
+    font-family: inherit;
     padding: 0.35rem 0.7rem;
-    border-radius: 4px;
+    border-radius: var(--r-sm);
     cursor: pointer;
     flex-shrink: 0;
   }
   .exit:hover {
-    border-color: #ef4444;
-    color: #ef4444;
+    border-color: var(--bad);
+    color: var(--bad-tx);
   }
 </style>

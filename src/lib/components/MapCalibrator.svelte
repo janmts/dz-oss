@@ -5,6 +5,7 @@
   import { settings, saveSettings } from '$lib/stores/sessions';
   import { effectiveMapConfig, FH6_JAPAN } from '$lib/mapDefaults';
   import { xyzSimpleCRS } from '$lib/mapCrs';
+  import { themeColor } from '$lib/theme';
   import type { AppSettings } from '$lib/types';
 
   let { onClose }: { onClose: () => void } = $props();
@@ -81,14 +82,14 @@
     if (!map || !L || !markers) return;
     markers.clearLayers();
     for (const [pt, label, color] of [
-      [A, 'A', '#22c55e'],
-      [B, 'B', '#3b82f6'],
+      [A, 'A', themeColor('--map-left', '#84b577')],
+      [B, 'B', themeColor('--map-right', '#82a7c8')],
     ] as const) {
       if (pt.pix) {
         const ll = map.unproject(L.point(pt.pix[0], pt.pix[1]), cfg.maxZoom);
         L.circleMarker(ll, {
           radius: 7,
-          color: '#000',
+          color: themeColor('--bg-body', '#0f1012'),
           weight: 1,
           fillColor: color,
           fillOpacity: 1,
@@ -221,12 +222,15 @@
 <style>
   .overlay {
     position: fixed; inset: 0; background: rgba(0, 0, 0, 0.75);
-    display: flex; align-items: center; justify-content: center; z-index: 130;
+    display: flex; align-items: center; justify-content: center;
+    /* Above the settings modal (1200) that opens it. */
+    z-index: 1300;
   }
   .cal {
     width: min(1100px, 96vw); height: min(760px, 94vh);
-    background: var(--bg-panel); border: 1px solid var(--bd-subtle);
-    border-radius: 10px; display: flex; flex-direction: column;
+    background: var(--bg-panel); border: 1px solid var(--bd-muted);
+    border-radius: var(--r-lg); display: flex; flex-direction: column;
+    box-shadow: 0 16px 60px rgba(0, 0, 0, 0.55);
   }
   header {
     display: flex; justify-content: space-between; align-items: center;
@@ -247,16 +251,16 @@
     background: var(--bg-card); border: 1px solid var(--bd-dim);
     border-radius: 6px; padding: 0.5rem 0.7rem;
   }
-  .live span { color: var(--tx-dim); font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.05em; }
-  .live strong { color: var(--tx-dim); font-size: 0.9rem; font-variant-numeric: tabular-nums; }
+  .live span { color: var(--tx-dim); font-size: 0.62rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.12em; }
+  .live strong { color: var(--tx-dim); font-size: 0.85rem; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
   .live.on strong { color: var(--tx-hi); }
   .target { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
   .target button {
     background: var(--bg-elevated); border: 1px solid var(--bd-muted);
-    color: var(--tx-dim); padding: 0.3rem 0.7rem; border-radius: 5px;
-    font-size: 0.8rem; cursor: pointer;
+    color: var(--tx-dim); padding: 0.3rem 0.7rem; border-radius: var(--r-sm);
+    font-size: 0.78rem; cursor: pointer; font-family: inherit;
   }
-  .target button.sel { border-color: var(--ac); color: var(--tx-hi); }
+  .target button.sel { border-color: color-mix(in srgb, var(--ac) 55%, var(--bg-panel)); color: var(--ac); background: var(--ac-wash); }
   .pt {
     background: var(--bg-card); border: 1px solid var(--bd-dim);
     border-radius: 6px; padding: 0.5rem 0.6rem;
@@ -265,16 +269,17 @@
   .pt-head { color: var(--tx-mid); font-weight: 700; font-size: 0.8rem; }
   .pt-row { display: flex; align-items: center; gap: 0.5rem; font-size: 0.75rem; }
   .pt-row span { color: var(--tx-dim); width: 3rem; }
-  .pt-row code { color: var(--tx-hi); flex: 1; }
+  .pt-row code { color: var(--tx-hi); flex: 1; font-family: var(--font-mono); }
   .pt-row button {
-    background: var(--ac); color: #fff; border: none; border-radius: 4px;
-    padding: 0.2rem 0.5rem; font-size: 0.72rem; cursor: pointer;
+    background: var(--ac); color: var(--bg-body); border: none; border-radius: var(--r-sm);
+    padding: 0.2rem 0.5rem; font-size: 0.72rem; font-weight: 600; cursor: pointer; font-family: inherit;
   }
+  .pt-row button:hover:not(:disabled) { background: var(--ac-bright); }
   .pt-row button:disabled { opacity: 0.4; cursor: default; }
   .snippet pre {
     background: var(--bg-body); border: 1px solid var(--bd-dim);
-    border-radius: 5px; padding: 0.5rem; color: var(--tx-mid);
-    font-size: 0.7rem; white-space: pre-wrap; margin-top: 0.3rem;
+    border-radius: var(--r-sm); padding: 0.5rem; color: var(--tx-mid);
+    font-size: 0.68rem; font-family: var(--font-mono); white-space: pre-wrap; margin-top: 0.3rem;
   }
   .hint { font-size: 0.68rem; color: var(--tx-dim); }
   .view-row {
@@ -283,16 +288,18 @@
   }
   .view-row button {
     background: var(--bg-elevated); border: 1px solid var(--bd-muted);
-    color: var(--tx-mid); padding: 0.35rem 0.7rem; border-radius: 5px;
-    font-size: 0.78rem; cursor: pointer;
+    color: var(--tx-mid); padding: 0.35rem 0.7rem; border-radius: var(--r-sm);
+    font-size: 0.78rem; cursor: pointer; font-family: inherit;
   }
-  .view-row button:hover { filter: brightness(1.2); }
+  .view-row button:hover { border-color: var(--bd-strong); color: var(--tx-hi); }
   .actions { display: flex; justify-content: flex-end; gap: 0.5rem; }
   .actions button {
-    padding: 0.4rem 0.9rem; border-radius: 5px; border: 1px solid var(--bd-muted);
+    padding: 0.4rem 0.9rem; border-radius: var(--r-sm); border: 1px solid var(--bd-muted);
     background: var(--bg-elevated); color: var(--tx-mid); cursor: pointer; font-size: 0.82rem;
+    font-family: inherit;
   }
-  .actions button.primary { background: var(--ac); border-color: var(--ac); color: #fff; }
+  .actions button.primary { background: var(--ac); border-color: var(--ac); color: var(--bg-body); font-weight: 650; }
+  .actions button.primary:hover:not(:disabled) { background: var(--ac-bright); border-color: var(--ac-bright); }
   .actions button:disabled { opacity: 0.45; cursor: default; }
   :global(.leaflet-container) { background: var(--bg-card); font: inherit; }
 </style>

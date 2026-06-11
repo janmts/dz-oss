@@ -78,13 +78,14 @@
     display: inline-block;
     width: 5px; height: 5px;
     border-radius: 50%;
-    background: #22c55e;
-    box-shadow: 0 0 4px #22c55e;
+    background: var(--ok);
+    box-shadow: 0 0 4px var(--ok);
     flex-shrink: 0;
   }
   .lap-val {
-    font-size: clamp(0.7rem, 1.8vw, 1.1rem);
-    font-weight: 800;
+    font-size: clamp(0.7rem, 1.8vw, 1.05rem);
+    font-weight: 650;
+    font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
     color: var(--tx-mid);
     white-space: nowrap;
@@ -92,7 +93,7 @@
     text-overflow: ellipsis;
   }
   .lap-val.current { color: var(--ac); }
-  .lap-val.best    { color: #a855f7; }
+  .lap-val.best    { color: var(--violet); }
 
   .session-time {
     width: clamp(5rem, 10vw, 7rem);

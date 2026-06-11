@@ -1,5 +1,6 @@
 <script lang="ts">
   import { displayPacket } from '$lib/stores/telemetry';
+  import { themeColor } from '$lib/theme';
 
   let {
     tireTempCold = 60,
@@ -14,30 +15,30 @@
   let pkt = $derived($displayPacket);
 
   function tempColor(t: number): string {
-    if (t < tireTempCold) return '#3b82f6';
-    if (t < tireTempOptimal) return '#22c55e';
-    if (t < tireTempHot) return '#f59e0b';
-    return '#ef4444';
+    if (t < tireTempCold) return themeColor('--info', '#82a7c8');
+    if (t < tireTempOptimal) return themeColor('--ok', '#84b577');
+    if (t < tireTempHot) return themeColor('--warn', '#dd9a47');
+    return themeColor('--bad', '#d56c62');
   }
 
   function slipColor(s: number): string {
     const a = Math.abs(s);
-    if (a < 0.05) return '#22c55e';
-    if (a < 0.15) return '#f59e0b';
-    return '#ef4444';
+    if (a < 0.05) return themeColor('--ok', '#84b577');
+    if (a < 0.15) return themeColor('--warn', '#dd9a47');
+    return themeColor('--bad', '#d56c62');
   }
 
   function suspColor(s: number): string {
-    if (s > 0.88) return '#ef4444';
-    if (s > 0.72) return '#f59e0b';
-    if (s < 0.12) return '#3b82f6';
-    return '#6366f1';
+    if (s > 0.88) return themeColor('--bad', '#d56c62');
+    if (s > 0.72) return themeColor('--warn', '#dd9a47');
+    if (s < 0.12) return themeColor('--info', '#82a7c8');
+    return themeColor('--bd-strong', '#44484f');
   }
 
   function wearColor(w: number): string {
-    if (w > 0.7) return '#22c55e';
-    if (w > 0.4) return '#f59e0b';
-    return '#ef4444';
+    if (w > 0.7) return themeColor('--ok', '#84b577');
+    if (w > 0.4) return themeColor('--warn', '#dd9a47');
+    return themeColor('--bad', '#d56c62');
   }
 
   let tires = $derived([
@@ -137,7 +138,7 @@
     gap: 0.25rem;
     background: var(--bg-card);
     border: 1.5px solid color-mix(in srgb, var(--tc) 28%, var(--bg-elevated));
-    border-radius: 8px;
+    border-radius: var(--r-md);
     padding: 0.3rem 0.2rem 0.3rem 0.4rem;
     transition: border-color 0.3s;
     overflow: hidden;
@@ -172,7 +173,8 @@
   }
   .temp {
     font-size: clamp(0.85rem, 2.8vw, 1.2rem);
-    font-weight: 900;
+    font-weight: 650;
+    font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
     line-height: 1;
   }
@@ -191,7 +193,8 @@
   }
   .wear {
     font-size: clamp(0.45rem, 1.1vw, 0.6rem);
-    font-weight: 700;
+    font-weight: 600;
+    font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
   }
 

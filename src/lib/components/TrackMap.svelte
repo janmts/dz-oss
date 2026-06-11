@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { LAP_PALETTE } from '$lib/theme';
   import type { TelemetryPacket } from '$lib/types';
 
   // Presentational only. Draws the driven line from world position (X = east,
@@ -19,15 +20,7 @@
     compact?: boolean;
   } = $props();
 
-  const LAP_COLORS = [
-    '#3b82f6',
-    '#22c55e',
-    '#f59e0b',
-    '#a855f7',
-    '#ef4444',
-    '#06b6d4',
-    '#ec4899',
-  ];
+  const LAP_COLORS = LAP_PALETTE;
 
   const VB = 100;
   const PAD = 6;
@@ -115,11 +108,11 @@
       {/each}
       {#if showStart && startPt}
         <circle cx={startPt[0]} cy={startPt[1]} r={compact ? 2 : 1.6}
-          fill="none" stroke="#94a3b8" stroke-width="0.8" />
+          fill="none" stroke="var(--tx-dim)" stroke-width="0.8" />
       {/if}
       {#if marker}
         <circle cx={marker[0]} cy={marker[1]} r={compact ? 2.6 : 2}
-          fill="#fbbf24" stroke="#000" stroke-width="0.5" />
+          fill="var(--live-dot)" stroke="var(--bg-body)" stroke-width="0.5" />
       {/if}
     </svg>
   {/if}

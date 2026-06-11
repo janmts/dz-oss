@@ -138,8 +138,8 @@
     position: fixed;
     z-index: 50;
     background: var(--bg-panel);
-    border: 1px solid var(--bd-subtle);
-    border-radius: 6px;
+    border: 1px solid var(--bd-muted);
+    border-radius: var(--r-md);
     box-shadow: 0 4px 20px rgba(0,0,0,0.5);
     display: flex;
     flex-direction: column;
@@ -155,7 +155,7 @@
     border-bottom: 1px solid var(--bd-dim);
     cursor: grab;
     background: var(--bg-elevated);
-    border-radius: 6px 6px 0 0;
+    border-radius: var(--r-md) var(--r-md) 0 0;
     user-select: none;
     flex-shrink: 0;
   }
@@ -167,8 +167,9 @@
   .fp-title {
     flex: 1;
     font-size: 0.55rem;
-    font-weight: 700;
-    letter-spacing: 0.08em;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
     color: var(--tx-dim);
   }
   .fp-actions {

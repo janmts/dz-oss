@@ -45,9 +45,7 @@ export interface AlignedChart {
 export const TELEMETRY_HZ = 60;
 
 /** Colors assigned to selected laps in AnalysisTab (cycled when all are in use). */
-export const LAP_PALETTE = [
-  '#3b82f6', '#f59e0b', '#22c55e', '#a855f7', '#ef4444', '#06b6d4',
-];
+export { LAP_PALETTE } from './theme';
 
 /** Minimum currentLap seconds before a reset to ~0 counts as a genuine lap
  *  crossing (matches the backend's MIN_LAP_SECS in session.rs). */

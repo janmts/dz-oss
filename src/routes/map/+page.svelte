@@ -71,7 +71,7 @@
 <style>
   :global(body) {
     margin: 0;
-    background: #030712;
+    background: var(--bg-body);
     overflow: hidden;
   }
   .map-window {
@@ -88,8 +88,7 @@
     border-radius: 0;
   }
   .waiting {
-    color: #6b7280;
-    font-family: system-ui, sans-serif;
+    color: var(--tx-dim);
     font-size: 0.85rem;
     margin: auto;
   }

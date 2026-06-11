@@ -19,10 +19,9 @@
   } from '$lib/stores/sessions';
   import { effectiveMapConfig, type EffectiveMapConfig } from '$lib/mapDefaults';
   import { xyzSimpleCRS } from '$lib/mapCrs';
+  import { themeColor } from '$lib/theme';
   import { ipc } from '$lib/ipc';
   import type { DriftZoneInput, DriftZoneRow, ZonePoint } from '$lib/types';
-
-  let { onClose }: { onClose: () => void } = $props();
 
   type BoundarySide = 'left' | 'right';
 
@@ -288,21 +287,21 @@
 
     if (draft.leftBoundary.length > 1) {
       leftLine = L.polyline(draft.leftBoundary.map(worldToLatLng), {
-        color: '#22c55e',
+        color: themeColor('--map-left', '#84b577'),
         weight: 5,
         opacity: 0.95,
       }).addTo(boundaryLayer);
     }
     if (draft.rightBoundary.length > 1) {
       rightLine = L.polyline(draft.rightBoundary.map(worldToLatLng), {
-        color: '#3b82f6',
+        color: themeColor('--map-right', '#82a7c8'),
         weight: 5,
         opacity: 0.95,
       }).addTo(boundaryLayer);
     }
     if (draft.leftBoundary.length && draft.rightBoundary.length) {
       startGateLine = L.polyline([draft.leftBoundary[0], draft.rightBoundary[0]].map(worldToLatLng), {
-        color: '#f59e0b',
+        color: themeColor('--gate-a', '#d2a24c'),
         weight: 3,
         dashArray: '10 7',
       }).addTo(boundaryLayer);
@@ -310,7 +309,7 @@
         draft.leftBoundary[draft.leftBoundary.length - 1],
         draft.rightBoundary[draft.rightBoundary.length - 1],
       ].map(worldToLatLng), {
-        color: '#ef4444',
+        color: themeColor('--gate-b', '#d56c62'),
         weight: 3,
         dashArray: '10 7',
       }).addTo(boundaryLayer);
@@ -579,263 +578,262 @@
   }
 </script>
 
-<div class="overlay" role="dialog" aria-modal="true">
-  <div class="editor">
-    <aside class="sidebar">
-      <div class="side-head">
-        <h2>Drift Zones</h2>
-        <button onclick={newZone}>New</button>
+<div class="editor">
+  <aside class="sidebar">
+    <div class="side-head">
+      <span class="cap">Drift Zones</span>
+      <button class="ghost" onclick={newZone}>+ New</button>
+    </div>
+
+    <div class="zone-list">
+      {#each $driftZones as zone}
+        <button
+          class="zone-row"
+          class:active={zone.id === selectedId}
+          onclick={() => selectZone(zone)}
+        >
+          <span>{zone.name}</span>
+          <small class="mono">{zone.leftBoundary.length}L / {zone.rightBoundary.length}R</small>
+        </button>
+      {:else}
+        <p class="empty">No zones saved yet.</p>
+      {/each}
+    </div>
+  </aside>
+
+  <section class="main-panel">
+    <header class="head">
+      <div>
+        <h2>{selectedId ? 'Edit Drift Zone' : 'New Drift Zone'}</h2>
+        <p>Click the map or capture live telemetry to add road-edge points, then drag to refine.</p>
       </div>
+    </header>
 
-      <div class="zone-list">
-        {#each $driftZones as zone}
-          <button
-            class="zone-row"
-            class:active={zone.id === selectedId}
-            onclick={() => selectZone(zone)}
-          >
-            <span>{zone.name}</span>
-            <small>{zone.leftBoundary.length}L / {zone.rightBoundary.length}R</small>
-          </button>
-        {:else}
-          <p class="empty">No zones saved yet.</p>
-        {/each}
-      </div>
-    </aside>
-
-    <section class="main-panel">
-      <header class="head">
-        <div>
-          <h2>{selectedId ? 'Edit Drift Zone' : 'New Drift Zone'}</h2>
-          <p>Click the map or capture live telemetry to add road-edge points, then drag to refine.</p>
-        </div>
-        <button class="close" onclick={onClose}>✕</button>
-      </header>
-
-      <div class="form-row">
-        <label>
-          Name
-          <input bind:value={draft.name} />
-        </label>
-        <label class="num" title="Metres a run may stray past the boundary before it voids. ~3 m suits most zones; raise it for sparsely-mapped or wide zones.">
-          Slack (m)
-          <input type="number" min="0" step="0.5" bind:value={slackM} />
-        </label>
-        <label class="checkbox">
-          <input type="checkbox" bind:checked={draft.active} />
-          Active
-        </label>
-      </div>
-
+    <div class="form-row">
       <label>
-        Description
-        <input bind:value={draft.description} placeholder="Optional notes for this zone" />
+        <span class="cap">Name</span>
+        <input bind:value={draft.name} />
       </label>
+      <label class="num" title="Metres a run may stray past the boundary before it voids. ~3 m suits most zones; raise it for sparsely-mapped or wide zones.">
+        <span class="cap">Slack (m)</span>
+        <input class="mono" type="number" min="0" step="0.5" bind:value={slackM} />
+      </label>
+      <label class="checkbox">
+        <input type="checkbox" bind:checked={draft.active} />
+        Active
+      </label>
+    </div>
 
-      <div class="toolbar">
-        <div class="segmented">
-          <button class:active={activeSide === 'left'} onclick={() => (activeSide = 'left')}>Left</button>
-          <button class:active={activeSide === 'right'} onclick={() => (activeSide = 'right')}>Right</button>
-        </div>
-        <button onclick={() => capturePoint()}>Capture live point</button>
-        <button onclick={() => insertAtSelected(0)}>Insert before</button>
-        <button onclick={() => insertAtSelected(1)}>Insert after</button>
-        <button onclick={removeLastPoint}>Remove last {activeSide}</button>
-        <button onclick={reverseBoundaries}>Reverse direction</button>
-        <button onclick={fitMapToGeometry}>Fit map</button>
-        <span class="live">
-          {livePoint
-            ? `Last X ${livePoint.x.toFixed(1)} / Z ${livePoint.z.toFixed(1)}${liveAgeSecs > 2 ? ` (${liveAgeSecs.toFixed(0)}s old)` : ''}`
-            : 'Waiting for telemetry'}
-        </span>
+    <label>
+      <span class="cap">Description</span>
+      <input bind:value={draft.description} placeholder="Optional notes for this zone" />
+    </label>
+
+    <div class="toolbar">
+      <div class="segmented">
+        <button class:active={activeSide === 'left'} onclick={() => (activeSide = 'left')}>Left</button>
+        <button class:active={activeSide === 'right'} onclick={() => (activeSide = 'right')}>Right</button>
       </div>
+      <button onclick={() => capturePoint()}>Capture live point</button>
+      <button onclick={() => insertAtSelected(0)}>Insert before</button>
+      <button onclick={() => insertAtSelected(1)}>Insert after</button>
+      <button onclick={removeLastPoint}>Remove last {activeSide}</button>
+      <button onclick={reverseBoundaries}>Reverse direction</button>
+      <button onclick={fitMapToGeometry}>Fit map</button>
+      <span class="live mono">
+        {livePoint
+          ? `Last X ${livePoint.x.toFixed(1)} / Z ${livePoint.z.toFixed(1)}${liveAgeSecs > 2 ? ` (${liveAgeSecs.toFixed(0)}s old)` : ''}`
+          : 'Waiting for telemetry'}
+      </span>
+    </div>
 
-      <p class="shortcut-hint">
-        Global shortcuts while FH6 has focus: <strong>Ctrl+Alt+Z</strong> captures selected side,
-        <strong>Ctrl+Alt+L</strong> captures left, <strong>Ctrl+Alt+R</strong> captures right.
-        Selected point: <strong>{selectedBoundaryPointLabel()}</strong>.
-      </p>
+    <p class="shortcut-hint">
+      Global shortcuts while FH6 has focus: <strong>Ctrl+Alt+Z</strong> captures selected side,
+      <strong>Ctrl+Alt+L</strong> captures left, <strong>Ctrl+Alt+R</strong> captures right.
+      Selected point: <strong>{selectedBoundaryPointLabel()}</strong>.
+    </p>
 
-      <div class="map-wrap">
-        {#if mapUsable}
-          <div class="leaflet-host" bind:this={mapHost}></div>
-        {:else}
-          <div class="fallback-note">Map calibration unavailable; showing uncalibrated world-coordinate editor.</div>
-          <svg
-            bind:this={svgEl}
-            viewBox={`0 0 ${width} ${height}`}
-            onpointermove={moveDrag}
-            onpointerup={stopDrag}
-            onpointercancel={stopDrag}
-            role="img"
-            aria-label="Drift zone boundary editor"
-          >
-            <rect
-              class="map-bg"
-              x="0"
-              y="0"
-              width={width}
-              height={height}
-              role="presentation"
-              onpointerup={onSvgMapPointerUp}
+    <div class="map-wrap">
+      {#if mapUsable}
+        <div class="leaflet-host" bind:this={mapHost}></div>
+      {:else}
+        <div class="fallback-note">Map calibration unavailable; showing uncalibrated world-coordinate editor.</div>
+        <svg
+          bind:this={svgEl}
+          viewBox={`0 0 ${width} ${height}`}
+          onpointermove={moveDrag}
+          onpointerup={stopDrag}
+          onpointercancel={stopDrag}
+          role="img"
+          aria-label="Drift zone boundary editor"
+        >
+          <rect
+            class="map-bg"
+            x="0"
+            y="0"
+            width={width}
+            height={height}
+            role="presentation"
+            onpointerup={onSvgMapPointerUp}
+          />
+
+          {#if draft.leftBoundary.length > 1}
+            <polyline class="boundary left" points={path(draft.leftBoundary)} />
+          {/if}
+          {#if draft.rightBoundary.length > 1}
+            <polyline class="boundary right" points={path(draft.rightBoundary)} />
+          {/if}
+
+          {#if draft.leftBoundary.length > 0 && draft.rightBoundary.length > 0}
+            <polyline
+              class="gate start"
+              points={gateLine([draft.leftBoundary[0], draft.rightBoundary[0]])}
             />
+            <polyline
+              class="gate finish"
+              points={gateLine([
+                draft.leftBoundary[draft.leftBoundary.length - 1],
+                draft.rightBoundary[draft.rightBoundary.length - 1],
+              ])}
+            />
+          {/if}
 
-            {#if draft.leftBoundary.length > 1}
-              <polyline class="boundary left" points={path(draft.leftBoundary)} />
-            {/if}
-            {#if draft.rightBoundary.length > 1}
-              <polyline class="boundary right" points={path(draft.rightBoundary)} />
-            {/if}
+          {#if livePoint}
+            {@const live = toSvg(livePoint)}
+            <circle class="live-dot" cx={live[0]} cy={live[1]} r="7" />
+          {/if}
 
-            {#if draft.leftBoundary.length > 0 && draft.rightBoundary.length > 0}
-              <polyline
-                class="gate start"
-                points={gateLine([draft.leftBoundary[0], draft.rightBoundary[0]])}
+          {#each draft.leftBoundary as point, index}
+            {@const p = toSvg(point)}
+            <g class="point-group">
+              <circle
+                class="point left"
+                cx={p[0]}
+                cy={p[1]}
+                r="8"
+                role="button"
+                tabindex="0"
+                aria-label={`Select left point ${index + 1}`}
+                class:selected={selectedPoint?.side === 'left' && selectedPoint.index === index}
+                onpointerdown={(e) => startDrag(e, 'left', index)}
+                onkeydown={(e) => onPointKeydown(e, 'left', index)}
+                ondblclick={() => deletePoint('left', index)}
               />
-              <polyline
-                class="gate finish"
-                points={gateLine([
-                  draft.leftBoundary[draft.leftBoundary.length - 1],
-                  draft.rightBoundary[draft.rightBoundary.length - 1],
-                ])}
+              <text x={p[0] + 12} y={p[1] - 10}>L{index + 1}</text>
+            </g>
+          {/each}
+
+          {#each draft.rightBoundary as point, index}
+            {@const p = toSvg(point)}
+            <g class="point-group">
+              <circle
+                class="point right"
+                cx={p[0]}
+                cy={p[1]}
+                r="8"
+                role="button"
+                tabindex="0"
+                aria-label={`Select right point ${index + 1}`}
+                class:selected={selectedPoint?.side === 'right' && selectedPoint.index === index}
+                onpointerdown={(e) => startDrag(e, 'right', index)}
+                onkeydown={(e) => onPointKeydown(e, 'right', index)}
+                ondblclick={() => deletePoint('right', index)}
               />
-            {/if}
+              <text x={p[0] + 12} y={p[1] - 10}>R{index + 1}</text>
+            </g>
+          {/each}
+        </svg>
+      {/if}
+    </div>
 
-            {#if livePoint}
-              {@const live = toSvg(livePoint)}
-              <circle class="live-dot" cx={live[0]} cy={live[1]} r="7" />
-            {/if}
+    <div class="details">
+      <div><strong>{sideLabel('left')}</strong><span class="mono">{draft.leftBoundary.length} points</span></div>
+      <div><strong>{sideLabel('right')}</strong><span class="mono">{draft.rightBoundary.length} points</span></div>
+      <div><strong>End gates</strong><span>First &amp; last point pairs — enter either, exit the other</span></div>
+      <div><strong>Editing</strong><span>Click map to add; drag points to refine</span></div>
+    </div>
 
-            {#each draft.leftBoundary as point, index}
-              {@const p = toSvg(point)}
-              <g class="point-group">
-                <circle
-                  class="point left"
-                  cx={p[0]}
-                  cy={p[1]}
-                  r="8"
-                  role="button"
-                  tabindex="0"
-                  aria-label={`Select left point ${index + 1}`}
-                  class:selected={selectedPoint?.side === 'left' && selectedPoint.index === index}
-                  onpointerdown={(e) => startDrag(e, 'left', index)}
-                  onkeydown={(e) => onPointKeydown(e, 'left', index)}
-                  ondblclick={() => deletePoint('left', index)}
-                />
-                <text x={p[0] + 12} y={p[1] - 10}>L{index + 1}</text>
-              </g>
-            {/each}
-
-            {#each draft.rightBoundary as point, index}
-              {@const p = toSvg(point)}
-              <g class="point-group">
-                <circle
-                  class="point right"
-                  cx={p[0]}
-                  cy={p[1]}
-                  r="8"
-                  role="button"
-                  tabindex="0"
-                  aria-label={`Select right point ${index + 1}`}
-                  class:selected={selectedPoint?.side === 'right' && selectedPoint.index === index}
-                  onpointerdown={(e) => startDrag(e, 'right', index)}
-                  onkeydown={(e) => onPointKeydown(e, 'right', index)}
-                  ondblclick={() => deletePoint('right', index)}
-                />
-                <text x={p[0] + 12} y={p[1] - 10}>R{index + 1}</text>
-              </g>
-            {/each}
-          </svg>
-        {/if}
-      </div>
-
-      <div class="details">
-        <div><strong>{sideLabel('left')}</strong><span>{draft.leftBoundary.length} points</span></div>
-        <div><strong>{sideLabel('right')}</strong><span>{draft.rightBoundary.length} points</span></div>
-        <div><strong>End gates</strong><span>First &amp; last point pairs — enter either, exit the other</span></div>
-        <div><strong>Editing</strong><span>Click map to add; drag points to refine</span></div>
-      </div>
-
-      <footer>
-        <span class="status">{status}</span>
-        <button class="danger" disabled={!selectedId} onclick={removeZone}>Delete</button>
-        <button class="primary" disabled={saving} onclick={save}>{saving ? 'Saving…' : 'Save zone'}</button>
-      </footer>
-    </section>
-  </div>
+    <footer>
+      <span class="status">{status}</span>
+      <button class="danger" disabled={!selectedId} onclick={removeZone}>Delete</button>
+      <button class="primary" disabled={saving} onclick={save}>{saving ? 'Saving…' : 'Save zone'}</button>
+    </footer>
+  </section>
 </div>
 
 <style>
-  .overlay {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.76);
-    display: flex;
-    align-items: stretch;
-    justify-content: center;
-    z-index: 120;
-    padding: 2rem;
-  }
   .editor {
-    width: min(1180px, 100%);
     min-height: 0;
     display: grid;
-    grid-template-columns: 260px 1fr;
-    background: var(--bg-panel);
-    border: 1px solid var(--bd-muted);
-    border-radius: 12px;
+    grid-template-columns: 240px 1fr;
+    background: var(--bg-body);
     overflow: hidden;
-    box-shadow: 0 20px 80px rgba(0, 0, 0, 0.55);
   }
   .sidebar {
-    border-right: 1px solid var(--bd-dim);
-    background: var(--bg-card);
+    border-right: 1px solid var(--bd-subtle);
+    background: var(--bg-panel);
     min-height: 0;
     display: flex;
     flex-direction: column;
   }
-  .side-head, .head {
+  .side-head {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 1rem;
-    padding: 1rem;
+    padding: 0.75rem 0.9rem;
     border-bottom: 1px solid var(--bd-dim);
+  }
+  .head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.85rem 0 0.25rem;
   }
   h2 {
     margin: 0;
     color: var(--tx-hi);
-    font-size: 1rem;
+    font-size: 0.95rem;
+    font-weight: 650;
   }
   .head p {
     margin-top: 0.2rem;
     color: var(--tx-dim);
-    font-size: 0.75rem;
+    font-size: 0.74rem;
   }
   .zone-list {
-    padding: 0.6rem;
+    padding: 0.55rem;
     display: flex;
     flex-direction: column;
-    gap: 0.35rem;
+    gap: 0.3rem;
     overflow-y: auto;
   }
   .zone-row {
     text-align: left;
     border: 1px solid var(--bd-dim);
-    background: var(--bg-panel);
+    background: var(--bg-card);
     color: var(--tx-mid);
-    border-radius: 6px;
-    padding: 0.55rem;
+    border-radius: var(--r-md);
+    padding: 0.5rem 0.6rem;
     display: flex;
     flex-direction: column;
     gap: 0.15rem;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 0.8rem;
+    font-weight: 550;
+  }
+  .zone-row:hover {
+    border-color: var(--bd-muted);
   }
   .zone-row.active {
-    border-color: var(--ac);
+    border-color: color-mix(in srgb, var(--ac) 55%, var(--bg-panel));
+    box-shadow: inset 2px 0 0 var(--ac);
   }
   .zone-row small {
     color: var(--tx-dim);
-    font-size: 0.68rem;
+    font-size: 0.64rem;
   }
   .main-panel {
     min-height: 0;
@@ -843,7 +841,7 @@
     padding: 0 1rem 1rem;
     display: flex;
     flex-direction: column;
-    gap: 0.75rem;
+    gap: 0.7rem;
   }
   label {
     display: flex;
@@ -865,25 +863,31 @@
     flex-direction: row;
     align-items: center;
     padding-bottom: 0.42rem;
+    accent-color: var(--ac);
   }
   input {
-    background: var(--bg-body);
+    background: var(--bg-card);
     border: 1px solid var(--bd-muted);
-    border-radius: 5px;
+    border-radius: var(--r-sm);
     color: var(--tx-hi);
-    padding: 0.45rem 0.55rem;
-    font: inherit;
+    padding: 0.42rem 0.55rem;
+    font-family: inherit;
+    font-size: 0.8rem;
+  }
+  input:focus {
+    outline: none;
+    border-color: color-mix(in srgb, var(--ac) 60%, var(--bg-panel));
   }
   .toolbar {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    gap: 0.45rem;
     flex-wrap: wrap;
   }
   .segmented {
     display: flex;
     border: 1px solid var(--bd-muted);
-    border-radius: 6px;
+    border-radius: var(--r-sm);
     overflow: hidden;
   }
   .segmented button {
@@ -893,46 +897,64 @@
   .segmented button.active {
     background: var(--ac);
     color: var(--bg-body);
+    font-weight: 650;
   }
   button {
     background: var(--bg-elevated);
     border: 1px solid var(--bd-muted);
-    border-radius: 5px;
+    border-radius: var(--r-sm);
     color: var(--tx-mid);
     cursor: pointer;
-    padding: 0.42rem 0.75rem;
-    font-size: 0.78rem;
+    padding: 0.4rem 0.7rem;
+    font-family: inherit;
+    font-size: 0.74rem;
   }
   button:hover:not(:disabled) {
-    filter: brightness(1.16);
+    border-color: var(--bd-strong);
+    color: var(--tx-hi);
   }
   button:disabled {
     opacity: 0.45;
     cursor: default;
   }
-  .close {
-    padding: 0.2rem 0.45rem;
+  button.ghost {
+    background: none;
+    border: 1px solid var(--bd-muted);
+    color: var(--tx-dim);
+    font-size: 0.62rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 0.22rem 0.5rem;
+  }
+  button.ghost:hover:not(:disabled) {
+    color: var(--tx-hi);
+    border-color: var(--bd-strong);
   }
   .live {
     margin-left: auto;
     color: var(--tx-dim);
-    font-size: 0.72rem;
+    font-size: 0.66rem;
   }
   .shortcut-hint {
     color: var(--tx-dim);
-    font-size: 0.72rem;
+    font-size: 0.7rem;
     line-height: 1.45;
-    margin-top: -0.25rem;
+    margin-top: -0.2rem;
   }
   .shortcut-hint strong {
     color: var(--tx-lo);
-    font-weight: 700;
+    font-weight: 600;
+    font-family: var(--font-mono);
+    font-size: 0.66rem;
   }
   .map-wrap {
-    border: 1px solid var(--bd-dim);
-    border-radius: 8px;
+    border: 1px solid var(--bd-subtle);
+    border-radius: var(--r-md);
     overflow: hidden;
     background: var(--bg-body);
+    /* Keep leaflet's pane z-indexes from escaping above app overlays. */
+    isolation: isolate;
   }
   svg {
     display: block;
@@ -948,7 +970,7 @@
   .fallback-note {
     padding: 0.45rem 0.6rem;
     color: var(--tx-dim);
-    font-size: 0.72rem;
+    font-size: 0.7rem;
     border-bottom: 1px solid var(--bd-dim);
     background: var(--bg-card);
   }
@@ -962,24 +984,24 @@
     width: 24px;
     height: 24px;
     border-radius: 999px;
-    border: 2px solid #020617;
-    color: #020617;
+    border: 2px solid var(--bg-body);
+    color: var(--bg-body);
     font-size: 0.55rem;
     font-weight: 800;
     box-shadow: 0 1px 5px rgba(0, 0, 0, 0.45);
   }
   :global(.zone-marker-left span) {
-    background: #22c55e;
+    background: var(--map-left);
   }
   :global(.zone-marker-right span) {
-    background: #3b82f6;
+    background: var(--map-right);
   }
   :global(.zone-marker-live span) {
-    background: #fbbf24;
-    color: #020617;
+    background: var(--live-dot);
+    color: var(--bg-body);
   }
   :global(.zone-marker-selected span) {
-    outline: 3px solid #fbbf24;
+    outline: 3px solid var(--ac-bright);
     outline-offset: 2px;
   }
   :global(.leaflet-container) {
@@ -998,10 +1020,10 @@
     pointer-events: none;
   }
   .boundary.left {
-    stroke: #22c55e;
+    stroke: var(--map-left);
   }
   .boundary.right {
-    stroke: #3b82f6;
+    stroke: var(--map-right);
   }
   .gate {
     fill: none;
@@ -1010,27 +1032,27 @@
     pointer-events: none;
   }
   .gate.start {
-    stroke: #f59e0b;
+    stroke: var(--gate-a);
   }
   .gate.finish {
-    stroke: #ef4444;
+    stroke: var(--gate-b);
   }
   .point {
-    stroke: #020617;
+    stroke: var(--bg-body);
     stroke-width: 2;
     cursor: grab;
   }
   .point.left {
-    fill: #22c55e;
+    fill: var(--map-left);
   }
   .point.right {
-    fill: #3b82f6;
+    fill: var(--map-right);
   }
   .point:active {
     cursor: grabbing;
   }
   .point.selected {
-    stroke: #fbbf24;
+    stroke: var(--ac-bright);
     stroke-width: 4;
   }
   .point-group text {
@@ -1040,8 +1062,8 @@
     pointer-events: none;
   }
   .live-dot {
-    fill: #fbbf24;
-    stroke: #020617;
+    fill: var(--live-dot);
+    stroke: var(--bg-body);
     stroke-width: 2;
     pointer-events: none;
   }
@@ -1053,7 +1075,7 @@
   .details div {
     background: var(--bg-card);
     border: 1px solid var(--bd-dim);
-    border-radius: 6px;
+    border-radius: var(--r-md);
     padding: 0.55rem;
     display: flex;
     flex-direction: column;
@@ -1061,11 +1083,12 @@
   }
   .details strong {
     color: var(--tx-mid);
-    font-size: 0.72rem;
+    font-size: 0.7rem;
+    font-weight: 600;
   }
   .details span, .empty {
     color: var(--tx-dim);
-    font-size: 0.68rem;
+    font-size: 0.66rem;
   }
   footer {
     display: flex;
@@ -1077,15 +1100,25 @@
   .status {
     margin-right: auto;
     color: var(--tx-dim);
-    font-size: 0.75rem;
+    font-size: 0.74rem;
   }
   .danger {
-    color: #fca5a5;
-    border-color: #7f1d1d;
+    color: var(--bad-tx);
+    border-color: color-mix(in srgb, var(--bad) 45%, var(--bg-panel));
+  }
+  .danger:hover:not(:disabled) {
+    color: var(--bad-tx);
+    border-color: var(--bad);
   }
   .primary {
     background: var(--ac);
     border-color: var(--ac);
+    color: var(--bg-body);
+    font-weight: 650;
+  }
+  .primary:hover:not(:disabled) {
+    background: var(--ac-bright);
+    border-color: var(--ac-bright);
     color: var(--bg-body);
   }
 </style>

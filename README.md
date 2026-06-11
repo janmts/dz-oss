@@ -35,41 +35,43 @@ macOS (`.dmg`, universal) and Linux (`.AppImage` / `.deb` / `.rpm`) desktop buil
 
 The dashboard shows a green dot in the top-left when packets are received.
 
-## Dashboard Layout
+## App Layout
+
+The app is organised into four top-level tabs (no overlay modals except
+Settings):
+
+| Tab | Contents |
+|-----|----------|
+| **Drift** *(default)* | Drift-run workbench: compact searchable zone selector + live Current Run instruments (signed drift-angle needle gauge, speed, flip counter) on the left, the zone map in the centre, score entry + run history on the right |
+| **Gauges** | The classic telemetry cluster — compass tape, RPM arc + speed + gear, G-meter, ADI, steering and input bars, lap bar, plus the floating tire-temp and track-map panels |
+| **Zones** | Drift-zone editor: boundary/gate drawing on the calibrated map, live point capture with global shortcuts |
+| **Sessions** | Recorded sessions list with inline analysis charts, driven-line map, and replay launcher |
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  TopBar — car name · class · PI · drivetrain · position  │
-├─────────────────────────────────────────────────────────┤
-│         CompassBar — scrolling heading tape              │
-├───────────────────────────────────────┬─────────────────┤
-│                                       │                 │
-│  CenterPanel                          │  TireWidget     │
-│  · RPM arc gauge                      │  · FL  FR       │
-│  · Speed (large) + gear               │  · RL  RR       │
-│  · G-meter                            │                 │
-│  · Throttle / Brake / Clutch bars     │  Each corner:   │
-│  · Handbrake + boost LEDs             │  temp colour    │
-│  · Attitude indicator (ADI)           │  slip dot       │
-│  · Steering wheel indicator           │  wear %         │
-│                                       │  suspension     │
-├───────────────────────────────────────┴─────────────────┤
-│    LapBar — lap · current · last · best · session        │
-└─────────────────────────────────────────────────────────┘
+│ FH6/TEL · LIVE │ DRIFT GAUGES ZONES SESSIONS │ car · ⚙  │
+├──────────────┬───────────────────────────┬──────────────┤
+│ Zones        │                           │ Score        │
+│ (search +    │        Zone map           │ · computed   │
+│  scrollbox)  │                           │ · vs actual  │
+├──────────────┤                           │ · breakdown  │
+│ Current Run  │                           ├──────────────┤
+│ · angle      │                           │ Recent runs  │
+│   needle     │                           │ (history)    │
+│ · speed/flips│                           │              │
+└──────────────┴───────────────────────────┴──────────────┘
+                    (Drift tab shown)
 ```
 
-Click **⚙** to open Settings (port, units, theme, tire thresholds, track map).  
-Click **⏱** to open the Session Drawer; click a session to open the replay/analysis viewer.
+Click **⚙** to open Settings (port, units, tire thresholds, track map).
 
-## Themes
+## Design System
 
-Three built-in themes selectable from Settings:
-
-| Theme | Accent |
-|-------|--------|
-| Dark (default) | Blue `#3b82f6` |
-| Cobalt2 | Yellow `#ffc600` |
-| Purple | Purple `#c084fc` |
+The UI uses a single graphite + amber theme — a modern data-logger look with
+mono numerals (JetBrains Mono) and Inter for UI text, both bundled locally.
+All colours/typography/radii are CSS custom properties in
+[`src/app.css`](src/app.css); the conventions (including how JS consumers
+like leaflet get token colours) are documented in [`STYLING.md`](STYLING.md).
 
 ## Session Recording
 

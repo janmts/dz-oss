@@ -128,14 +128,15 @@
   }
   .heading-num {
     font-size: clamp(0.55rem, 1.1vw, 0.72rem);
-    font-weight: 800;
+    font-weight: 650;
     color: var(--tx-mid);
+    font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
     letter-spacing: 0.04em;
   }
   .heading-dir {
     font-size: clamp(0.45rem, 0.9vw, 0.6rem);
-    font-weight: 700;
+    font-weight: 650;
     color: var(--ac);
     letter-spacing: 0.08em;
   }

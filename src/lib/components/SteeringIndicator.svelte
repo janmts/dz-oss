@@ -58,8 +58,9 @@
   }
   .steer-val {
     font-size: clamp(0.38rem, 0.75vw, 0.48rem);
-    font-weight: 700;
+    font-weight: 600;
     color: var(--tx-xdim);
+    font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
   }
 

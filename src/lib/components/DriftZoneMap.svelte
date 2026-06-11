@@ -3,6 +3,7 @@
   import type { LayerGroup, Map as LMap, Marker, TileLayer } from 'leaflet';
   import { effectiveMapConfig, type EffectiveMapConfig } from '$lib/mapDefaults';
   import { xyzSimpleCRS } from '$lib/mapCrs';
+  import { themeColor } from '$lib/theme';
   import type { AppSettings, DriftZoneRow, TelemetryPacket, ZonePoint } from '$lib/types';
 
   let {
@@ -142,8 +143,8 @@
       html:
         '<svg width="30" height="30" viewBox="0 0 24 24">' +
         `<path transform="rotate(${headingDeg} 12 12)" ` +
-        'd="M12 2 L19 21 L12 15 L5 21 Z" fill="#fbbf24" ' +
-        'stroke="#000" stroke-width="1.5" stroke-linejoin="round"/></svg>',
+        `d="M12 2 L19 21 L12 15 L5 21 Z" fill="${themeColor('--live-dot', '#ecc274')}" ` +
+        `stroke="${themeColor('--bg-body', '#0f1012')}" stroke-width="1.5" stroke-linejoin="round"/></svg>`,
       iconSize: [30, 30],
       iconAnchor: [15, 15],
     });
@@ -212,14 +213,14 @@
     if (zone) {
       if (zone.leftBoundary.length > 1) {
         L.polyline(zone.leftBoundary.map(worldToLatLng), {
-          color: '#22c55e',
+          color: themeColor('--map-left', '#84b577'),
           weight: 5,
           opacity: 0.95,
         }).addTo(zoneLayer);
       }
       if (zone.rightBoundary.length > 1) {
         L.polyline(zone.rightBoundary.map(worldToLatLng), {
-          color: '#3b82f6',
+          color: themeColor('--map-right', '#82a7c8'),
           weight: 5,
           opacity: 0.95,
         }).addTo(zoneLayer);
@@ -228,14 +229,14 @@
       const finish = derivedFinishGate(zone);
       if (start.length === 2) {
         L.polyline(start.map(worldToLatLng), {
-          color: '#f59e0b',
+          color: themeColor('--gate-a', '#d2a24c'),
           weight: 4,
           dashArray: '10 7',
         }).addTo(zoneLayer);
       }
       if (finish.length === 2) {
         L.polyline(finish.map(worldToLatLng), {
-          color: '#ef4444',
+          color: themeColor('--gate-b', '#d56c62'),
           weight: 4,
           dashArray: '10 7',
         }).addTo(zoneLayer);
@@ -243,7 +244,7 @@
       zone.splitGates.forEach((gate) => {
         if (gate.length !== 2) return;
         L!.polyline(gate.map(worldToLatLng), {
-          color: '#a855f7',
+          color: themeColor('--gate-split', '#a995cf'),
           weight: 3,
           dashArray: '6 6',
           opacity: 0.9,
@@ -298,11 +299,13 @@
     height: 100%;
     min-height: 0;
     background: var(--bg-body);
-    border: 1px solid var(--bd-dim);
-    border-radius: 8px;
+    border: 1px solid var(--bd-subtle);
+    border-radius: var(--r-md);
     overflow: hidden;
     display: flex;
     flex-direction: column;
+    /* Keep leaflet's pane z-indexes from escaping above app overlays. */
+    isolation: isolate;
   }
   .leaflet-host {
     width: 100%;
@@ -340,10 +343,10 @@
     stroke-linejoin: round;
   }
   .boundary.left {
-    stroke: #22c55e;
+    stroke: var(--map-left);
   }
   .boundary.right {
-    stroke: #3b82f6;
+    stroke: var(--map-right);
   }
   .gate {
     fill: none;
@@ -351,18 +354,18 @@
     stroke-dasharray: 10 7;
   }
   .gate.start {
-    stroke: #f59e0b;
+    stroke: var(--gate-a);
   }
   .gate.finish {
-    stroke: #ef4444;
+    stroke: var(--gate-b);
   }
   .gate.split {
-    stroke: #a855f7;
+    stroke: var(--gate-split);
     stroke-dasharray: 6 6;
   }
   .live-dot {
-    fill: #fbbf24;
-    stroke: #020617;
+    fill: var(--live-dot);
+    stroke: var(--bg-body);
     stroke-width: 2;
   }
   :global(.leaflet-container) {

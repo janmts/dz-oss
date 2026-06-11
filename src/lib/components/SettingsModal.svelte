@@ -75,15 +75,6 @@
         </select>
       </label>
 
-      <label>
-        Theme
-        <select bind:value={draft.theme}>
-          <option value="dark">Dark</option>
-          <option value="cobalt2">Cobalt2</option>
-          <option value="purple">Purple</option>
-        </select>
-      </label>
-
       <label class="checkbox-label">
         <input type="checkbox" bind:checked={draft.autoRecord} />
         Auto-record sessions
@@ -219,20 +210,27 @@
 
 <style>
   .overlay {
-    position: fixed; inset: 0; background: rgba(0,0,0,0.7);
-    display: flex; align-items: center; justify-content: center; z-index: 100;
+    position: fixed; inset: 0; background: rgba(0,0,0,0.65);
+    display: flex; align-items: center; justify-content: center;
+    /* Above leaflet panes/controls (which z-index up to ~1000). */
+    z-index: 1200;
   }
   .modal {
-    background: var(--bg-elevated); border: 1px solid var(--bd-muted); border-radius: 10px;
-    padding: 1.5rem; width: 420px; max-height: 88vh; overflow-y: auto;
+    background: var(--bg-panel); border: 1px solid var(--bd-muted); border-radius: var(--r-lg);
+    padding: 1.5rem; width: 440px; max-height: 88vh; overflow-y: auto;
     display: flex; flex-direction: column; gap: 1rem;
+    box-shadow: 0 16px 60px rgba(0, 0, 0, 0.55);
   }
-  h2 { margin: 0; color: var(--tx-hi); font-size: 1.1rem; }
-  label { display: flex; flex-direction: column; gap: 0.3rem; color: var(--tx-mid); font-size: 0.85rem; }
-  .checkbox-label { flex-direction: row; align-items: center; gap: 0.5rem; }
+  h2 { margin: 0; color: var(--tx-hi); font-size: 1rem; font-weight: 650; }
+  label { display: flex; flex-direction: column; gap: 0.3rem; color: var(--tx-mid); font-size: 0.82rem; }
+  .checkbox-label { flex-direction: row; align-items: center; gap: 0.5rem; accent-color: var(--ac); }
   input[type="number"], input[type="text"], select {
-    background: var(--bg-body); border: 1px solid var(--bd-muted); border-radius: 4px;
-    color: var(--tx-hi); padding: 0.4rem; font-size: 0.9rem; width: 100%;
+    background: var(--bg-card); border: 1px solid var(--bd-muted); border-radius: var(--r-sm);
+    color: var(--tx-hi); padding: 0.4rem; font-size: 0.85rem; width: 100%; font-family: inherit;
+  }
+  input[type="number"] { font-family: var(--font-mono); }
+  input:focus, select:focus {
+    outline: none; border-color: color-mix(in srgb, var(--ac) 60%, var(--bg-panel));
   }
   .row3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.5rem; }
   .row3 label { font-size: 0.75rem; }
@@ -244,19 +242,25 @@
   .cal-head { color: var(--tx-dim); font-size: 0.66rem; text-align: center; }
   code { font-size: 0.68rem; color: var(--tx-lo); }
   .cal-btn {
-    align-self: flex-start; background: var(--bg-elevated);
-    border: 1px solid var(--ac); color: var(--ac);
-    padding: 0.35rem 0.8rem; border-radius: 5px; font-size: 0.8rem; cursor: pointer;
+    align-self: flex-start; background: var(--ac-wash);
+    border: 1px solid color-mix(in srgb, var(--ac) 55%, var(--bg-panel)); color: var(--ac);
+    padding: 0.35rem 0.8rem; border-radius: var(--r-sm); font-size: 0.78rem; cursor: pointer;
+    font-family: inherit;
   }
-  .cal-btn:hover { filter: brightness(1.2); }
-  fieldset { border: 1px solid var(--bd-muted); border-radius: 6px; padding: 0.75rem; display: flex; flex-direction: column; gap: 0.5rem; }
-  legend { color: var(--tx-lo); font-size: 0.75rem; padding: 0 0.25rem; }
+  .cal-btn:hover { border-color: var(--ac); }
+  fieldset { border: 1px solid var(--bd-subtle); border-radius: var(--r-md); padding: 0.75rem; display: flex; flex-direction: column; gap: 0.5rem; }
+  legend {
+    color: var(--tx-dim); font-size: 0.62rem; font-weight: 600;
+    letter-spacing: 0.12em; text-transform: uppercase; padding: 0 0.3rem;
+  }
   .actions { display: flex; justify-content: flex-end; gap: 0.5rem; }
   button {
-    padding: 0.4rem 1rem; border-radius: 5px; border: 1px solid var(--bd-muted);
-    background: var(--bg-elevated); color: var(--tx-mid); cursor: pointer; font-size: 0.85rem;
+    padding: 0.4rem 1rem; border-radius: var(--r-sm); border: 1px solid var(--bd-muted);
+    background: var(--bg-elevated); color: var(--tx-mid); cursor: pointer; font-size: 0.82rem;
+    font-family: inherit;
   }
-  button.primary { background: var(--ac); border-color: var(--ac); color: var(--bg-body); }
-  button:hover { filter: brightness(1.2); }
+  button:hover { border-color: var(--bd-strong); color: var(--tx-hi); }
+  button.primary { background: var(--ac); border-color: var(--ac); color: var(--bg-body); font-weight: 650; }
+  button.primary:hover { background: var(--ac-bright); border-color: var(--ac-bright); color: var(--bg-body); }
   .hint { font-size: 0.7rem; color: var(--tx-dim); margin-top: 0.15rem; }
 </style>
