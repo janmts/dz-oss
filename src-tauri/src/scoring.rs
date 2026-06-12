@@ -53,22 +53,31 @@ pub struct ScoringParams {
     /// drift gate, angle barely scales the score — speed × time dominates.
     pub angle_power: f64,
     /// Decline of the angle factor above the sweet spot, expressed as the drop
-    /// by **90°**: the factor reaches `1.0 - this` at 90° and continues at that
+    /// by **90°**: the factor falls by `this` at 90° and continues at that
     /// same per-degree slope until `spin_angle_deg`. (The slope is anchored to
     /// 90°, NOT to the cutoff, so the cutoff can move without changing the
-    /// curve.) 0.0 = flat plateau; NEGATIVE = the factor RISES above the sweet
-    /// spot. Lineage: hardcoded 0.5 → 0.25 (S2 AWD steep runs) → **0.0** here.
-    /// The 0.0 came from per-FRAME VISION ground truth: OCR'ing the on-screen
-    /// drift score every frame gives points/sec directly, and across 3 high-angle
-    /// runs (cars 3999 RWD + 3859, zones 2 & 3) the game's true credit is FLAT
-    /// (≈1.0) from 45° out past 100° — it does NOT decline. This de-confounds the
-    /// old "steep tail = one S2" worry: the under-credit appears within a single
-    /// run (correct at <45°, low above) and across many cars in the 250-run
-    /// integral (bias correlates −0.5 with steep-angle exposure). Flattening
-    /// 0.25→0.0 cut DB MAE 1.78%→1.65%. Vision+integral actually favour a SLIGHT
-    /// rise (≈−0.07); shipped at 0.0 (conservative — keeps factor ≤1) pending more
-    /// cars. Refit `scale` after changing. (Angles observed up to ~115°.)
+    /// curve.) 0.0 = no decline. Lineage: hardcoded 0.5 → 0.25 (S2 AWD steep
+    /// runs) → **0.0** (per-frame vision showed the game's credit does not fall
+    /// off above 45°). The steep-angle RISE the vision data favoured lives in
+    /// `above_sweet_rise`/`rise_saturation_deg`, not in a negative value here;
+    /// this stays as a per-zone override lever. Refit `scale` after changing.
     pub above_sweet_decline: f64,
+    /// Saturating RISE of the angle factor above the sweet spot: the factor
+    /// climbs from 1.0 at `sweet_angle_deg` to `1.0 + this` at
+    /// `rise_saturation_deg` and then holds that plateau out to
+    /// `spin_angle_deg`. Default **0.085** — per-frame vision ground truth
+    /// (OCR of the on-screen tally) across 9 instrumented runs / 4 cars /
+    /// 4 zones / both seasons shows the game's steep-angle credit is already
+    /// ~+5% by 50° and plateaus at ~+8–9% by ~58°, holding flat past 100°
+    /// (pooled in-band ratios at v≥12 m/s, normalized per run by the
+    /// below-sweet band; saturating-step rms 1.35% vs 2.7% for a linear ramp
+    /// vs 6.2% flat). The DB-wide integral agrees: steep-exposure-quartile
+    /// bias −1.6%→−0.5% with no movement (≤0.4pp) in the grass cohorts.
+    /// Refit `scale` after changing.
+    pub above_sweet_rise: f64,
+    /// Angle (deg) at which `above_sweet_rise` is fully reached (the plateau
+    /// start). The rise ramps linearly from `sweet_angle_deg` to here.
+    pub rise_saturation_deg: f64,
     /// Speed (m/s) at which the speed factor saturates (~134 mph).
     pub speed_cap_ms: f64,
     /// Rear combined-slip threshold (normalized, 1.0 ≈ grip limit) for "sliding".
@@ -116,6 +125,8 @@ impl Default for ScoringParams {
             sweet_angle_deg: 45.0,
             angle_power: 0.15,
             above_sweet_decline: 0.0,
+            above_sweet_rise: 0.085,
+            rise_saturation_deg: 58.0,
             speed_cap_ms: 60.0,
             slip_gate: 1.0,
             base_rate: 1000.0,
@@ -124,17 +135,19 @@ impl Default for ScoringParams {
             mult_growth_per_s: 0.0,
             mult_cap: 1.0,
             transition_grace_s: 0.5,
-            // Least-squares fit across valid logged in-game scores (253 runs
-            // across three zones / 7+ cars) with the no-combo, min_angle=10,
-            // angle_power=0.15, above_sweet_decline=0.0, spin_angle=120,
-            // min_speed=1.5 model AND the 2-wheel tarmac gate on; re-derive as
-            // more scores are logged. Marker rows (the all-9s placeholder) and
-            // invalid runs are excluded from the fit. Lineage: 11.024 (no gate)
-            // → 11.038 (gate, min12/ap0.10) → 10.814 (gate, min10/ap0.15) →
-            // 10.813 (spin 90→120) → 10.803 (min_speed 8→1.5) → 10.745 (decline
-            // 0.25→0.0 from per-frame vision) → 10.768 (tarmac gate 1→2 wheels).
-            // DB MAE ~1.41% (was ~1.65% at 1 wheel).
-            scale: 10.768,
+            // Least-squares fit across valid logged in-game scores (346 runs
+            // across four zones / 7+ cars, season-aware: winter runs gated,
+            // spring runs ungated, crawl play-test specimens excluded from the
+            // scale fit) with the no-combo, min_angle=10, angle_power=0.15,
+            // above_sweet_rise=0.085@58°, spin_angle=120, min_speed=1.5 model
+            // AND the 2-wheel tarmac gate on; re-derive as more scores are
+            // logged. Marker rows (the all-9s placeholder) and invalid runs are
+            // excluded from the fit. Lineage: 11.024 (no gate) → 11.038 (gate,
+            // min12/ap0.10) → 10.814 (gate, min10/ap0.15) → 10.813 (spin
+            // 90→120) → 10.803 (min_speed 8→1.5) → 10.745 (decline 0.25→0.0
+            // from per-frame vision) → 10.768 (tarmac gate 1→2 wheels) →
+            // 10.668 (saturating steep-angle rise 0.085@58°).
+            scale: 10.668,
         }
     }
 }
@@ -239,8 +252,9 @@ pub fn is_scoring_packet(pkt: &TelemetryPacket, p: &ScoringParams) -> bool {
 }
 
 /// Angle contribution: ramps 0->1 up to the sweet spot using `angle_power`, then
-/// declines linearly toward `1.0 - above_sweet_decline` at the spin angle (the
-/// drop to 0 past spin is the spin-out break). Zero outside the [min, spin] band.
+/// RISES to a `1.0 + above_sweet_rise` plateau at `rise_saturation_deg` (minus
+/// any `above_sweet_decline` slope, kept as an override lever). Zero outside the
+/// [min, spin] band — the drop to 0 past spin is the spin-out break.
 fn angle_factor(angle_deg: f64, p: &ScoringParams) -> f64 {
     if angle_deg < p.min_angle_deg || angle_deg > p.spin_angle_deg {
         return 0.0;
@@ -250,16 +264,23 @@ fn angle_factor(angle_deg: f64, p: &ScoringParams) -> f64 {
         let power = p.angle_power.max(1e-6);
         ramp.powf(power)
     } else {
-        // Linear decline from 1.0 at the sweet spot at a FIXED rate: it reaches
-        // (1 - above_sweet_decline) at 90° and continues at that same slope up to
+        // Saturating rise: per-frame vision shows the game's credit climbs fast
+        // just past the sweet spot and plateaus (~+8.5% by ~58°), holding flat
+        // out past 100°.
+        let rise_span = (p.rise_saturation_deg - p.sweet_angle_deg).max(1e-6);
+        let rise_ramp = ((angle_deg - p.sweet_angle_deg) / rise_span).clamp(0.0, 1.0);
+        // Linear decline from 1.0 at the sweet spot at a FIXED rate: it falls by
+        // above_sweet_decline at 90° and continues at that same slope up to
         // spin_angle_deg (past which the guard above returns 0). Anchoring the
         // slope to 90° rather than to spin_angle_deg decouples "how fast credit
         // falls off" from "where a drift counts as spun out", so the cutoff can
         // be raised past 90° (the game scores slides to ~115°) without changing
-        // the well-fit 45–90° band. Clamp at 0 for safety on extreme configs.
+        // the 45–90° band. Clamp at 0 for safety on extreme configs.
         const DECLINE_REF_DEG: f64 = 90.0;
         let span = (DECLINE_REF_DEG - p.sweet_angle_deg).max(1e-6);
-        (1.0 - p.above_sweet_decline * (angle_deg - p.sweet_angle_deg) / span).max(0.0)
+        (1.0 + p.above_sweet_rise * rise_ramp
+            - p.above_sweet_decline * (angle_deg - p.sweet_angle_deg) / span)
+            .max(0.0)
     }
 }
 
@@ -718,20 +739,30 @@ mod tests {
         assert!(angle_factor(100.0, &params) > 0.0);
         assert_eq!(angle_factor(130.0, &params), 0.0);
         // Raising the cutoff must NOT change the 45–90° band: the decline is
-        // anchored at 90°, so factor(90°) is exactly 1 − above_sweet_decline.
-        assert!((angle_factor(90.0, &params) - (1.0 - params.above_sweet_decline)).abs() < 1e-9);
+        // anchored at 90° and 90° is past the rise plateau, so factor(90°) is
+        // exactly 1 + above_sweet_rise − above_sweet_decline.
+        let expect = 1.0 + params.above_sweet_rise - params.above_sweet_decline;
+        assert!((angle_factor(90.0, &params) - expect).abs() < 1e-9);
     }
 
     #[test]
-    fn default_angle_factor_is_flat_above_sweet() {
-        // above_sweet_decline defaults to 0.0 (per-frame vision ground truth shows
-        // the game's angle credit does NOT fall off above the 45° sweet spot), so
-        // the factor holds at 1.0 from the sweet spot out to the spin cutoff.
+    fn default_angle_factor_rises_to_plateau_above_sweet() {
+        // Per-frame vision ground truth (9 runs / 4 cars / 4 zones): the game's
+        // steep-angle credit climbs fast past the 45° sweet spot and saturates
+        // at ~+8.5% by ~58°, holding that plateau out past 100°. The factor is
+        // exactly 1.0 at the sweet spot, halfway up mid-ramp, and flat at
+        // 1 + above_sweet_rise from the saturation angle to the spin cutoff.
         let params = ScoringParams::default();
         assert_eq!(params.above_sweet_decline, 0.0);
-        for a in [45.0, 60.0, 90.0, 115.0] {
-            assert!((angle_factor(a, &params) - 1.0).abs() < 1e-9,
-                    "expected flat 1.0 at {a}°, got {}", angle_factor(a, &params));
+        assert_eq!(params.above_sweet_rise, 0.085);
+        assert_eq!(params.rise_saturation_deg, 58.0);
+        assert!((angle_factor(45.0, &params) - 1.0).abs() < 1e-9);
+        let mid = 1.0 + params.above_sweet_rise * 0.5;
+        assert!((angle_factor(51.5, &params) - mid).abs() < 1e-9);
+        let plateau = 1.0 + params.above_sweet_rise;
+        for a in [58.0, 75.0, 90.0, 115.0] {
+            assert!((angle_factor(a, &params) - plateau).abs() < 1e-9,
+                    "expected plateau {plateau} at {a}°, got {}", angle_factor(a, &params));
         }
     }
 

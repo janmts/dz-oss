@@ -1,6 +1,6 @@
 {
   "name": "dz-oss",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "DZ-OSS — Forza Horizon 6 drift-scoring workbench, real-time telemetry, and session recording",
   "author": "janmts <contact@janmts.com>",
   "homepage": "https://github.com/janmts/dz-oss",
