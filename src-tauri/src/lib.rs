@@ -116,6 +116,28 @@ pub fn run() {
             update::install_update,
         ])
         .setup(move |app| {
+            // Create the main window in Rust (rather than tauri.conf.json) so we
+            // can hook its asset responses: bundled map tiles never change, so we
+            // tag them Cache-Control: immutable and the webview stops refetching
+            // (and white-flashing) tiles it already had while panning/zooming.
+            // Scoped to /maptiles so index.html/JS still update normally.
+            tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
+                .title("DZ-OSS")
+                .inner_size(1440.0, 900.0)
+                .min_inner_size(1024.0, 600.0)
+                .resizable(true)
+                .on_web_resource_request(|request, response| {
+                    if request.uri().path().starts_with("/maptiles/") {
+                        response.headers_mut().insert(
+                            tauri::http::header::CACHE_CONTROL,
+                            tauri::http::HeaderValue::from_static(
+                                "public, max-age=31536000, immutable",
+                            ),
+                        );
+                    }
+                })
+                .build()?;
+
             let handle = app.handle().clone();
 
             // Forward broadcast events to the webview via the original event names.
