@@ -185,8 +185,11 @@ export async function createGameMap(
     // create those tiles — transient zoom overscan shows the dark container
     // background instead of flashing near-white gray.
     bounds: cameraBounds ?? tileBounds ?? undefined,
-    // Tiles are bundled/local: keep a generous ring of DOM tiles alive.
+    // Tiles are bundled/local: keep a generous ring of DOM tiles alive, and
+    // create elements for newly exposed slots sooner during a pan (default
+    // 200 ms reads as a visible lag at medium drag speeds).
     keepBuffer: 6,
+    updateInterval: 100,
   }).addTo(map);
 
   const overlay = L.layerGroup().addTo(map);
@@ -234,60 +237,78 @@ export async function createGameMap(
   const WARM_KEEP = 600;
   const warmed = new Map<string, HTMLImageElement>();
 
-  function warmTiles() {
-    if (!warmPixMin || !warmPixMax) return;
-    const cur = Math.round(map.getZoom());
-    let budget = 120;
-    for (const z of [cur, cur - 1, cur + 1]) {
-      if (z < cfg.minZoom || z > cfg.maxZoom || budget <= 0) continue;
-      const down = 2 ** (cfg.maxZoom - z);
-      // Pyramid/content extent in tile coords at this level.
-      const ex0 = Math.floor(warmPixMin[0] / down / cfg.tileSize);
-      const ey0 = Math.floor(warmPixMin[1] / down / cfg.tileSize);
-      const ex1 = Math.ceil(warmPixMax[0] / down / cfg.tileSize) - 1;
-      const ey1 = Math.ceil(warmPixMax[1] / down / cfg.tileSize) - 1;
-      // Viewport (padded wider at the current level to stay ahead of pans).
-      const llb = map.getBounds().pad(z === cur ? 0.5 : 0.15);
-      const pA = map.project(llb.getNorthWest(), z);
-      const pB = map.project(llb.getSouthEast(), z);
-      const x0 = Math.max(ex0, Math.floor(Math.min(pA.x, pB.x) / cfg.tileSize));
-      const x1 = Math.min(ex1, Math.floor(Math.max(pA.x, pB.x) / cfg.tileSize));
-      const y0 = Math.max(ey0, Math.floor(Math.min(pA.y, pB.y) / cfg.tileSize));
-      const y1 = Math.min(ey1, Math.floor(Math.max(pA.y, pB.y) / cfg.tileSize));
-      for (let y = y0; y <= y1 && budget > 0; y++) {
-        for (let x = x0; x <= x1 && budget > 0; x++) {
-          const url = cfg.tileUrl
-            .replace('{z}', String(z))
-            .replace('{x}', String(x))
-            .replace('{y}', String(y));
-          if (warmed.has(url)) continue;
-          const img = new Image();
-          img.decoding = 'async';
-          img.src = url;
-          warmed.set(url, img);
-          budget--;
-          if (warmed.size > WARM_KEEP) {
-            const oldest = warmed.keys().next().value;
-            if (oldest !== undefined) warmed.delete(oldest);
-          }
+  // Warm one level's tiles for the (padded) viewport; returns leftover budget.
+  function warmLevel(z: number, pad: number, budget: number): number {
+    if (!warmPixMin || !warmPixMax || z < cfg.minZoom || z > cfg.maxZoom) return budget;
+    const down = 2 ** (cfg.maxZoom - z);
+    // Pyramid/content extent in tile coords at this level.
+    const ex0 = Math.floor(warmPixMin[0] / down / cfg.tileSize);
+    const ey0 = Math.floor(warmPixMin[1] / down / cfg.tileSize);
+    const ex1 = Math.ceil(warmPixMax[0] / down / cfg.tileSize) - 1;
+    const ey1 = Math.ceil(warmPixMax[1] / down / cfg.tileSize) - 1;
+    const llb = map.getBounds().pad(pad);
+    const pA = map.project(llb.getNorthWest(), z);
+    const pB = map.project(llb.getSouthEast(), z);
+    const x0 = Math.max(ex0, Math.floor(Math.min(pA.x, pB.x) / cfg.tileSize));
+    const x1 = Math.min(ex1, Math.floor(Math.max(pA.x, pB.x) / cfg.tileSize));
+    const y0 = Math.max(ey0, Math.floor(Math.min(pA.y, pB.y) / cfg.tileSize));
+    const y1 = Math.min(ey1, Math.floor(Math.max(pA.y, pB.y) / cfg.tileSize));
+    for (let y = y0; y <= y1 && budget > 0; y++) {
+      for (let x = x0; x <= x1 && budget > 0; x++) {
+        const url = cfg.tileUrl
+          .replace('{z}', String(z))
+          .replace('{x}', String(x))
+          .replace('{y}', String(y));
+        if (warmed.has(url)) continue;
+        const img = new Image();
+        img.decoding = 'async';
+        img.src = url;
+        warmed.set(url, img);
+        budget--;
+        if (warmed.size > WARM_KEEP) {
+          const oldest = warmed.keys().next().value;
+          if (oldest !== undefined) warmed.delete(oldest);
         }
       }
     }
+    return budget;
   }
-  // Debounced: a wheel burst fires moveend per half-level step, and decode
-  // bursts mid-animation compete with the zoom rasterisation for frame time
-  // (visible as compositor misses). Warm only once things go quiet.
+
+  // At rest: current level wide, neighbouring zoom levels narrow.
+  function warmSettled() {
+    const cur = Math.round(map.getZoom());
+    let budget = warmLevel(cur, 0.5, 120);
+    budget = warmLevel(cur - 1, 0.15, budget);
+    warmLevel(cur + 1, 0.15, budget);
+  }
+
+  // Settled warm is debounced: a wheel burst fires moveend per half-level
+  // step, and decode bursts mid-animation compete with the zoom rasterisation
+  // for frame time.
   let warmTimer: ReturnType<typeof setTimeout> | null = null;
   function scheduleWarm() {
     if (warmTimer) clearTimeout(warmTimer);
     warmTimer = setTimeout(() => {
       warmTimer = null;
       if (zoomAnimating) scheduleWarm();
-      else warmTiles();
+      else warmSettled();
     }, 200);
   }
   map.on('moveend', scheduleWarm);
   scheduleWarm();
+
+  // During a drag, moveend never fires — so without this the leading edge is
+  // always cold and tiles assemble visibly, puzzle-style. Throttled on `move`:
+  // keep a full extra viewport of current-level tiles warm in every direction
+  // while the map is in motion (dedupe makes repeat calls nearly free).
+  let lastMoveWarm = 0;
+  map.on('move', () => {
+    if (zoomAnimating) return;
+    const now = Date.now();
+    if (now - lastMoveWarm < 120) return;
+    lastMoveWarm = now;
+    warmLevel(Math.round(map.getZoom()), 1.0, 100);
+  });
 
   // --- user-interaction bookkeeping (for follow etiquette) -----------------
   let userBusyUntil = 0;
