@@ -174,11 +174,12 @@ export async function createGameMap(
     maxNativeZoom: cfg.maxZoom,
     tileSize: cfg.tileSize,
     noWrap: true,
-    bounds: tileBounds ?? undefined,
-    // Tiles are bundled/local: keep a generous ring loaded and don't reshuffle
-    // the grid mid-animation.
+    // Clamped surfaces never legitimately show the filler ring, so don't even
+    // create those tiles — transient zoom overscan shows the dark container
+    // background instead of flashing near-white gray.
+    bounds: cameraBounds ?? tileBounds ?? undefined,
+    // Tiles are bundled/local: keep a generous ring of DOM tiles alive.
     keepBuffer: 6,
-    updateWhenZooming: false,
   }).addTo(map);
 
   const overlay = L.layerGroup().addTo(map);
@@ -210,6 +211,64 @@ export async function createGameMap(
     applyZoomFloor();
   });
   resizeObserver.observe(host);
+
+  // --- neighbour-tile prewarm ------------------------------------------------
+  // Leaflet only keeps DOM tiles for the current level (+keepBuffer ring), so a
+  // zoom step or a pan into fresh territory starts from a cold fetch+decode —
+  // visible as late pop-in even with bundled tiles, and the desktop webview's
+  // asset protocol doesn't HTTP-cache between requests. After each settle,
+  // fetch the tiles covering (a padded copy of) the view at the current and
+  // neighbouring integer zooms; holding the Image objects keeps the decoded
+  // resources alive in the renderer's memory cache, so when Leaflet creates a
+  // tile with the same URL it paints immediately. Bundled source only — a
+  // custom source has unknown coverage and would 404.
+  const warmPixMin = cameraBounds ? cfg.contentPixelMin : cfg.pixelMin;
+  const warmPixMax = cameraBounds ? cfg.contentPixelMax : cfg.pixelMax;
+  const WARM_KEEP = 600;
+  const warmed = new Map<string, HTMLImageElement>();
+
+  function warmTiles() {
+    if (!warmPixMin || !warmPixMax) return;
+    const cur = Math.round(map.getZoom());
+    let budget = 120;
+    for (const z of [cur, cur - 1, cur + 1]) {
+      if (z < cfg.minZoom || z > cfg.maxZoom || budget <= 0) continue;
+      const down = 2 ** (cfg.maxZoom - z);
+      // Pyramid/content extent in tile coords at this level.
+      const ex0 = Math.floor(warmPixMin[0] / down / cfg.tileSize);
+      const ey0 = Math.floor(warmPixMin[1] / down / cfg.tileSize);
+      const ex1 = Math.ceil(warmPixMax[0] / down / cfg.tileSize) - 1;
+      const ey1 = Math.ceil(warmPixMax[1] / down / cfg.tileSize) - 1;
+      // Viewport (padded wider at the current level to stay ahead of pans).
+      const llb = map.getBounds().pad(z === cur ? 0.5 : 0.15);
+      const pA = map.project(llb.getNorthWest(), z);
+      const pB = map.project(llb.getSouthEast(), z);
+      const x0 = Math.max(ex0, Math.floor(Math.min(pA.x, pB.x) / cfg.tileSize));
+      const x1 = Math.min(ex1, Math.floor(Math.max(pA.x, pB.x) / cfg.tileSize));
+      const y0 = Math.max(ey0, Math.floor(Math.min(pA.y, pB.y) / cfg.tileSize));
+      const y1 = Math.min(ey1, Math.floor(Math.max(pA.y, pB.y) / cfg.tileSize));
+      for (let y = y0; y <= y1 && budget > 0; y++) {
+        for (let x = x0; x <= x1 && budget > 0; x++) {
+          const url = cfg.tileUrl
+            .replace('{z}', String(z))
+            .replace('{x}', String(x))
+            .replace('{y}', String(y));
+          if (warmed.has(url)) continue;
+          const img = new Image();
+          img.decoding = 'async';
+          img.src = url;
+          warmed.set(url, img);
+          budget--;
+          if (warmed.size > WARM_KEEP) {
+            const oldest = warmed.keys().next().value;
+            if (oldest !== undefined) warmed.delete(oldest);
+          }
+        }
+      }
+    }
+  }
+  map.on('moveend', warmTiles);
+  warmTiles();
 
   // --- user-interaction bookkeeping (for follow etiquette) -----------------
   let userBusyUntil = 0;
@@ -379,6 +438,7 @@ export async function createGameMap(
     host.removeEventListener('wheel', markBusy);
     host.removeEventListener('pointerdown', markBusy);
     removeLiveArrow();
+    warmed.clear();
     map.remove();
   }
 
