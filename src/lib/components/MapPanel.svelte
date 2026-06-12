@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import type { Map as LMap, TileLayer, LayerGroup, Marker } from 'leaflet';
+  import type { Map as LMap, TileLayer, LayerGroup, LatLngBounds, Marker } from 'leaflet';
   import TrackMap from './TrackMap.svelte';
   import { effectiveMapConfig } from '$lib/mapDefaults';
   import { xyzSimpleCRS } from '$lib/mapCrs';
+  import { applyLineWeights, scaledWeight, tileExtentBounds, type WeightedLine } from '$lib/mapView';
   import { LAP_PALETTE, themeColor } from '$lib/theme';
   import type { TelemetryPacket, AppSettings } from '$lib/types';
 
@@ -67,6 +68,10 @@
   let polylineLayer: LayerGroup | null = null;
   let markerLayer: LayerGroup | null = null;
   let playerMarker: Marker | null = null;
+  let extentBounds: LatLngBounds | null = null;
+  // Trace segments + the zoom at which they show full weight (anchored to fits).
+  let staticLines: WeightedLine[] = [];
+  let weightRefZoom = 0;
 
   onMount(async () => {
     if (!usable || !host) return;
@@ -82,6 +87,9 @@
       // Hard-stop at maxBounds (no rubber-banding past the track).
       maxBoundsViscosity: 1.0,
     });
+    // Constrain camera + tile requests to the bundled tile extent (no overshoot
+    // into empty space, no 404s for tiles that were never downloaded).
+    extentBounds = tileExtentBounds(L, map, cfg);
     tiles = L.tileLayer(cfg.tileUrl, {
       minZoom: cfg.minZoom,
       maxZoom: cfg.viewMaxZoom,
@@ -90,14 +98,21 @@
       maxNativeZoom: cfg.maxZoom,
       tileSize: cfg.tileSize,
       noWrap: true,
+      bounds: extentBounds ?? undefined,
     }).addTo(map);
+    if (extentBounds) map.setMaxBounds(extentBounds.pad(0.05));
     polylineLayer = L.layerGroup().addTo(map);
     markerLayer = L.layerGroup().addTo(map);
+    weightRefZoom = cfg.defaultZoom;
     // Open at the configured default view.
     map.setView(
       map.unproject(L.point(cfg.defaultCenter[0], cfg.defaultCenter[1]), cfg.maxZoom),
       cfg.defaultZoom
     );
+    // Keep trace thickness proportional to the map as the user zooms.
+    map.on('zoomend', () => {
+      if (map) applyLineWeights(staticLines, map.getZoom(), weightRefZoom);
+    });
     redraw();
 
     resizeObserver = new ResizeObserver(() => map?.invalidateSize());
@@ -124,6 +139,7 @@
     const valid = points.filter((p) => p.positionX !== 0 || p.positionZ !== 0);
     if (valid.length === 0) {
       polylineLayer.clearLayers();
+      staticLines = [];
       playerMarker?.remove();
       playerMarker = null;
       return;
@@ -131,15 +147,18 @@
 
     if (drawLine && valid.length > 1) {
       polylineLayer.clearLayers();
+      staticLines = [];
+      const traceWeight = compact ? 2 : 3;
       let seg: ReturnType<typeof pixToLatLng>[] = [];
       let lap = valid[0].lapNumber;
       const flush = () => {
         if (seg.length > 1) {
-          L!.polyline(seg, {
+          const line = L!.polyline(seg, {
             color: colorByLap ? LAP_COLORS[lap % LAP_COLORS.length] : themeColor('--ac', '#d2a24c'),
-            weight: compact ? 2 : 3,
+            weight: scaledWeight(traceWeight, map!.getZoom(), weightRefZoom),
             opacity: 0.9,
           }).addTo(polylineLayer!);
+          staticLines.push({ line, base: traceWeight });
         }
       };
       for (const p of valid) {
@@ -153,6 +172,7 @@
       flush();
     } else if (!drawLine) {
       polylineLayer.clearLayers();
+      staticLines = [];
     }
 
     const mi =
@@ -191,6 +211,7 @@
           map.fitBounds(b, { padding: [20, 20], maxZoom: cfg.defaultZoom });
           map.setMinZoom(map.getZoom());
           map.setMaxBounds(b.pad(0.05));
+          weightRefZoom = map.getZoom();
           boundsApplied = true;
         }
       } else if (drawLine && valid.length > 1) {
@@ -198,11 +219,13 @@
         clearBounds();
         const b = L.latLngBounds(valid.map((p) => pixToLatLng(worldToPix(p))));
         map.fitBounds(b, { padding: [20, 20], maxZoom: cfg.defaultZoom });
+        weightRefZoom = map.getZoom();
       } else {
         // Free-roam / live marker: follow the player at the user's current zoom.
         clearBounds();
         map.setView(ll, map.getZoom(), { animate: false });
       }
+      applyLineWeights(staticLines, map.getZoom(), weightRefZoom);
     }
   }
 
@@ -210,7 +233,9 @@
   function clearBounds() {
     if (!boundsApplied || !map) return;
     map.setMinZoom(cfg.minZoom);
-    map.setMaxBounds(undefined);
+    // Fall back to the tile extent (not fully unbounded) so free-roam/live can't
+    // overshoot the map and 404 for tiles that were never downloaded.
+    map.setMaxBounds(extentBounds ?? undefined);
     boundsApplied = false;
   }
 
