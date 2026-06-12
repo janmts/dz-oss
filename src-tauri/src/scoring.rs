@@ -158,6 +158,21 @@ impl ScoringParams {
     pub fn from_config(config: &serde_json::Value) -> Self {
         serde_json::from_value(config.clone()).unwrap_or_default()
     }
+
+    /// Season-adjusted copy: in seasons where off-tarmac surfaces pay (every
+    /// season but winter — see [`crate::season`]), the tarmac-contact gate is
+    /// moot and is switched off, so grass banks at full rate. Because
+    /// [`is_scoring_packet`] follows the same params, grass dwell then no
+    /// longer trips the score-starvation abort either (a real spring failure
+    /// mode: ~6 s grass excursions the game happily pays through). Winter
+    /// keeps the gate exactly as configured.
+    pub fn for_season(&self, season: crate::season::Season) -> Self {
+        let mut p = self.clone();
+        if season.off_tarmac_pays() {
+            p.require_tarmac_contact = false;
+        }
+        p
+    }
 }
 
 /// Per-run scoring result plus the breakdown used for display and tuning.
@@ -620,6 +635,31 @@ mod tests {
         assert_eq!(r.score, 0.0, "all-four-off-tarmac must not score");
         // It still counts as drift time / sliding for the breakdown.
         assert!(r.drift_time_s > 2.5);
+    }
+
+    #[test]
+    fn off_tarmac_pays_full_rate_outside_winter() {
+        // The off-tarmac rule is seasonal: winter zeroes packets with too few
+        // wheels on tarmac, every other season pays grass at FULL rate
+        // (measured in spring: a heavy-grass run re-scored ungated matched the
+        // game to −0.6% vs −15.1% under the winter gate, and per-moment vision
+        // showed grass moments banking at the normal rate).
+        let grass: Vec<_> = (0..180)
+            .map(|i| at(all_wheels_off_tarmac(drifting_packet(40.0, 20.0)), i * 16))
+            .collect();
+        let tarmac: Vec<_> = (0..180)
+            .map(|i| at(drifting_packet(40.0, 20.0), i * 16))
+            .collect();
+        let winter = ScoringParams::default().for_season(crate::season::Season::Winter);
+        assert_eq!(score_run(&grass, &winter).score, 0.0, "winter keeps the gate");
+        let spring = ScoringParams::default().for_season(crate::season::Season::Spring);
+        let grass_score = score_run(&grass, &spring).score;
+        let tarmac_score = score_run(&tarmac, &spring).score;
+        assert!(grass_score > 0.0, "spring grass must bank");
+        assert!(
+            (grass_score - tarmac_score).abs() < 1e-6,
+            "spring grass pays the same as tarmac ({grass_score} vs {tarmac_score})"
+        );
     }
 
     #[test]

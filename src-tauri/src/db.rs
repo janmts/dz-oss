@@ -651,11 +651,12 @@ pub fn get_drift_run_preroll(conn: &Connection, run_id: i64) -> Result<Vec<Vec<u
     rows.collect()
 }
 
-/// (run_id, zone_id) for every run — lets the recompute pass pick the right
-/// per-zone scoring config without loading full rows.
-pub fn list_drift_run_refs(conn: &Connection) -> Result<Vec<(i64, Option<i64>)>> {
-    let mut stmt = conn.prepare("SELECT id, zone_id FROM drift_runs ORDER BY id ASC")?;
-    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+/// (run_id, zone_id, started_at) for every run — lets the recompute pass pick
+/// the right per-zone scoring config AND the run's season (derived from
+/// started_at) without loading full rows.
+pub fn list_drift_run_refs(conn: &Connection) -> Result<Vec<(i64, Option<i64>, i64)>> {
+    let mut stmt = conn.prepare("SELECT id, zone_id, started_at FROM drift_runs ORDER BY id ASC")?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
     rows.collect()
 }
 
@@ -733,6 +734,9 @@ pub struct DriftRunRow {
     pub zone_run_number: i64,
     pub zone_id: Option<i64>,
     pub started_at: i64,
+    /// In-game season the run was driven in, derived from `started_at` against
+    /// the weekly schedule (see `crate::season`) — not a stored column.
+    pub season: &'static str,
     pub ended_at: Option<i64>,
     pub car_ordinal: i32,
     pub car_class: i32,
@@ -770,11 +774,13 @@ pub fn list_drift_runs(conn: &Connection) -> Result<Vec<DriftRunRow>> {
     )?;
     let rows = stmt.query_map([], |r| {
         let breakdown: Option<String> = r.get(14)?;
+        let started_at: i64 = r.get(2)?;
         Ok(DriftRunRow {
             id: r.get(0)?,
             zone_run_number: r.get(16)?,
             zone_id: r.get(1)?,
-            started_at: r.get(2)?,
+            started_at,
+            season: crate::season::season_at_utc_ms(started_at).as_str(),
             ended_at: r.get(3)?,
             car_ordinal: r.get(4)?,
             car_class: r.get(5)?,

@@ -112,6 +112,10 @@ export interface DriftRunRow {
   zoneRunNumber: number;
   zoneId: number | null;
   startedAt: number;
+  /** In-game season the run was driven in, derived server-side from startedAt
+   *  against the weekly schedule. Scoring is season-aware: outside winter,
+   *  off-tarmac surfaces pay. */
+  season: 'spring' | 'summer' | 'autumn' | 'winter';
   endedAt: number | null;
   carOrdinal: number;
   carClass: number;
