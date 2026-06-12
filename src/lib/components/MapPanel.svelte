@@ -1,9 +1,9 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import type { Map as LMap, TileLayer, LayerGroup, Marker } from 'leaflet';
+  import type { LatLng, Polyline } from 'leaflet';
   import TrackMap from './TrackMap.svelte';
   import { effectiveMapConfig } from '$lib/mapDefaults';
-  import { xyzSimpleCRS } from '$lib/mapCrs';
+  import { createGameMap, makeCalib, type GameMap } from '$lib/mapView';
   import { LAP_PALETTE, themeColor } from '$lib/theme';
   import type { TelemetryPacket, AppSettings } from '$lib/types';
 
@@ -28,200 +28,174 @@
   } = $props();
 
   const LAP_COLORS = LAP_PALETTE;
+  // Trace points closer than this (world units ≈ metres) to the last drawn
+  // vertex are skipped — at 64 Hz consecutive packets are centimetres apart,
+  // and sub-pixel vertices only bloat the polylines.
+  const TRACE_MIN_STEP = 2.0;
 
   // Resolves to the FH6 Japan preset unless the user opted into overriding.
   let cfg = $derived(effectiveMapConfig(settings));
-
-  // Independent per-axis linear fit from two reference points: world X → pixel
-  // X, world Z → pixel Y. A rotation/similarity can't represent the axis
-  // reflection an overhead game map needs (world Z grows north, pixel Y grows
-  // south); per-axis slopes carry their own sign, so this stays correct.
-  let calib = $derived.by(() => {
-    const aw = cfg.calAWorld, bw = cfg.calBWorld;
-    const ap = cfg.calAPix, bp = cfg.calBPix;
-    const dWX = bw[0] - aw[0];
-    const dWZ = bw[1] - aw[1];
-    // Need the two points to differ on both world axes.
-    if (Math.abs(dWX) < 1e-6 || Math.abs(dWZ) < 1e-6) return null;
-    const mX = (bp[0] - ap[0]) / dWX;
-    const mZ = (bp[1] - ap[1]) / dWZ;
-    return {
-      mX,
-      mZ,
-      bX: ap[0] - mX * aw[0],
-      bY: ap[1] - mZ * aw[1],
-    };
-  });
-
-  let usable = $derived(!!calib);
-
-  function worldToPix(p: TelemetryPacket): [number, number] {
-    const c = calib!;
-    return [c.mX * p.positionX + c.bX, c.mZ * p.positionZ + c.bY];
-  }
+  let usable = $derived(!!makeCalib(cfg));
 
   let host = $state<HTMLDivElement | null>(null);
-  let L: typeof import('leaflet') | null = null;
-  let map: LMap | null = null;
-  let tiles: TileLayer | null = null;
-  let polylineLayer: LayerGroup | null = null;
-  let markerLayer: LayerGroup | null = null;
-  let playerMarker: Marker | null = null;
+  let gm: GameMap | null = null;
+
+  // Incremental trace state. The points array identity is the dataset key:
+  // the same array growing means append-only work; a new array (new replay /
+  // new session selection) rebuilds from scratch.
+  let lastPoints: TelemetryPacket[] | null = null;
+  let valid: TelemetryPacket[] = [];
+  let scanned = 0;
+  let drawnIdx = 0;
+  let curSeg: Polyline | null = null;
+  let curLap = -1;
+  let lastSegLL: LatLng | null = null;
+  let lastWorld: { x: number; z: number } | null = null;
+  let lastDrawLine: boolean | null = null;
+  let lastColorByLap: boolean | null = null;
+  let lastFixedTrace: boolean | null = null;
+  let camLocked = false;
+  let lastTraceFitAt = 0;
 
   onMount(async () => {
     if (!usable || !host) return;
-    L = await import('leaflet');
-    await import('leaflet/dist/leaflet.css');
-
-    map = L.map(host, {
-      crs: xyzSimpleCRS(L),
-      attributionControl: false,
-      zoomControl: !compact,
-      minZoom: cfg.minZoom,
-      maxZoom: cfg.viewMaxZoom,
-      // Hard-stop at maxBounds (no rubber-banding past the track).
-      maxBoundsViscosity: 1.0,
-    });
-    tiles = L.tileLayer(cfg.tileUrl, {
-      minZoom: cfg.minZoom,
-      maxZoom: cfg.viewMaxZoom,
-      // Tiles only exist up to the native zoom; beyond it Leaflet upscales the
-      // last level so the user can still zoom further in.
-      maxNativeZoom: cfg.maxZoom,
-      tileSize: cfg.tileSize,
-      noWrap: true,
-    }).addTo(map);
-    polylineLayer = L.layerGroup().addTo(map);
-    markerLayer = L.layerGroup().addTo(map);
-    // Open at the configured default view.
-    map.setView(
-      map.unproject(L.point(cfg.defaultCenter[0], cfg.defaultCenter[1]), cfg.maxZoom),
-      cfg.defaultZoom
-    );
-    redraw();
-
-    resizeObserver = new ResizeObserver(() => map?.invalidateSize());
-    resizeObserver.observe(host);
+    gm = await createGameMap(host, cfg, { zoomControl: !compact });
+    update();
   });
-
-  let resizeObserver: ResizeObserver | null = null;
 
   onDestroy(() => {
-    resizeObserver?.disconnect();
-    playerMarker?.remove();
-    playerMarker = null;
-    map?.remove();
-    map = null;
+    gm?.destroy();
+    gm = null;
   });
 
-  function pixToLatLng(px: [number, number]) {
-    return map!.unproject(L!.point(px[0], px[1]), cfg.maxZoom);
-  }
-
-  function redraw() {
-    if (!map || !L || !polylineLayer || !markerLayer || !calib) return;
-
-    const valid = points.filter((p) => p.positionX !== 0 || p.positionZ !== 0);
-    if (valid.length === 0) {
-      polylineLayer.clearLayers();
-      playerMarker?.remove();
-      playerMarker = null;
-      return;
-    }
-
-    if (drawLine && valid.length > 1) {
-      polylineLayer.clearLayers();
-      let seg: ReturnType<typeof pixToLatLng>[] = [];
-      let lap = valid[0].lapNumber;
-      const flush = () => {
-        if (seg.length > 1) {
-          L!.polyline(seg, {
-            color: colorByLap ? LAP_COLORS[lap % LAP_COLORS.length] : themeColor('--ac', '#d2a24c'),
-            weight: compact ? 2 : 3,
-            opacity: 0.9,
-          }).addTo(polylineLayer!);
-        }
-      };
-      for (const p of valid) {
-        if (colorByLap && p.lapNumber !== lap && seg.length) {
-          flush();
-          seg = [seg[seg.length - 1]];
-          lap = p.lapNumber;
-        }
-        seg.push(pixToLatLng(worldToPix(p)));
-      }
-      flush();
-    } else if (!drawLine) {
-      polylineLayer.clearLayers();
-    }
-
-    const mi =
-      currentIndex >= 0 && currentIndex < points.length
-        ? currentIndex
-        : valid.length - 1;
-    const mp = points[mi] ?? valid[valid.length - 1];
-    if (mp && (mp.positionX !== 0 || mp.positionZ !== 0)) {
-      const ll = pixToLatLng(worldToPix(mp));
-      const headingDeg = ((mp.yaw * 180) / Math.PI) % 360;
-      const sz = compact ? 22 : 28;
-      const icon = L.divIcon({
-        className: 'player-arrow',
-        html:
-          `<svg width="${sz}" height="${sz}" viewBox="0 0 24 24">` +
-          `<path transform="rotate(${headingDeg} 12 12)" ` +
-          `d="M12 2 L19 21 L12 15 L5 21 Z" fill="${themeColor('--live-dot', '#ecc274')}" ` +
-          `stroke="${themeColor('--bg-body', '#0f1012')}" stroke-width="1.5" stroke-linejoin="round"/></svg>`,
-        iconSize: [sz, sz],
-        iconAnchor: [sz / 2, sz / 2],
-      });
-
-      if (playerMarker) {
-        playerMarker.setLatLng(ll);
-        playerMarker.setIcon(icon);
-      } else {
-        playerMarker = L.marker(ll, { icon, interactive: false }).addTo(markerLayer);
-      }
-
-      if (fixedTrace && valid.length > 1) {
-        // Replay / recorded view: fit the whole track once, then lock the
-        // camera to that extent — the user may zoom in & pan, but can't zoom
-        // out past the full-track view or pan off the track.
-        if (!boundsApplied) {
-          const b = L.latLngBounds(valid.map((p) => pixToLatLng(worldToPix(p))));
-          map.fitBounds(b, { padding: [20, 20], maxZoom: cfg.defaultZoom });
-          map.setMinZoom(map.getZoom());
-          map.setMaxBounds(b.pad(0.05));
-          boundsApplied = true;
-        }
-      } else if (drawLine && valid.length > 1) {
-        // Live recording: track grows, keep the whole thing framed.
-        clearBounds();
-        const b = L.latLngBounds(valid.map((p) => pixToLatLng(worldToPix(p))));
-        map.fitBounds(b, { padding: [20, 20], maxZoom: cfg.defaultZoom });
-      } else {
-        // Free-roam / live marker: follow the player at the user's current zoom.
-        clearBounds();
-        map.setView(ll, map.getZoom(), { animate: false });
-      }
-    }
-  }
-
-  let boundsApplied = false;
-  function clearBounds() {
-    if (!boundsApplied || !map) return;
-    map.setMinZoom(cfg.minZoom);
-    map.setMaxBounds(undefined);
-    boundsApplied = false;
-  }
-
-  // Re-render trace/marker on data changes; keep the user's pan/zoom (only the
-  // very first paint auto-fits).
+  // Re-render on data changes; all work below is incremental, so the 64 Hz
+  // live tick costs a marker move, not a layer teardown.
   $effect(() => {
     void points;
     void currentIndex;
     void drawLine;
-    if (map) redraw();
+    void colorByLap;
+    void fixedTrace;
+    if (gm) update();
   });
+
+  function resetTrace() {
+    gm?.clearLines();
+    curSeg = null;
+    curLap = -1;
+    lastSegLL = null;
+    lastWorld = null;
+    drawnIdx = 0;
+  }
+
+  function extendTrace() {
+    if (!gm) return;
+    const traceWeight = compact ? 2 : 3;
+    for (let i = drawnIdx; i < valid.length; i++) {
+      const p = valid[i];
+      const lap = colorByLap ? p.lapNumber : 0;
+      const lapChanged = curSeg !== null && lap !== curLap;
+      if (!lapChanged && lastWorld) {
+        const dx = p.positionX - lastWorld.x;
+        const dz = p.positionZ - lastWorld.z;
+        if (dx * dx + dz * dz < TRACE_MIN_STEP * TRACE_MIN_STEP) continue;
+      }
+      const ll = gm.worldToLatLng({ x: p.positionX, z: p.positionZ });
+      if (!curSeg || lapChanged) {
+        const color = colorByLap
+          ? LAP_COLORS[p.lapNumber % LAP_COLORS.length]
+          : themeColor('--ac', '#d2a24c');
+        // Start the new lap's segment from the previous vertex so the trace
+        // stays visually continuous across the colour change.
+        curSeg = gm.addLine(lastSegLL ? [lastSegLL, ll] : [ll], traceWeight, {
+          color,
+          opacity: 0.9,
+        });
+        curLap = lap;
+      } else {
+        curSeg.addLatLng(ll);
+      }
+      lastSegLL = ll;
+      lastWorld = { x: p.positionX, z: p.positionZ };
+    }
+    drawnIdx = valid.length;
+  }
+
+  function update() {
+    if (!gm) return;
+
+    // Dataset / mode switch → full rebuild.
+    if (
+      points !== lastPoints ||
+      points.length < scanned ||
+      drawLine !== lastDrawLine ||
+      colorByLap !== lastColorByLap ||
+      fixedTrace !== lastFixedTrace
+    ) {
+      lastPoints = points;
+      lastDrawLine = drawLine;
+      lastColorByLap = colorByLap;
+      lastFixedTrace = fixedTrace;
+      scanned = 0;
+      valid = [];
+      resetTrace();
+      if (camLocked) {
+        gm.unlockCamera();
+        camLocked = false;
+      }
+    }
+    // Scan only the unseen tail for valid (non-zero) positions.
+    for (; scanned < points.length; scanned++) {
+      const p = points[scanned];
+      if (p.positionX !== 0 || p.positionZ !== 0) valid.push(p);
+    }
+
+    if (valid.length === 0) {
+      resetTrace();
+      gm.removeLiveArrow();
+      return;
+    }
+
+    if (drawLine && valid.length > 1) extendTrace();
+
+    const mi = currentIndex >= 0 && currentIndex < points.length ? currentIndex : valid.length - 1;
+    const mp = points[mi] ?? valid[valid.length - 1];
+    if (!mp || (mp.positionX === 0 && mp.positionZ === 0)) return;
+
+    const world = { x: mp.positionX, z: mp.positionZ };
+    const headingDeg = ((mp.yaw * 180) / Math.PI) % 360;
+    const created = gm.setLiveArrow(world, headingDeg, compact ? 22 : 28);
+
+    if (fixedTrace && valid.length > 1) {
+      // Replay / recorded view: fit the whole track once, then lock the
+      // camera to that extent — the user may zoom in & pan, but can't zoom
+      // out past the full-track view or pan off the track.
+      if (!camLocked) {
+        const fitZoom = gm.lockCamera(valid.map((p) => ({ x: p.positionX, z: p.positionZ })));
+        gm.setWeightRefZoom(fitZoom);
+        camLocked = true;
+      }
+    } else if (drawLine && valid.length > 1) {
+      // Live recording: track grows — keep it framed, but gently (at most
+      // once a second, never against the user's own pan/zoom).
+      const now = Date.now();
+      if (now - lastTraceFitAt > 1000 && gm.userIdle()) {
+        lastTraceFitAt = now;
+        const fitZoom = gm.fitWorld(
+          valid.map((p) => ({ x: p.positionX, z: p.positionZ })),
+          0.05,
+          cfg.defaultZoom
+        );
+        gm.setWeightRefZoom(fitZoom);
+      }
+    } else if (created) {
+      // Free-roam / live marker: frame the player once on first contact…
+      gm.centerOn(world);
+    } else {
+      // …then follow with a dead-zone pan that never fights the user.
+      gm.followLiveArrow();
+    }
+  }
 </script>
 
 {#if usable}

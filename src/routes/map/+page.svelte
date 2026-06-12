@@ -6,7 +6,8 @@
 
   type MapState = {
     type: 'map-state';
-    pts: TelemetryPacket[];
+    /** null = unchanged since the last broadcast (index-only update). */
+    pts: TelemetryPacket[] | null;
     idx: number;
     drawLine: boolean;
     colorByLap: boolean;
@@ -37,7 +38,7 @@
     bc.onmessage = (e: MessageEvent<MapState>) => {
       const d = e.data;
       if (d.type !== 'map-state') return;
-      pts = d.pts;
+      if (d.pts) pts = d.pts;
       idx = d.idx;
       drawLine = d.drawLine;
       colorByLap = d.colorByLap;

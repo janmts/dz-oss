@@ -69,6 +69,14 @@
 /* ── Reset & base ───────────────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* The root element is the compositor's bottom layer: regions the renderer
+   hasn't rasterised yet (fast zoom/scroll animations) show ITS background.
+   Without this they fall through to the webview default — a white flash on a
+   dark theme. Keep in sync with `windows[].backgroundColor` in tauri.conf.json. */
+html {
+  background: var(--bg-body);
+}
+
 body {
   background: var(--bg-body);
   color: var(--tx-hi);

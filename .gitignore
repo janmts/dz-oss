@@ -12,6 +12,7 @@ vite.config.ts.timestamp-*
 scripts/*
 !scripts/download-map-tiles.mjs
 !scripts/check-car-ordinals.mjs
+!scripts/measure-map-content.mjs
 docs/*
 # but track the public docs referenced from the README
 !docs/headless-server.md

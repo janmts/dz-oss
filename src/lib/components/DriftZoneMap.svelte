@@ -1,8 +1,7 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
-  import type { LayerGroup, Map as LMap, Marker, TileLayer } from 'leaflet';
-  import { effectiveMapConfig, type EffectiveMapConfig } from '$lib/mapDefaults';
-  import { xyzSimpleCRS } from '$lib/mapCrs';
+  import { onDestroy, untrack } from 'svelte';
+  import { effectiveMapConfig } from '$lib/mapDefaults';
+  import { createGameMap, makeCalib, type GameMap } from '$lib/mapView';
   import { themeColor } from '$lib/theme';
   import type { AppSettings, DriftZoneRow, TelemetryPacket, ZonePoint } from '$lib/types';
 
@@ -22,35 +21,12 @@
   const zoneExtraZoom = 3;
 
   let mapHost = $state<HTMLDivElement | null>(null);
-  let L = $state<typeof import('leaflet') | null>(null);
-  let map = $state<LMap | null>(null);
-  let tiles = $state<TileLayer | null>(null);
-  let zoneLayer = $state<LayerGroup | null>(null);
-  let markerLayer = $state<LayerGroup | null>(null);
-  let liveMarker: Marker | null = null;
-  let resizeObserver: ResizeObserver | null = null;
+  let gm: GameMap | null = null;
   let mapReady = $state(false);
   let lastFitKey: string | null = null;
 
   let cfg = $derived(effectiveMapConfig(settings));
-
-  let calib = $derived.by(() => {
-    const aw = cfg.calAWorld, bw = cfg.calBWorld;
-    const ap = cfg.calAPix, bp = cfg.calBPix;
-    const dWX = bw[0] - aw[0];
-    const dWZ = bw[1] - aw[1];
-    if (Math.abs(dWX) < 1e-6 || Math.abs(dWZ) < 1e-6) return null;
-    const mX = (bp[0] - ap[0]) / dWX;
-    const mZ = (bp[1] - ap[1]) / dWZ;
-    return {
-      mX,
-      mZ,
-      bX: ap[0] - mX * aw[0],
-      bY: ap[1] - mZ * aw[1],
-    };
-  });
-
-  let mapUsable = $derived(!!calib);
+  let mapUsable = $derived(!!makeCalib(cfg));
 
   let livePoint = $derived(
     livePacket && (livePacket.positionX !== 0 || livePacket.positionZ !== 0)
@@ -126,142 +102,101 @@
       : [];
   }
 
-  function worldToPix(point: ZonePoint): [number, number] {
-    const c = calib!;
-    return [c.mX * point.x + c.bX, c.mZ * point.z + c.bY];
-  }
-
-  function worldToLatLng(point: ZonePoint) {
-    const [x, y] = worldToPix(point);
-    return map!.unproject(L!.point(x, y), cfg.maxZoom);
-  }
-
-  function liveIcon(pkt: TelemetryPacket) {
-    const headingDeg = ((pkt.yaw * 180) / Math.PI) % 360;
-    return L!.divIcon({
-      className: 'drift-player-arrow',
-      html:
-        '<svg width="30" height="30" viewBox="0 0 24 24">' +
-        `<path transform="rotate(${headingDeg} 12 12)" ` +
-        `d="M12 2 L19 21 L12 15 L5 21 Z" fill="${themeColor('--live-dot', '#ecc274')}" ` +
-        `stroke="${themeColor('--bg-body', '#0f1012')}" stroke-width="1.5" stroke-linejoin="round"/></svg>`,
-      iconSize: [30, 30],
-      iconAnchor: [15, 15],
-    });
-  }
-
-  async function initMap(config: EffectiveMapConfig) {
-    if (!mapHost || map || !mapUsable) return;
-    L = await import('leaflet');
-    await import('leaflet/dist/leaflet.css');
-    map = L.map(mapHost, {
-      crs: xyzSimpleCRS(L),
-      attributionControl: false,
-      zoomControl: true,
-      minZoom: config.minZoom,
-      maxZoom: config.viewMaxZoom + zoneExtraZoom,
-      maxBoundsViscosity: 1.0,
-    });
-    tiles = L.tileLayer(config.tileUrl, {
-      minZoom: config.minZoom,
-      maxZoom: config.viewMaxZoom + zoneExtraZoom,
-      maxNativeZoom: config.maxZoom,
-      tileSize: config.tileSize,
-      noWrap: true,
-    }).addTo(map);
-    zoneLayer = L.layerGroup().addTo(map);
-    markerLayer = L.layerGroup().addTo(map);
-    map.setView(
-      map.unproject(L.point(config.defaultCenter[0], config.defaultCenter[1]), config.maxZoom),
-      config.defaultZoom
-    );
-    resizeObserver = new ResizeObserver(() => map?.invalidateSize());
-    resizeObserver.observe(mapHost);
+  async function initMap() {
+    if (!mapHost || gm || !mapUsable) return;
+    gm = await createGameMap(mapHost, cfg, { extraZoom: zoneExtraZoom });
     mapReady = true;
-    redrawLeaflet();
+    drawZone();
+    untrack(() => updateLive());
   }
 
   $effect(() => {
-    if (mapHost && mapUsable && !map) void initMap(cfg);
+    if (mapHost && mapUsable && !gm) void initMap();
   });
 
+  // Static geometry rebuilds only when the zone changes — never on the live
+  // telemetry tick (the fit's read of the live point is untracked below), so
+  // the lines stay put and in sync with the tiles during zoom.
   $effect(() => {
     void zone;
+    if (mapReady) drawZone();
+  });
+
+  // The live marker moves in place every telemetry tick.
+  $effect(() => {
     void livePacket;
-    if (mapReady) redrawLeaflet();
+    if (mapReady) updateLive();
   });
 
   onDestroy(() => {
-    resizeObserver?.disconnect();
-    liveMarker?.remove();
-    map?.remove();
-    map = null;
+    gm?.destroy();
+    gm = null;
   });
 
   function fitMapToGeometry(fitKey: string) {
-    if (!map || !L || !mapUsable || allPoints.length === 0 || lastFitKey === fitKey) return;
-    const bounds = L.latLngBounds(allPoints.map(worldToLatLng));
-    map.fitBounds(bounds.pad(0.18), { maxZoom: cfg.viewMaxZoom + zoneExtraZoom });
+    if (!gm || allPoints.length === 0 || lastFitKey === fitKey) return;
+    const fitZoom = gm.fitWorld(allPoints, 0.18, cfg.viewMaxZoom + zoneExtraZoom);
+    // Lines show their tuned base weight at this framing and thin out from it.
+    gm.setWeightRefZoom(fitZoom);
     lastFitKey = fitKey;
   }
 
-  function redrawLeaflet() {
-    if (!map || !L || !zoneLayer || !markerLayer || !mapUsable) return;
-    zoneLayer.clearLayers();
-    markerLayer.clearLayers();
+  function drawZone() {
+    if (!gm) return;
+    gm.clearLines();
 
     if (zone) {
       if (zone.leftBoundary.length > 1) {
-        L.polyline(zone.leftBoundary.map(worldToLatLng), {
+        gm.addLine(zone.leftBoundary.map(gm.worldToLatLng), 5, {
           color: themeColor('--map-left', '#84b577'),
-          weight: 5,
           opacity: 0.95,
-        }).addTo(zoneLayer);
+        });
       }
       if (zone.rightBoundary.length > 1) {
-        L.polyline(zone.rightBoundary.map(worldToLatLng), {
+        gm.addLine(zone.rightBoundary.map(gm.worldToLatLng), 5, {
           color: themeColor('--map-right', '#82a7c8'),
-          weight: 5,
           opacity: 0.95,
-        }).addTo(zoneLayer);
+        });
       }
       const start = derivedStartGate(zone);
       const finish = derivedFinishGate(zone);
       if (start.length === 2) {
-        L.polyline(start.map(worldToLatLng), {
+        gm.addLine(start.map(gm.worldToLatLng), 4, {
           color: themeColor('--gate-a', '#d2a24c'),
-          weight: 4,
           dashArray: '10 7',
-        }).addTo(zoneLayer);
+        });
       }
       if (finish.length === 2) {
-        L.polyline(finish.map(worldToLatLng), {
+        gm.addLine(finish.map(gm.worldToLatLng), 4, {
           color: themeColor('--gate-b', '#d56c62'),
-          weight: 4,
           dashArray: '10 7',
-        }).addTo(zoneLayer);
+        });
       }
       zone.splitGates.forEach((gate) => {
         if (gate.length !== 2) return;
-        L!.polyline(gate.map(worldToLatLng), {
+        gm!.addLine(gate.map(gm!.worldToLatLng), 3, {
           color: themeColor('--gate-split', '#a995cf'),
-          weight: 3,
           dashArray: '6 6',
           opacity: 0.9,
-        }).addTo(zoneLayer!);
+        });
       });
     }
 
-    if (livePoint && livePacket) {
-      liveMarker = L.marker(worldToLatLng(livePoint), {
-        icon: liveIcon(livePacket),
-        interactive: false,
-      }).addTo(markerLayer);
-    } else {
-      liveMarker = null;
-    }
+    // The fit depends on the live point's presence; untrack it so rebuilding
+    // the zone never subscribes this code path to the per-tick live position.
+    untrack(() => fitMapToGeometry(`${zone?.id ?? 'none'}:${!!livePoint}`));
+  }
 
-    fitMapToGeometry(`${zone?.id ?? 'none'}:${!!livePoint}`);
+  function updateLive() {
+    if (!gm) return;
+    if (livePoint && livePacket) {
+      const headingDeg = ((livePacket.yaw * 180) / Math.PI) % 360;
+      gm.setLiveArrow(livePoint, headingDeg, 30);
+      // Frame the live position the first time it appears.
+      untrack(() => fitMapToGeometry(`${zone?.id ?? 'none'}:true`));
+    } else {
+      gm.removeLiveArrow();
+    }
   }
 </script>
 
@@ -372,7 +307,8 @@
     background: var(--bg-card);
     font: inherit;
   }
-  :global(.drift-player-arrow) {
+  /* Strip Leaflet's default divIcon box so only the arrow shows. */
+  :global(.player-arrow) {
     background: none;
     border: none;
   }
