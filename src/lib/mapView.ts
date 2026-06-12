@@ -135,6 +135,13 @@ export async function createGameMap(
   const maxZoom = cfg.viewMaxZoom + extra;
   const calib = makeCalib(cfg);
 
+  // Leaflet's stock stylesheet paints .leaflet-container #ddd, and because it
+  // is dynamically imported it lands AFTER the components' :global overrides —
+  // same specificity, last-loaded wins. Every un-tiled region (resize strips,
+  // zoom/pan edges, tile-load gaps) then flashes pale gray on the dark theme.
+  // An inline style outranks any stylesheet, so the floor is reliably dark.
+  host.style.background = themeColor('--bg-card', '#18191d');
+
   const map = L.map(host, {
     crs: xyzSimpleCRS(L),
     // Canvas renderer: replay traces run to tens of thousands of points, and
