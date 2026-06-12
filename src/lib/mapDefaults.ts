@@ -14,9 +14,17 @@ export const FH6_JAPAN = {
   maxZoom: 14,
   tileSize: 256,
   // Full-resolution (maxZoom) pixel extent of the bundled tiles: tile x/y
-  // 8128..8191 at 256 px → used to centre the map.
+  // 8128..8191 at 256 px → drives the tile layer's `bounds` (no requests —
+  // and therefore no 404s — outside the downloaded pyramid).
   pixelMin: [8128 * 256, 8128 * 256] as [number, number],
   pixelMax: [8192 * 256, 8192 * 256] as [number, number],
+  // Extent of the actual map artwork (tiles 8144..8175): the source pads the
+  // island to a power-of-two square with solid-gray filler tiles, and this
+  // crops that ring out of the camera range. Measured from tile data by
+  // scripts/measure-map-content.mjs — re-run it if the tiles are ever
+  // re-downloaded (e.g. a map expansion) and paste the printed values.
+  contentPixelMin: [2084864, 2084864] as [number, number],
+  contentPixelMax: [2093056, 2093056] as [number, number],
   // You can zoom in past the deepest tiles (they upscale) up to viewMaxZoom.
   viewMaxZoom: 15,
   // Initial camera: a full-resolution pixel (centre of the extent) + zoom.
@@ -49,6 +57,14 @@ export interface EffectiveMapConfig {
   calAPix: [number, number];
   calBWorld: [number, number];
   calBPix: [number, number];
+  // Pixel extents at maxZoom, or null when an overridden tile source is in use
+  // (its coverage is unknown, so nothing is clamped). `pixelMin/Max` is the
+  // downloaded tile pyramid (tile-request bounds); `contentPixelMin/Max` is the
+  // real artwork inside it (camera bounds + zoom-out floor).
+  pixelMin: [number, number] | null;
+  pixelMax: [number, number] | null;
+  contentPixelMin: [number, number] | null;
+  contentPixelMax: [number, number] | null;
 }
 
 // When the user hasn't opted into overriding, the FH6 Japan preset is used
@@ -105,5 +121,17 @@ export function effectiveMapConfig(s: AppSettings): EffectiveMapConfig {
         : FH6_JAPAN.defaultCenter,
   };
 
-  return { ...base, ...view, ...cal };
+  // Extents only apply when the bundled FH6 tiles are actually in use (preset,
+  // or an override that didn't supply a valid custom URL).
+  const extent =
+    base.tileUrl === FH6_JAPAN.tileUrl
+      ? {
+          pixelMin: FH6_JAPAN.pixelMin as [number, number],
+          pixelMax: FH6_JAPAN.pixelMax as [number, number],
+          contentPixelMin: FH6_JAPAN.contentPixelMin as [number, number],
+          contentPixelMax: FH6_JAPAN.contentPixelMax as [number, number],
+        }
+      : { pixelMin: null, pixelMax: null, contentPixelMin: null, contentPixelMax: null };
+
+  return { ...base, ...view, ...cal, ...extent };
 }

@@ -14,11 +14,23 @@ pub async fn serve(uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
     let path = if path.is_empty() { "index.html" } else { path };
     match Assets::get(path) {
-        Some(content) => (
-            [(header::CONTENT_TYPE, mime_for(path))],
-            content.data.into_owned(),
-        )
-            .into_response(),
+        Some(content) => {
+            let mut resp = (
+                [(header::CONTENT_TYPE, mime_for(path))],
+                content.data.into_owned(),
+            )
+                .into_response();
+            // Map tiles are immutable-in-practice (re-downloads are rare and
+            // ship with a new build); without a cache policy the browser
+            // refetches them on every zoom level change, which reads as lag.
+            if path.starts_with("maptiles/") {
+                resp.headers_mut().insert(
+                    header::CACHE_CONTROL,
+                    header::HeaderValue::from_static("public, max-age=604800"),
+                );
+            }
+            resp
+        }
         // SPA fallback: unknown non-asset routes return index.html.
         None => match Assets::get("index.html") {
             Some(index) => (
@@ -44,6 +56,8 @@ fn mime_for(path: &str) -> &'static str {
         "image/svg+xml"
     } else if path.ends_with(".png") {
         "image/png"
+    } else if path.ends_with(".jpg") || path.ends_with(".jpeg") {
+        "image/jpeg"
     } else if path.ends_with(".webp") {
         "image/webp"
     } else if path.ends_with(".woff2") {

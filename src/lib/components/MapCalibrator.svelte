@@ -1,10 +1,9 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import type { Map as LMap } from 'leaflet';
   import { packet } from '$lib/stores/telemetry';
   import { settings, saveSettings } from '$lib/stores/sessions';
   import { effectiveMapConfig, FH6_JAPAN } from '$lib/mapDefaults';
-  import { xyzSimpleCRS } from '$lib/mapCrs';
+  import { createGameMap, type GameMap } from '$lib/mapView';
   import { themeColor } from '$lib/theme';
   import type { AppSettings } from '$lib/types';
 
@@ -33,39 +32,24 @@
   let target = $state<'A' | 'B'>('A');
 
   let host = $state<HTMLDivElement | null>(null);
-  let L: typeof import('leaflet') | null = null;
-  let map: LMap | null = null;
-  let markers: import('leaflet').LayerGroup | null = null;
+  let gm: GameMap | null = null;
 
   const cfg = effectiveMapConfig($settings!);
 
   onMount(async () => {
     if (!host) return;
-    L = await import('leaflet');
-    await import('leaflet/dist/leaflet.css');
-
-    map = L.map(host, {
-      crs: xyzSimpleCRS(L),
-      attributionControl: false,
-      minZoom: cfg.minZoom,
-      maxZoom: cfg.viewMaxZoom,
-    });
-    L.tileLayer(cfg.tileUrl, {
-      minZoom: cfg.minZoom,
-      maxZoom: cfg.viewMaxZoom,
-      maxNativeZoom: cfg.maxZoom,
-      tileSize: cfg.tileSize,
-      noWrap: true,
-    }).addTo(map);
-    markers = L.layerGroup().addTo(map);
+    // Free look at the whole pyramid (gray ring included) — picking reference
+    // pixels needs the full map; the tile-request bounds still apply.
+    gm = await createGameMap(host, cfg, { clampToContent: false });
+    const { L, map } = gm;
 
     // Centre on the bundled map's pixel extent.
     const c1 = map.unproject(L.point(FH6_JAPAN.pixelMin[0], FH6_JAPAN.pixelMin[1]), cfg.maxZoom);
     const c2 = map.unproject(L.point(FH6_JAPAN.pixelMax[0], FH6_JAPAN.pixelMax[1]), cfg.maxZoom);
-    map.fitBounds(L.latLngBounds(c1, c2));
+    map.fitBounds(gm.tileBounds ?? L.latLngBounds(c1, c2));
 
     map.on('click', (e: import('leaflet').LeafletMouseEvent) => {
-      const p = map!.project(e.latlng, cfg.maxZoom);
+      const p = map.project(e.latlng, cfg.maxZoom);
       const pt = [Math.round(p.x), Math.round(p.y)] as [number, number];
       if (target === 'A') A = { ...A, pix: pt };
       else B = { ...B, pix: pt };
@@ -74,12 +58,13 @@
   });
 
   onDestroy(() => {
-    map?.remove();
-    map = null;
+    gm?.destroy();
+    gm = null;
   });
 
   function redraw() {
-    if (!map || !L || !markers) return;
+    if (!gm) return;
+    const { L, map, markers } = gm;
     markers.clearLayers();
     for (const [pt, label, color] of [
       [A, 'A', themeColor('--map-left', '#84b577')],
@@ -118,12 +103,12 @@
 
   let viewMsg = $state('');
   async function saveDefaultView() {
-    if (!map || !L || !$settings) return;
-    const c = map.project(map.getCenter(), cfg.maxZoom);
+    if (!gm || !$settings) return;
+    const c = gm.map.project(gm.map.getCenter(), cfg.maxZoom);
     await saveSettings({
       ...$settings,
       mapDefaultCenter: [Math.round(c.x), Math.round(c.y)],
-      mapDefaultZoom: Math.round(map.getZoom()),
+      mapDefaultZoom: Math.round(gm.map.getZoom()),
     });
     viewMsg = 'Saved as default view';
     setTimeout(() => (viewMsg = ''), 2500);
