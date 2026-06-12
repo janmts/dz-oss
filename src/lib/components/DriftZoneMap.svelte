@@ -1,9 +1,8 @@
 <script lang="ts">
-  import { onDestroy, untrack } from 'svelte';
-  import type { LatLng, LayerGroup, Map as LMap, Marker, PolylineOptions, TileLayer } from 'leaflet';
+  import { onDestroy } from 'svelte';
+  import type { LayerGroup, Map as LMap, Marker, TileLayer } from 'leaflet';
   import { effectiveMapConfig, type EffectiveMapConfig } from '$lib/mapDefaults';
   import { xyzSimpleCRS } from '$lib/mapCrs';
-  import { applyLineWeights, scaledWeight, tileExtentBounds, type WeightedLine } from '$lib/mapView';
   import { themeColor } from '$lib/theme';
   import type { AppSettings, DriftZoneRow, TelemetryPacket, ZonePoint } from '$lib/types';
 
@@ -32,10 +31,6 @@
   let resizeObserver: ResizeObserver | null = null;
   let mapReady = $state(false);
   let lastFitKey: string | null = null;
-  // Static boundary/gate lines (rebuilt only when the zone changes) + the zoom at
-  // which they show full weight (anchored to the auto-fit zoom).
-  let staticLines: WeightedLine[] = [];
-  let weightRefZoom = 0;
 
   let cfg = $derived(effectiveMapConfig(settings));
 
@@ -167,51 +162,33 @@
       maxZoom: config.viewMaxZoom + zoneExtraZoom,
       maxBoundsViscosity: 1.0,
     });
-    // Constrain camera + tile requests to the bundled tile extent: no scrolling
-    // off into empty space, and no 404s for tiles that were never downloaded.
-    const extent = tileExtentBounds(L, map, config);
     tiles = L.tileLayer(config.tileUrl, {
       minZoom: config.minZoom,
       maxZoom: config.viewMaxZoom + zoneExtraZoom,
       maxNativeZoom: config.maxZoom,
       tileSize: config.tileSize,
       noWrap: true,
-      bounds: extent ?? undefined,
     }).addTo(map);
-    if (extent) map.setMaxBounds(extent.pad(0.05));
     zoneLayer = L.layerGroup().addTo(map);
     markerLayer = L.layerGroup().addTo(map);
-    weightRefZoom = config.defaultZoom;
     map.setView(
       map.unproject(L.point(config.defaultCenter[0], config.defaultCenter[1]), config.maxZoom),
       config.defaultZoom
     );
-    // Keep line thickness proportional to the map as the user zooms.
-    map.on('zoomend', () => {
-      if (map) applyLineWeights(staticLines, map.getZoom(), weightRefZoom);
-    });
     resizeObserver = new ResizeObserver(() => map?.invalidateSize());
     resizeObserver.observe(mapHost);
     mapReady = true;
-    drawZone();
-    updateLiveMarker();
+    redrawLeaflet();
   }
 
   $effect(() => {
     if (mapHost && mapUsable && !map) void initMap(cfg);
   });
 
-  // Static geometry rebuilds only when the zone changes (the fit's read of the
-  // live point is untracked, below, so this never re-fires on a telemetry tick).
   $effect(() => {
     void zone;
-    if (mapReady) drawZone();
-  });
-
-  // The live marker moves every telemetry tick without disturbing the lines.
-  $effect(() => {
     void livePacket;
-    if (mapReady) updateLiveMarker();
+    if (mapReady) redrawLeaflet();
   });
 
   onDestroy(() => {
@@ -226,85 +203,65 @@
     const bounds = L.latLngBounds(allPoints.map(worldToLatLng));
     map.fitBounds(bounds.pad(0.18), { maxZoom: cfg.viewMaxZoom + zoneExtraZoom });
     lastFitKey = fitKey;
-    // Anchor full line weight to this framing, then apply it.
-    weightRefZoom = map.getZoom();
-    applyLineWeights(staticLines, map.getZoom(), weightRefZoom);
   }
 
-  // Rebuild the static boundary/gate lines. Infrequent — runs only when the
-  // selected zone changes, never on the live telemetry tick.
-  function drawZone() {
-    if (!map || !L || !zoneLayer || !mapUsable) return;
+  function redrawLeaflet() {
+    if (!map || !L || !zoneLayer || !markerLayer || !mapUsable) return;
     zoneLayer.clearLayers();
-    staticLines = [];
-    const add = (latlngs: LatLng[], base: number, style: PolylineOptions) => {
-      const line = L!.polyline(latlngs, {
-        ...style,
-        weight: scaledWeight(base, map!.getZoom(), weightRefZoom),
-      }).addTo(zoneLayer!);
-      staticLines.push({ line, base });
-    };
+    markerLayer.clearLayers();
 
     if (zone) {
       if (zone.leftBoundary.length > 1) {
-        add(zone.leftBoundary.map(worldToLatLng), 5, {
+        L.polyline(zone.leftBoundary.map(worldToLatLng), {
           color: themeColor('--map-left', '#84b577'),
+          weight: 5,
           opacity: 0.95,
-        });
+        }).addTo(zoneLayer);
       }
       if (zone.rightBoundary.length > 1) {
-        add(zone.rightBoundary.map(worldToLatLng), 5, {
+        L.polyline(zone.rightBoundary.map(worldToLatLng), {
           color: themeColor('--map-right', '#82a7c8'),
+          weight: 5,
           opacity: 0.95,
-        });
+        }).addTo(zoneLayer);
       }
       const start = derivedStartGate(zone);
       const finish = derivedFinishGate(zone);
       if (start.length === 2) {
-        add(start.map(worldToLatLng), 4, {
+        L.polyline(start.map(worldToLatLng), {
           color: themeColor('--gate-a', '#d2a24c'),
+          weight: 4,
           dashArray: '10 7',
-        });
+        }).addTo(zoneLayer);
       }
       if (finish.length === 2) {
-        add(finish.map(worldToLatLng), 4, {
+        L.polyline(finish.map(worldToLatLng), {
           color: themeColor('--gate-b', '#d56c62'),
+          weight: 4,
           dashArray: '10 7',
-        });
+        }).addTo(zoneLayer);
       }
       zone.splitGates.forEach((gate) => {
         if (gate.length !== 2) return;
-        add(gate.map(worldToLatLng), 3, {
+        L!.polyline(gate.map(worldToLatLng), {
           color: themeColor('--gate-split', '#a995cf'),
+          weight: 3,
           dashArray: '6 6',
           opacity: 0.9,
-        });
+        }).addTo(zoneLayer!);
       });
     }
 
-    // The fit depends on the live point's presence; untrack it so rebuilding the
-    // zone never subscribes this code path to the per-tick live position.
-    untrack(() => fitMapToGeometry(`${zone?.id ?? 'none'}:${!!livePoint}`));
-  }
-
-  // Move/refresh just the live player marker — runs every telemetry tick but
-  // never touches the static zone layer, so the lines stay in sync during zoom.
-  function updateLiveMarker() {
-    if (!map || !L || !markerLayer || !mapUsable) return;
     if (livePoint && livePacket) {
-      const ll = worldToLatLng(livePoint);
-      if (liveMarker) {
-        liveMarker.setLatLng(ll);
-        liveMarker.setIcon(liveIcon(livePacket));
-      } else {
-        liveMarker = L.marker(ll, { icon: liveIcon(livePacket), interactive: false }).addTo(markerLayer);
-      }
-      // Frame the live position the first time it appears.
-      untrack(() => fitMapToGeometry(`${zone?.id ?? 'none'}:true`));
-    } else if (liveMarker) {
-      liveMarker.remove();
+      liveMarker = L.marker(worldToLatLng(livePoint), {
+        icon: liveIcon(livePacket),
+        interactive: false,
+      }).addTo(markerLayer);
+    } else {
       liveMarker = null;
     }
+
+    fitMapToGeometry(`${zone?.id ?? 'none'}:${!!livePoint}`);
   }
 </script>
 
