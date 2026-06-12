@@ -102,6 +102,52 @@ pub struct ScoringParams {
     /// comparison predates the shallow retune, whose miscalibration masked the
     /// partial-contact over-credit. Refit `scale` after changing.
     pub min_tarmac_wheels: u32,
+    /// LOW-SPEED COMPOSITE term 1 — extra below-sweet steepening at crawl
+    /// speeds. Below `sweet_angle_deg` the ramp exponent becomes
+    /// `angle_power + this × w(v)`, where w fades linearly from 1 at
+    /// `lowspeed_full_ms` to 0 at `lowspeed_zero_ms`. Anchored at the sweet
+    /// spot: 45°+ pays full rate at any speed (run #521 measured 45–60° at
+    /// 1.00 at 5–9 m/s while 10–45° was depressed, deepening toward low angle
+    /// and low speed). Default **0.22**, fit jointly with the pause/transit
+    /// terms on the crawl-specimen integrals (8 z3 low-speed runs, +2.8..+10.9%
+    /// → ±1.5% MAE) against per-frame vision core cells across 9 runs; guards:
+    /// burnouts, z5 held out (gate-B offset family). Refit `scale` if changed.
+    pub lowspeed_power_add: f64,
+    /// Speed (m/s) at and below which the low-speed steepening is at full
+    /// depth.
+    pub lowspeed_full_ms: f64,
+    /// Speed (m/s) at and above which the low-speed steepening is gone. Vision
+    /// core cells read ~0.92–0.96 at 5–9 m/s, ~0.97 at 12–14, clean by ~14–16.
+    pub lowspeed_zero_ms: f64,
+    /// LOW-SPEED COMPOSITE term 2 — per-flip pause: after each drift-direction
+    /// flip (signed-angle reversal between consecutive scoring packets, the
+    /// `direction_flips` definition) in-band credit is suppressed for this many
+    /// seconds, weighted by a speed fade that reaches 0 at
+    /// `flip_pause_zero_ms`. Vision shows every flip sits in a 0.5–1.5 s
+    /// banking pause; net of the transit credit below this costs ~−65 pts per
+    /// flip at 7 m/s (the #509/#513 35-vs-86-flip controlled pair, which the
+    /// fitted pair reproduces to +0.05pp). 0 disables. Refit `scale` if
+    /// changed.
+    pub flip_pause_s: f64,
+    /// Speed (m/s) at which the flip-pause weight reaches zero (ramps down
+    /// over the 6 m/s below it). The pause is measurably alive at 12.8 m/s
+    /// (#459) and gone for normal-speed runs.
+    pub flip_pause_zero_ms: f64,
+    /// LOW-SPEED COMPOSITE term 3 — transit credit: when scoring resumes after
+    /// a sub-gate dip (angle dropped below `min_angle_deg`, a flip's
+    /// through-zero, a brief speed/slip dip), the dip is re-paid at the last
+    /// in-band rate × this gain, for up to 0.5 s of dip, weighted by a speed
+    /// fade reaching 0 at `transit_zero_ms`. This is the game's through-dip /
+    /// re-establishment credit in the crawl regime (#457/#458 measured the
+    /// equivalent of 0.45–0.49 × a 0.5 s-cap unit — i.e. this gain — and
+    /// burnout timelines bank through every weave dip). 0 disables. Refit
+    /// `scale` if changed.
+    pub transit_gain: f64,
+    /// Speed (m/s) at which the transit-credit weight reaches zero (ramps down
+    /// over the 6 m/s below it). At normal speeds gripped straights pay
+    /// nothing (#493/#496/#505: zero trickle between drifts), so the credit
+    /// must die well before the normal regime.
+    pub transit_zero_ms: f64,
     /// Multiplier increase per second of sustained, unbroken drift. The default
     /// is 0.0 because the current FH6 drift-zone samples fit better without a
     /// combo-style multiplier.
@@ -132,22 +178,32 @@ impl Default for ScoringParams {
             base_rate: 1000.0,
             require_tarmac_contact: true,
             min_tarmac_wheels: 2,
+            lowspeed_power_add: 0.22,
+            lowspeed_full_ms: 3.0,
+            lowspeed_zero_ms: 16.0,
+            flip_pause_s: 0.04,
+            flip_pause_zero_ms: 16.0,
+            transit_gain: 0.40,
+            transit_zero_ms: 11.0,
             mult_growth_per_s: 0.0,
             mult_cap: 1.0,
             transition_grace_s: 0.5,
-            // Least-squares fit across valid logged in-game scores (346 runs
-            // across four zones / 7+ cars, season-aware: winter runs gated,
-            // spring runs ungated, crawl play-test specimens excluded from the
-            // scale fit) with the no-combo, min_angle=10, angle_power=0.15,
-            // above_sweet_rise=0.085@58°, spin_angle=120, min_speed=1.5 model
-            // AND the 2-wheel tarmac gate on; re-derive as more scores are
-            // logged. Marker rows (the all-9s placeholder) and invalid runs are
-            // excluded from the fit. Lineage: 11.024 (no gate) → 11.038 (gate,
-            // min12/ap0.10) → 10.814 (gate, min10/ap0.15) → 10.813 (spin
-            // 90→120) → 10.803 (min_speed 8→1.5) → 10.745 (decline 0.25→0.0
-            // from per-frame vision) → 10.768 (tarmac gate 1→2 wheels) →
-            // 10.668 (saturating steep-angle rise 0.085@58°).
-            scale: 10.668,
+            // Least-squares fit across valid logged in-game scores (358 runs
+            // across five zones / 8+ cars, season-aware: winter runs gated,
+            // spring runs ungated; crawl specimens now INCLUDED since the
+            // low-speed composite models them) with the no-combo, min_angle=10,
+            // angle_power=0.15, above_sweet_rise=0.085@58°, spin_angle=120,
+            // min_speed=1.5 model, the 2-wheel tarmac gate AND the low-speed
+            // composite (steepening 0.22→16, pause 0.04s, transit 0.40→11) on;
+            // re-derive as more scores are logged. Marker rows (the all-9s
+            // placeholder), invalid runs and the #387/#388 state-machine
+            // specimens are excluded from the fit. Lineage: 11.024 (no gate) →
+            // 11.038 (gate, min12/ap0.10) → 10.814 (gate, min10/ap0.15) →
+            // 10.813 (spin 90→120) → 10.803 (min_speed 8→1.5) → 10.745
+            // (decline 0.25→0.0 from per-frame vision) → 10.768 (tarmac gate
+            // 1→2 wheels) → 10.668 (saturating steep-angle rise 0.085@58°) →
+            // 10.716 (low-speed composite).
+            scale: 10.716,
         }
     }
 }
@@ -196,6 +252,13 @@ pub struct RunScore {
     /// `transitions` it has no grace window: every signed-angle reversal while
     /// banking counts.
     pub direction_flips: usize,
+    /// Scaled points re-paid through brief sub-gate dips by the low-speed
+    /// transit term (0 for normal-speed runs — the credit fades out by
+    /// `transit_zero_ms`).
+    pub transit_pts: f64,
+    /// Scaled points withheld by the low-speed flip-pause term (0 for
+    /// normal-speed runs).
+    pub flip_pause_pts: f64,
 }
 
 /// Signed chassis sideslip (drift angle) in **degrees** — positive when sliding
@@ -266,17 +329,39 @@ pub fn is_scoring_packet(pkt: &TelemetryPacket, p: &ScoringParams) -> bool {
     is_drifting(pkt, p) && (!p.require_tarmac_contact || on_tarmac(pkt, p))
 }
 
-/// Angle contribution: ramps 0->1 up to the sweet spot using `angle_power`, then
+/// Ramp span (m/s) over which the flip-pause / transit weights fade from 1 to
+/// 0 below their respective `*_zero_ms` speeds.
+const REGIME_FADE_SPAN_MS: f64 = 6.0;
+
+/// Longest stretch of a sub-gate dip (s) the transit credit re-pays.
+const TRANSIT_CAP_S: f64 = 0.5;
+
+/// Low-speed steepening weight: 1 at/below `lowspeed_full_ms`, fading linearly
+/// to 0 at `lowspeed_zero_ms`.
+fn lowspeed_w(speed_ms: f64, p: &ScoringParams) -> f64 {
+    let span = (p.lowspeed_zero_ms - p.lowspeed_full_ms).max(1e-6);
+    ((p.lowspeed_zero_ms - speed_ms) / span).clamp(0.0, 1.0)
+}
+
+/// Flip-pause / transit speed weight: 1 up to `zero_ms - REGIME_FADE_SPAN_MS`,
+/// fading linearly to 0 at `zero_ms`.
+fn regime_w(speed_ms: f64, zero_ms: f64) -> f64 {
+    ((zero_ms - speed_ms) / REGIME_FADE_SPAN_MS).clamp(0.0, 1.0)
+}
+
+/// Angle contribution: ramps 0->1 up to the sweet spot using `angle_power`
+/// (steepened by `lowspeed_power_add` at crawl speeds — the below-sweet
+/// low-speed depression, anchored so the sweet spot always pays 1.0), then
 /// RISES to a `1.0 + above_sweet_rise` plateau at `rise_saturation_deg` (minus
 /// any `above_sweet_decline` slope, kept as an override lever). Zero outside the
 /// [min, spin] band — the drop to 0 past spin is the spin-out break.
-fn angle_factor(angle_deg: f64, p: &ScoringParams) -> f64 {
+fn angle_factor(angle_deg: f64, speed_ms: f64, p: &ScoringParams) -> f64 {
     if angle_deg < p.min_angle_deg || angle_deg > p.spin_angle_deg {
         return 0.0;
     }
     if angle_deg <= p.sweet_angle_deg {
         let ramp = (angle_deg / p.sweet_angle_deg).clamp(0.0, 1.0);
-        let power = p.angle_power.max(1e-6);
+        let power = (p.angle_power + p.lowspeed_power_add * lowspeed_w(speed_ms, p)).max(1e-6);
         ramp.powf(power)
     } else {
         // Saturating rise: per-frame vision shows the game's credit climbs fast
@@ -336,8 +421,16 @@ pub fn score_run(packets: &[TelemetryPacket], p: &ScoringParams) -> RunScore {
     let mut score_sign = 0i8; // direction latched at the last *scoring* packet
     let mut direction_flips = 0usize;
     let mut prev_ms: Option<u32> = None;
+    // Low-speed composite state. `total_time` doubles as the run clock the
+    // pause window and dip lengths are measured on.
+    let mut pause_until = -1.0_f64; // flip-pause window end (run clock)
+    let mut pause_w = 0.0_f64; // suppression weight inside the window
+    let mut transit_raw = 0.0_f64; // raw pts re-paid through dips
+    let mut pause_raw = 0.0_f64; // raw pts withheld around flips
+    // Last crediting packet: (index, run clock, raw rate pts/s, speed).
+    let mut last_credit: Option<(usize, f64, f64, f64)> = None;
 
-    for pkt in packets {
+    for (idx, pkt) in packets.iter().enumerate() {
         let dt = match prev_ms {
             Some(prev) => frame_dt(prev, pkt.timestamp_ms),
             None => 1.0 / 60.0,
@@ -374,12 +467,40 @@ pub fn score_run(packets: &[TelemetryPacket], p: &ScoringParams) -> RunScore {
             // Points accrue only with enough tyres on tarmac (when the gate is
             // on); off-track sliding still counts as drift time / continuity.
             if !p.require_tarmac_contact || on_tarmac(pkt, p) {
-                total +=
-                    p.base_rate * angle_factor(angle, p) * speed_factor(speed, p) * multiplier * dt;
+                let rate =
+                    p.base_rate * angle_factor(angle, speed, p) * speed_factor(speed, p) * multiplier;
+                // Transit credit: resuming after >=1 non-crediting packet
+                // re-pays the dip at the last in-band rate, speed-faded and
+                // capped — the game banks through brief sub-gate dips at crawl.
+                if let Some((li, lt, lrate, lspeed)) = last_credit {
+                    if p.transit_gain > 0.0 && idx > li + 1 {
+                        let w = regime_w(lspeed, p.transit_zero_ms);
+                        if w > 0.0 {
+                            let credit =
+                                p.transit_gain * w * lrate * (total_time - lt).min(TRANSIT_CAP_S);
+                            total += credit;
+                            transit_raw += credit;
+                        }
+                    }
+                }
                 if score_sign != 0 && sign != score_sign {
                     direction_flips += 1;
+                    // Flip pause: suppress in-band credit (including this
+                    // packet's) for flip_pause_s, speed-faded; back-to-back
+                    // flips extend the window, the strongest weight wins.
+                    if p.flip_pause_s > 0.0 {
+                        let wp = regime_w(speed, p.flip_pause_zero_ms);
+                        if wp > 0.0 {
+                            pause_w = if total_time < pause_until { pause_w.max(wp) } else { wp };
+                            pause_until = total_time + p.flip_pause_s;
+                        }
+                    }
                 }
                 score_sign = sign;
+                let supp = if total_time < pause_until { pause_w } else { 0.0 };
+                total += rate * (1.0 - supp) * dt;
+                pause_raw += rate * supp * dt;
+                last_credit = Some((idx, total_time, rate, speed));
             }
             drift_time += dt;
             angle_sum += angle;
@@ -414,6 +535,8 @@ pub fn score_run(packets: &[TelemetryPacket], p: &ScoringParams) -> RunScore {
         max_multiplier,
         transitions,
         direction_flips,
+        transit_pts: transit_raw * p.scale,
+        flip_pause_pts: pause_raw * p.scale,
     }
 }
 
@@ -483,8 +606,8 @@ mod tests {
             ..ScoringParams::default()
         };
 
-        assert!(angle_factor(23.0, &params) > angle_factor(23.0, &linear));
-        assert!((angle_factor(params.sweet_angle_deg, &params) - 1.0).abs() < 1e-9);
+        assert!(angle_factor(23.0, 25.0, &params) > angle_factor(23.0, 25.0, &linear));
+        assert!((angle_factor(params.sweet_angle_deg, 25.0, &params) - 1.0).abs() < 1e-9);
     }
 
     #[test]
@@ -744,9 +867,9 @@ mod tests {
         // The retune lowered min_angle 12→10, so an 11° slide now scores.
         let params = ScoringParams::default();
         assert_eq!(params.min_angle_deg, 10.0);
-        assert!(angle_factor(11.0, &params) > 0.0);
+        assert!(angle_factor(11.0, 25.0, &params) > 0.0);
         // ...and a 9° slide is still below the gate.
-        assert_eq!(angle_factor(9.0, &params), 0.0);
+        assert_eq!(angle_factor(9.0, 25.0, &params), 0.0);
     }
 
     #[test]
@@ -776,13 +899,13 @@ mod tests {
         // spin_angle is 120: a 100° slide is past the old 90° cap but still
         // scores (the game credits slides to ~115°); 130° is spun out → 0.
         let params = ScoringParams::default();
-        assert!(angle_factor(100.0, &params) > 0.0);
-        assert_eq!(angle_factor(130.0, &params), 0.0);
+        assert!(angle_factor(100.0, 25.0, &params) > 0.0);
+        assert_eq!(angle_factor(130.0, 25.0, &params), 0.0);
         // Raising the cutoff must NOT change the 45–90° band: the decline is
         // anchored at 90° and 90° is past the rise plateau, so factor(90°) is
         // exactly 1 + above_sweet_rise − above_sweet_decline.
         let expect = 1.0 + params.above_sweet_rise - params.above_sweet_decline;
-        assert!((angle_factor(90.0, &params) - expect).abs() < 1e-9);
+        assert!((angle_factor(90.0, 25.0, &params) - expect).abs() < 1e-9);
     }
 
     #[test]
@@ -796,14 +919,119 @@ mod tests {
         assert_eq!(params.above_sweet_decline, 0.0);
         assert_eq!(params.above_sweet_rise, 0.085);
         assert_eq!(params.rise_saturation_deg, 58.0);
-        assert!((angle_factor(45.0, &params) - 1.0).abs() < 1e-9);
+        assert!((angle_factor(45.0, 25.0, &params) - 1.0).abs() < 1e-9);
         let mid = 1.0 + params.above_sweet_rise * 0.5;
-        assert!((angle_factor(51.5, &params) - mid).abs() < 1e-9);
+        assert!((angle_factor(51.5, 25.0, &params) - mid).abs() < 1e-9);
         let plateau = 1.0 + params.above_sweet_rise;
         for a in [58.0, 75.0, 90.0, 115.0] {
-            assert!((angle_factor(a, &params) - plateau).abs() < 1e-9,
-                    "expected plateau {plateau} at {a}°, got {}", angle_factor(a, &params));
+            assert!((angle_factor(a, 25.0, &params) - plateau).abs() < 1e-9,
+                    "expected plateau {plateau} at {a}°, got {}", angle_factor(a, 25.0, &params));
         }
+    }
+
+    #[test]
+    fn lowspeed_steepening_depresses_shallow_but_anchors_sweet() {
+        // Below-sweet credit steepens at crawl speed by lowspeed_power_add
+        // ((a/45)^0.22 extra at full depth); the sweet spot and everything
+        // above it pay full rate at ANY speed — the 45° anchor (#521: 45–60°
+        // reads 1.00 at 5–9 m/s while 10–45° is depressed).
+        let p = ScoringParams::default();
+        let lo = angle_factor(20.0, 3.0, &p);
+        let hi = angle_factor(20.0, 25.0, &p);
+        let expect = (20.0_f64 / 45.0).powf(p.lowspeed_power_add);
+        assert!((lo / hi - expect).abs() < 1e-9, "ratio {} vs {}", lo / hi, expect);
+        // Fade: gone at/above lowspeed_zero_ms, partial in between.
+        assert!((angle_factor(20.0, p.lowspeed_zero_ms, &p) - hi).abs() < 1e-9);
+        let mid = angle_factor(20.0, 9.5, &p);
+        assert!(mid > lo && mid < hi);
+        // The anchor: 45° and the rise plateau are speed-independent.
+        for a in [45.0, 50.0, 58.0, 90.0] {
+            assert!(
+                (angle_factor(a, 3.0, &p) - angle_factor(a, 25.0, &p)).abs() < 1e-9,
+                "above-sweet must not depend on speed (a={a})"
+            );
+        }
+    }
+
+    #[test]
+    fn transit_credit_repays_brief_dips_at_crawl_only() {
+        // drift → 0.3 s sub-gate dip → drift, at 6 m/s: the dip is re-paid at
+        // last rate × transit_gain × wt. The same shape at 25 m/s gets nothing
+        // (the credit fades out by transit_zero_ms).
+        let p = ScoringParams::default();
+        fn run_at(speed: f32) -> Vec<TelemetryPacket> {
+            let mut pkts = Vec::new();
+            let mut t = 0u32;
+            for _ in 0..128 {
+                pkts.push(at(drifting_packet(25.0, speed), t));
+                t += 16;
+            }
+            for _ in 0..19 {
+                pkts.push(at(drifting_packet(0.0, speed), t)); // sub-gate dip
+                t += 16;
+            }
+            for _ in 0..128 {
+                pkts.push(at(drifting_packet(25.0, speed), t));
+                t += 16;
+            }
+            pkts
+        }
+        let slow = score_run(&run_at(6.0), &p);
+        assert!(slow.transit_pts > 0.0, "crawl dip must be re-paid");
+        // gain × wt × last_rate × gap: wt = (11−6)/6, gap = 20 frames ≈ 0.32 s.
+        let af = angle_factor(25.0, 6.0, &p);
+        let lrate = p.base_rate * af * speed_factor(6.0, &p) * p.scale;
+        let expect = p.transit_gain * (5.0 / 6.0) * lrate * 0.320;
+        assert!(
+            (slow.transit_pts - expect).abs() / expect < 0.05,
+            "transit {} vs expected {}",
+            slow.transit_pts,
+            expect
+        );
+        let fast = score_run(&run_at(25.0), &p);
+        assert_eq!(fast.transit_pts, 0.0, "no transit credit at normal speed");
+        // No resumption ⇒ no credit: a run that ends mid-dip banks nothing.
+        let mut tail = run_at(6.0);
+        tail.truncate(128 + 10);
+        assert_eq!(score_run(&tail, &p).transit_pts, 0.0);
+    }
+
+    #[test]
+    fn flip_pause_withholds_credit_at_crawl_only() {
+        // A weave flip at 6 m/s suppresses the next flip_pause_s of in-band
+        // credit (wp = (16−6)/6 → clamped 1.0 here); the same flip at 25 m/s
+        // costs nothing.
+        let p = ScoringParams::default();
+        fn weave_at(speed: f32) -> Vec<TelemetryPacket> {
+            let mut pkts = Vec::new();
+            let mut t = 0u32;
+            for _ in 0..128 {
+                pkts.push(at(drifting_packet(25.0, speed), t));
+                t += 16;
+            }
+            for _ in 0..128 {
+                pkts.push(at(drifting_packet(-25.0, speed), t));
+                t += 16;
+            }
+            pkts
+        }
+        let slow = score_run(&weave_at(6.0), &p);
+        assert_eq!(slow.direction_flips, 1);
+        assert!(slow.flip_pause_pts > 0.0, "crawl flip must pause banking");
+        // ~flip_pause_s of full-rate credit withheld (weight 1 at 6 m/s; the
+        // 64 Hz grid quantizes the window to ±1 frame).
+        let af = angle_factor(25.0, 6.0, &p);
+        let rate = p.base_rate * af * speed_factor(6.0, &p) * p.scale;
+        let expect = rate * p.flip_pause_s;
+        assert!(
+            (slow.flip_pause_pts - expect).abs() / expect < 0.45,
+            "pause {} vs ~{}",
+            slow.flip_pause_pts,
+            expect
+        );
+        let fast = score_run(&weave_at(25.0), &p);
+        assert_eq!(fast.direction_flips, 1);
+        assert_eq!(fast.flip_pause_pts, 0.0, "no pause at normal speed");
     }
 
     #[test]
@@ -822,6 +1050,43 @@ mod tests {
         let r = score_run(&[], &ScoringParams::default());
         assert_eq!(r.score, 0.0);
         assert_eq!(r.sample_count, 0);
+    }
+
+    /// Low-speed composite parity vs the Python mirror on real packet data:
+    /// prints raw (pre-scale) totals for the key crawl/burnout specimens so a
+    /// param change can be cross-checked against score_audio_timeline.py
+    /// (which must reproduce these to float precision). Reads the developer's
+    /// local DB read-only; ignored by default.
+    /// Run: cargo test --lib -- --ignored lowspeed_composite_parity --nocapture
+    #[test]
+    #[ignore = "reads the local sessions.db"]
+    fn lowspeed_composite_parity_specimens() {
+        let conn = rusqlite::Connection::open(crate::db::db_path()).unwrap();
+        let winter = ScoringParams::default().for_season(crate::season::Season::Winter);
+        let spring = ScoringParams::default().for_season(crate::season::Season::Spring);
+        // (#457/#322/#385 are winter-era runs; #513/#521 are spring.)
+        for (run_id, p) in [
+            (457i64, &winter),
+            (513, &spring),
+            (521, &spring),
+            (322, &winter),
+            (385, &winter),
+        ] {
+            let blobs = crate::db::get_drift_run_packets(&conn, run_id).unwrap();
+            let pkts: Vec<_> = blobs
+                .iter()
+                .filter_map(|b| crate::parser::parse(b).ok())
+                .collect();
+            let r = score_run(&pkts, p);
+            println!(
+                "run#{run_id} raw={:.1} score={:.0} transit={:.0} pause={:.0} flips={}",
+                r.score / p.scale,
+                r.score,
+                r.transit_pts,
+                r.flip_pause_pts,
+                r.direction_flips
+            );
+        }
     }
 
     /// Parity check against the Python prototype + the logged in-game scores.

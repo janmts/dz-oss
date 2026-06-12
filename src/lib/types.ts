@@ -103,6 +103,12 @@ export interface DriftScoreBreakdown {
   /** Signed-direction reversals between scoring packets (weave jitter counts).
    *  Absent on breakdowns stored before the field existed — Recompute backfills. */
   directionFlips?: number;
+  /** Points re-paid through brief sub-gate dips by the low-speed transit term
+   *  (0 for normal-speed runs). Absent pre-v0.4.0 — Recompute backfills. */
+  transitPts?: number;
+  /** Points withheld by the low-speed flip-pause term (0 for normal-speed
+   *  runs). Absent pre-v0.4.0 — Recompute backfills. */
+  flipPausePts?: number;
 }
 
 export interface DriftRunRow {
