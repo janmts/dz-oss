@@ -267,8 +267,20 @@ export async function createGameMap(
       }
     }
   }
-  map.on('moveend', warmTiles);
-  warmTiles();
+  // Debounced: a wheel burst fires moveend per half-level step, and decode
+  // bursts mid-animation compete with the zoom rasterisation for frame time
+  // (visible as compositor misses). Warm only once things go quiet.
+  let warmTimer: ReturnType<typeof setTimeout> | null = null;
+  function scheduleWarm() {
+    if (warmTimer) clearTimeout(warmTimer);
+    warmTimer = setTimeout(() => {
+      warmTimer = null;
+      if (zoomAnimating) scheduleWarm();
+      else warmTiles();
+    }, 200);
+  }
+  map.on('moveend', scheduleWarm);
+  scheduleWarm();
 
   // --- user-interaction bookkeeping (for follow etiquette) -----------------
   let userBusyUntil = 0;
@@ -438,6 +450,7 @@ export async function createGameMap(
     host.removeEventListener('wheel', markBusy);
     host.removeEventListener('pointerdown', markBusy);
     removeLiveArrow();
+    if (warmTimer) clearTimeout(warmTimer);
     warmed.clear();
     map.remove();
   }
