@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount, untrack } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import type {
     LatLng,
     LayerGroup,
@@ -7,7 +7,6 @@
     Map as LMap,
     Marker,
     Polyline,
-    PolylineOptions,
     TileLayer,
   } from 'leaflet';
   import { packet, displayPacket } from '$lib/stores/telemetry';
@@ -20,7 +19,6 @@
   } from '$lib/stores/sessions';
   import { effectiveMapConfig, type EffectiveMapConfig } from '$lib/mapDefaults';
   import { xyzSimpleCRS } from '$lib/mapCrs';
-  import { applyLineWeights, scaledWeight, tileExtentBounds, type WeightedLine } from '$lib/mapView';
   import { themeColor } from '$lib/theme';
   import { ipc } from '$lib/ipc';
   import type { DriftZoneInput, DriftZoneRow, ZonePoint } from '$lib/types';
@@ -91,9 +89,6 @@
   let rightLine: Polyline | null = null;
   let startGateLine: Polyline | null = null;
   let finishGateLine: Polyline | null = null;
-  // All boundary/gate lines paired with their base weight, for zoom scaling.
-  let staticLines: WeightedLine[] = [];
-  let weightRefZoom = 0;
   let resizeObserver: ResizeObserver | null = null;
   let unsubscribeShortcut: (() => void) | null = null;
   let lastKnownPoint = $state<ZonePoint | null>(null);
@@ -256,32 +251,21 @@
       zoomControl: true,
       minZoom: config.minZoom,
       maxZoom: config.viewMaxZoom + editorExtraZoom,
-      maxBoundsViscosity: 1.0,
     });
-    // Constrain camera + tile requests to the bundled tile extent (no overshoot
-    // into empty space, no 404s for tiles that were never downloaded).
-    const extent = tileExtentBounds(L, map, config);
     tiles = L.tileLayer(config.tileUrl, {
       minZoom: config.minZoom,
       maxZoom: config.viewMaxZoom + editorExtraZoom,
       maxNativeZoom: config.maxZoom,
       tileSize: config.tileSize,
       noWrap: true,
-      bounds: extent ?? undefined,
     }).addTo(map);
-    if (extent) map.setMaxBounds(extent.pad(0.1));
     boundaryLayer = L.layerGroup().addTo(map);
     markerLayer = L.layerGroup().addTo(map);
     map.on('click', onLeafletMapClick);
-    weightRefZoom = config.defaultZoom;
     map.setView(
       map.unproject(L.point(config.defaultCenter[0], config.defaultCenter[1]), config.maxZoom),
       config.defaultZoom
     );
-    // Keep line thickness proportional to the map as the user zooms.
-    map.on('zoomend', () => {
-      if (map) applyLineWeights(staticLines, map.getZoom(), weightRefZoom);
-    });
     resizeObserver = new ResizeObserver(() => map?.invalidateSize());
     resizeObserver.observe(mapHost);
     mapReady = true;
@@ -296,45 +280,39 @@
     if (!map || !L || !boundaryLayer || !markerLayer || !mapUsable) return;
     boundaryLayer.clearLayers();
     markerLayer.clearLayers();
-    staticLines = [];
     leftLine = null;
     rightLine = null;
     startGateLine = null;
     finishGateLine = null;
 
-    const addLine = (latlngs: LatLng[], base: number, style: PolylineOptions) => {
-      const line = L!.polyline(latlngs, {
-        ...style,
-        weight: scaledWeight(base, map!.getZoom(), weightRefZoom),
-      }).addTo(boundaryLayer!);
-      staticLines.push({ line, base });
-      return line;
-    };
-
     if (draft.leftBoundary.length > 1) {
-      leftLine = addLine(draft.leftBoundary.map(worldToLatLng), 5, {
+      leftLine = L.polyline(draft.leftBoundary.map(worldToLatLng), {
         color: themeColor('--map-left', '#84b577'),
+        weight: 5,
         opacity: 0.95,
-      });
+      }).addTo(boundaryLayer);
     }
     if (draft.rightBoundary.length > 1) {
-      rightLine = addLine(draft.rightBoundary.map(worldToLatLng), 5, {
+      rightLine = L.polyline(draft.rightBoundary.map(worldToLatLng), {
         color: themeColor('--map-right', '#82a7c8'),
+        weight: 5,
         opacity: 0.95,
-      });
+      }).addTo(boundaryLayer);
     }
     if (draft.leftBoundary.length && draft.rightBoundary.length) {
-      startGateLine = addLine([draft.leftBoundary[0], draft.rightBoundary[0]].map(worldToLatLng), 3, {
+      startGateLine = L.polyline([draft.leftBoundary[0], draft.rightBoundary[0]].map(worldToLatLng), {
         color: themeColor('--gate-a', '#d2a24c'),
+        weight: 3,
         dashArray: '10 7',
-      });
-      finishGateLine = addLine([
+      }).addTo(boundaryLayer);
+      finishGateLine = L.polyline([
         draft.leftBoundary[draft.leftBoundary.length - 1],
         draft.rightBoundary[draft.rightBoundary.length - 1],
-      ].map(worldToLatLng), 3, {
+      ].map(worldToLatLng), {
         color: themeColor('--gate-b', '#d56c62'),
+        weight: 3,
         dashArray: '10 7',
-      });
+      }).addTo(boundaryLayer);
     }
 
     for (const side of ['left', 'right'] as BoundarySide[]) {
@@ -356,25 +334,12 @@
       });
     }
 
-    // Re-add the live marker (cleared above); its per-tick movement is untracked
-    // so rebuilding boundaries never subscribes this path to the live position.
-    liveMarker = null;
-    untrack(() => updateLiveMarker());
-  }
-
-  // Move just the live marker — runs every telemetry tick without touching the
-  // boundary lines or point markers.
-  function updateLiveMarker() {
-    if (!map || !L || !markerLayer || !mapUsable) return;
     if (livePoint) {
-      const ll = worldToLatLng(livePoint);
-      if (liveMarker) {
-        liveMarker.setLatLng(ll);
-      } else {
-        liveMarker = L.marker(ll, { icon: liveIcon(), interactive: false }).addTo(markerLayer);
-      }
-    } else if (liveMarker) {
-      liveMarker.remove();
+      liveMarker = L.marker(worldToLatLng(livePoint), {
+        icon: liveIcon(),
+        interactive: false,
+      }).addTo(markerLayer);
+    } else {
       liveMarker = null;
     }
   }
@@ -406,24 +371,14 @@
     if (!points.length) return;
     const bounds = L.latLngBounds(points.map(worldToLatLng));
     map.fitBounds(bounds.pad(0.2), { maxZoom: cfg!.viewMaxZoom + editorExtraZoom });
-    // Anchor full line weight to this framing, then apply it.
-    weightRefZoom = map.getZoom();
-    applyLineWeights(staticLines, map.getZoom(), weightRefZoom);
   }
 
-  // Boundary lines + interactive markers: rebuild on draft geometry / selection
-  // changes only — never on the live telemetry tick.
   $effect(() => {
     void draft.leftBoundary;
     void draft.rightBoundary;
+    void livePoint;
     void selectedPoint;
     if (mapReady) redrawLeaflet();
-  });
-
-  // Live marker moves in place every telemetry tick.
-  $effect(() => {
-    void livePoint;
-    if (mapReady) updateLiveMarker();
   });
 
   function path(points: ZonePoint[]): string {

@@ -49,11 +49,6 @@ export interface EffectiveMapConfig {
   calAPix: [number, number];
   calBWorld: [number, number];
   calBPix: [number, number];
-  // Full-resolution (maxZoom) pixel extent of the bundled tiles, or null when an
-  // overridden tile source is in use (coverage unknown). Drives camera maxBounds
-  // and the tile layer's `bounds` so the view can't leave the downloaded region.
-  pixelMin: [number, number] | null;
-  pixelMax: [number, number] | null;
 }
 
 // When the user hasn't opted into overriding, the FH6 Japan preset is used
@@ -110,16 +105,5 @@ export function effectiveMapConfig(s: AppSettings): EffectiveMapConfig {
         : FH6_JAPAN.defaultCenter,
   };
 
-  // The bundled-tile extent only applies when the bundled FH6 tiles are actually
-  // in use (preset, or an override that didn't supply a valid custom URL). A real
-  // custom tile source has unknown coverage, so no extent → no bounds clamp.
-  const extent =
-    base.tileUrl === FH6_JAPAN.tileUrl
-      ? {
-          pixelMin: FH6_JAPAN.pixelMin as [number, number],
-          pixelMax: FH6_JAPAN.pixelMax as [number, number],
-        }
-      : { pixelMin: null, pixelMax: null };
-
-  return { ...base, ...view, ...cal, ...extent };
+  return { ...base, ...view, ...cal };
 }

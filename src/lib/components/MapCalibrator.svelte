@@ -5,7 +5,6 @@
   import { settings, saveSettings } from '$lib/stores/sessions';
   import { effectiveMapConfig, FH6_JAPAN } from '$lib/mapDefaults';
   import { xyzSimpleCRS } from '$lib/mapCrs';
-  import { tileExtentBounds } from '$lib/mapView';
   import { themeColor } from '$lib/theme';
   import type { AppSettings } from '$lib/types';
 
@@ -50,26 +49,20 @@
       attributionControl: false,
       minZoom: cfg.minZoom,
       maxZoom: cfg.viewMaxZoom,
-      maxBoundsViscosity: 1.0,
     });
-    // Constrain camera + tile requests to the bundled tile extent (no overshoot
-    // into empty space, no 404s for tiles that were never downloaded).
-    const extent = tileExtentBounds(L, map, cfg);
     L.tileLayer(cfg.tileUrl, {
       minZoom: cfg.minZoom,
       maxZoom: cfg.viewMaxZoom,
       maxNativeZoom: cfg.maxZoom,
       tileSize: cfg.tileSize,
       noWrap: true,
-      bounds: extent ?? undefined,
     }).addTo(map);
-    if (extent) map.setMaxBounds(extent.pad(0.1));
     markers = L.layerGroup().addTo(map);
 
     // Centre on the bundled map's pixel extent.
     const c1 = map.unproject(L.point(FH6_JAPAN.pixelMin[0], FH6_JAPAN.pixelMin[1]), cfg.maxZoom);
     const c2 = map.unproject(L.point(FH6_JAPAN.pixelMax[0], FH6_JAPAN.pixelMax[1]), cfg.maxZoom);
-    map.fitBounds(extent ?? L.latLngBounds(c1, c2));
+    map.fitBounds(L.latLngBounds(c1, c2));
 
     map.on('click', (e: import('leaflet').LeafletMouseEvent) => {
       const p = map!.project(e.latlng, cfg.maxZoom);
