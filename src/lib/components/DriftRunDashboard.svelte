@@ -182,7 +182,22 @@
     return `M ${x1.toFixed(1)} ${y1.toFixed(1)} A ${radius} ${radius} 0 0 1 ${x2.toFixed(1)} ${y2.toFixed(1)}`;
   }
 
-  let liveAngle = $derived(activeForSelected ? $driftRunStatus.angleDeg : null);
+  // Below this speed (m/s) the car is effectively stationary and the velocity
+  // vector is numerically meaningless: the backend's signed angle is
+  // `atan2(velX, velZ)`, which degenerates into noise as v→0 and jitters across
+  // the whole range — flailing the needle. Matches the ~0.5 m/s atan2 floor the
+  // scoring model keeps `min_speed_ms` above (see scoring.rs). Below it we treat
+  // the live angle as indeterminate: park the needle at centre and show "—"
+  // rather than tracking noise. (Clamping alone can't help — the noise already
+  // spans ±90°.)
+  const ANGLE_NOISE_FLOOR_MS = 0.5;
+
+  let angleIndeterminate = $derived(
+    activeForSelected && ($driftRunStatus.speedMs ?? 0) < ANGLE_NOISE_FLOOR_MS
+  );
+  let liveAngle = $derived(
+    activeForSelected && !angleIndeterminate ? $driftRunStatus.angleDeg : null
+  );
   let needleDeg = $derived(Math.max(-90, Math.min(90, liveAngle ?? 0)));
 
   // Computed-vs-actual gap for the selected run — the signal that drives tuning.
@@ -334,7 +349,7 @@
       <!-- Live play-test instruments: signed drift-angle needle, speed in the
            model's native unit, and the run's flip count (same definition as
            the stored directionFlips breakdown / the tuning scripts). -->
-      <div class="gauge-wrap" class:idle={!activeForSelected}>
+      <div class="gauge-wrap" class:idle={!activeForSelected} class:stalled={angleIndeterminate}>
         <svg class="gauge" viewBox="0 0 220 150" aria-label="Signed drift angle">
           <path class="g-track" d={arcPath(-90, 90, G.r)} />
           <path class="g-dead" d={arcPath(-10, 10, G.r)} />
@@ -793,9 +808,16 @@
     letter-spacing: 0.16em;
     font-family: var(--font-ui);
   }
-  .gauge-wrap.idle .needle { stroke: var(--tx-ghost); }
-  .gauge-wrap.idle .g-val  { fill: var(--tx-xdim); }
+  /* Idle (no live run) and stalled (live run, car stopped → angle is noise)
+     both ghost the needle and dim the value: a parked "no reading" gauge. */
+  .gauge-wrap.idle .needle,
+  .gauge-wrap.stalled .needle { stroke: var(--tx-ghost); }
+  .gauge-wrap.idle .g-val,
+  .gauge-wrap.stalled .g-val { fill: var(--tx-xdim); }
   .run-card.starving .needle { stroke: var(--warn); }
+  /* A stalled car is always starving, but a centred "no reading" needle is
+     truer than the starving warn tint — keep it ghosted (higher specificity). */
+  .run-card.starving .gauge-wrap.stalled .needle { stroke: var(--tx-ghost); }
 
   .live-instruments {
     display: grid;
