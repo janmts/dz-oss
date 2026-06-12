@@ -34,6 +34,26 @@ export function tileExtentBounds(
 }
 
 /**
+ * Pin the map's `minZoom` so the user can't zoom out past the point where
+ * `bounds` still fills the viewport — i.e. no scrolling out into the empty space
+ * beyond the map. `setMaxBounds` only constrains panning, not the zoom level, so
+ * this is what actually stops the "tiny map in a void" overshoot.
+ *
+ * The floor depends on the current viewport pixel size, so call it once the map
+ * is laid out AND on every resize. No-op until the map has a measurable size.
+ * Honours the configured floor: never lowers `minZoom` below where it already is
+ * (Leaflet clamps the computed value to the current min).
+ */
+export function applyBoundsFloor(map: LMap, bounds: LatLngBounds): void {
+  const size = map.getSize();
+  if (!size.x || !size.y) return;
+  // inside=true → smallest zoom at which the viewport is fully covered by the
+  // bounds (no empty margin). That's the hard zoom-out floor we want.
+  const floor = map.getBoundsZoom(bounds, true);
+  if (Number.isFinite(floor)) map.setMinZoom(floor);
+}
+
+/**
  * Screen-pixel stroke weight that scales with zoom so a line keeps a roughly
  * constant on-map thickness. `refZoom` is the zoom at which the line shows its
  * full `base` weight (we anchor it to the auto-fit zoom, so the default framing

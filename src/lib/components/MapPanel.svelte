@@ -4,7 +4,7 @@
   import TrackMap from './TrackMap.svelte';
   import { effectiveMapConfig } from '$lib/mapDefaults';
   import { xyzSimpleCRS } from '$lib/mapCrs';
-  import { applyLineWeights, scaledWeight, tileExtentBounds, type WeightedLine } from '$lib/mapView';
+  import { applyBoundsFloor, applyLineWeights, scaledWeight, tileExtentBounds, type WeightedLine } from '$lib/mapView';
   import { LAP_PALETTE, themeColor } from '$lib/theme';
   import type { TelemetryPacket, AppSettings } from '$lib/types';
 
@@ -99,6 +99,10 @@
       tileSize: cfg.tileSize,
       noWrap: true,
       bounds: extentBounds ?? undefined,
+      // Retain more off-screen tiles and don't refetch mid-zoom-animation, so
+      // panning/zooming doesn't flash white reloading tiles it just had.
+      keepBuffer: 4,
+      updateWhenZooming: false,
     }).addTo(map);
     if (extentBounds) map.setMaxBounds(extentBounds.pad(0.05));
     polylineLayer = L.layerGroup().addTo(map);
@@ -113,9 +117,15 @@
     map.on('zoomend', () => {
       if (map) applyLineWeights(staticLines, map.getZoom(), weightRefZoom);
     });
+    // Floor the zoom so free-roam/live can't scroll out into empty space.
+    // (fixedTrace sets a tighter floor in redraw; resize keeps it current.)
+    if (extentBounds) applyBoundsFloor(map, extentBounds);
     redraw();
 
-    resizeObserver = new ResizeObserver(() => map?.invalidateSize());
+    resizeObserver = new ResizeObserver(() => {
+      map?.invalidateSize();
+      if (map && extentBounds && !boundsApplied) applyBoundsFloor(map, extentBounds);
+    });
     resizeObserver.observe(host);
   });
 
@@ -232,10 +242,12 @@
   let boundsApplied = false;
   function clearBounds() {
     if (!boundsApplied || !map) return;
-    map.setMinZoom(cfg.minZoom);
     // Fall back to the tile extent (not fully unbounded) so free-roam/live can't
-    // overshoot the map and 404 for tiles that were never downloaded.
+    // overshoot the map and 404 for tiles that were never downloaded — including
+    // the zoom-out floor, so leaving a fixed trace doesn't re-open the void.
     map.setMaxBounds(extentBounds ?? undefined);
+    if (extentBounds) applyBoundsFloor(map, extentBounds);
+    else map.setMinZoom(cfg.minZoom);
     boundsApplied = false;
   }
 

@@ -1,9 +1,9 @@
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
-  import type { LatLng, LayerGroup, Map as LMap, Marker, PolylineOptions, TileLayer } from 'leaflet';
+  import type { LatLng, LatLngBounds, LayerGroup, Map as LMap, Marker, PolylineOptions, TileLayer } from 'leaflet';
   import { effectiveMapConfig, type EffectiveMapConfig } from '$lib/mapDefaults';
   import { xyzSimpleCRS } from '$lib/mapCrs';
-  import { applyLineWeights, scaledWeight, tileExtentBounds, type WeightedLine } from '$lib/mapView';
+  import { applyBoundsFloor, applyLineWeights, scaledWeight, tileExtentBounds, type WeightedLine } from '$lib/mapView';
   import { themeColor } from '$lib/theme';
   import type { AppSettings, DriftZoneRow, TelemetryPacket, ZonePoint } from '$lib/types';
 
@@ -32,6 +32,8 @@
   let resizeObserver: ResizeObserver | null = null;
   let mapReady = $state(false);
   let lastFitKey: string | null = null;
+  // Bundled tile extent (drives maxBounds + the dynamic zoom-out floor).
+  let extentBounds: LatLngBounds | null = null;
   // Static boundary/gate lines (rebuilt only when the zone changes) + the zoom at
   // which they show full weight (anchored to the auto-fit zoom).
   let staticLines: WeightedLine[] = [];
@@ -169,16 +171,20 @@
     });
     // Constrain camera + tile requests to the bundled tile extent: no scrolling
     // off into empty space, and no 404s for tiles that were never downloaded.
-    const extent = tileExtentBounds(L, map, config);
+    extentBounds = tileExtentBounds(L, map, config);
     tiles = L.tileLayer(config.tileUrl, {
       minZoom: config.minZoom,
       maxZoom: config.viewMaxZoom + zoneExtraZoom,
       maxNativeZoom: config.maxZoom,
       tileSize: config.tileSize,
       noWrap: true,
-      bounds: extent ?? undefined,
+      bounds: extentBounds ?? undefined,
+      // Retain more off-screen tiles and don't refetch mid-zoom-animation, so
+      // panning/zooming doesn't flash white reloading tiles it just had.
+      keepBuffer: 4,
+      updateWhenZooming: false,
     }).addTo(map);
-    if (extent) map.setMaxBounds(extent.pad(0.05));
+    if (extentBounds) map.setMaxBounds(extentBounds.pad(0.05));
     zoneLayer = L.layerGroup().addTo(map);
     markerLayer = L.layerGroup().addTo(map);
     weightRefZoom = config.defaultZoom;
@@ -190,7 +196,13 @@
     map.on('zoomend', () => {
       if (map) applyLineWeights(staticLines, map.getZoom(), weightRefZoom);
     });
-    resizeObserver = new ResizeObserver(() => map?.invalidateSize());
+    // Floor the zoom so the map can't be scrolled out into empty space; recompute
+    // on resize since the floor depends on the viewport size.
+    if (extentBounds) applyBoundsFloor(map, extentBounds);
+    resizeObserver = new ResizeObserver(() => {
+      map?.invalidateSize();
+      if (map && extentBounds) applyBoundsFloor(map, extentBounds);
+    });
     resizeObserver.observe(mapHost);
     mapReady = true;
     drawZone();

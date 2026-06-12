@@ -1,5 +1,5 @@
 use axum::{
-    http::{header, StatusCode, Uri},
+    http::{header, HeaderValue, StatusCode, Uri},
     response::{IntoResponse, Response},
 };
 use rust_embed::RustEmbed;
@@ -14,11 +14,22 @@ pub async fn serve(uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
     let path = if path.is_empty() { "index.html" } else { path };
     match Assets::get(path) {
-        Some(content) => (
-            [(header::CONTENT_TYPE, mime_for(path))],
-            content.data.into_owned(),
-        )
-            .into_response(),
+        Some(content) => {
+            let mut resp = (
+                [(header::CONTENT_TYPE, mime_for(path))],
+                content.data.into_owned(),
+            )
+                .into_response();
+            // Bundled map tiles never change — let the browser cache them so
+            // panning/zooming doesn't refetch (and white-flash) tiles it just had.
+            if path.starts_with("maptiles/") {
+                resp.headers_mut().insert(
+                    header::CACHE_CONTROL,
+                    HeaderValue::from_static("public, max-age=31536000, immutable"),
+                );
+            }
+            resp
+        }
         // SPA fallback: unknown non-asset routes return index.html.
         None => match Assets::get("index.html") {
             Some(index) => (
@@ -42,6 +53,8 @@ fn mime_for(path: &str) -> &'static str {
         "application/json"
     } else if path.ends_with(".svg") {
         "image/svg+xml"
+    } else if path.ends_with(".jpg") || path.ends_with(".jpeg") {
+        "image/jpeg"
     } else if path.ends_with(".png") {
         "image/png"
     } else if path.ends_with(".webp") {

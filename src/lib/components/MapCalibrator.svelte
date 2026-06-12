@@ -62,6 +62,10 @@
       tileSize: cfg.tileSize,
       noWrap: true,
       bounds: extent ?? undefined,
+      // Retain more off-screen tiles and don't refetch mid-zoom-animation, so
+      // panning/zooming doesn't flash white reloading tiles it just had.
+      keepBuffer: 4,
+      updateWhenZooming: false,
     }).addTo(map);
     if (extent) map.setMaxBounds(extent.pad(0.1));
     markers = L.layerGroup().addTo(map);
