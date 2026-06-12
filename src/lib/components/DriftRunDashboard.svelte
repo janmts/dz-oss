@@ -550,7 +550,7 @@
             >
               <div>
                 <strong class="mono">{formatScore(run.computedScore)}</strong>
-                <span class="when mono">#{run.zoneRunNumber} · {formatShort(run.startedAt)}</span>
+                <span class="when mono">#{run.zoneRunNumber} · {formatShort(run.startedAt)} · {run.season}</span>
               </div>
               <div>
                 <span class="mono">act {run.manualScore?.toLocaleString() ?? '—'} · {formatStatus(run)} / {formatDuration(run)}</span>

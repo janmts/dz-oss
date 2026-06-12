@@ -57,19 +57,23 @@ pub fn list_drift_runs(state: &AppState) -> Result<Vec<db::DriftRunRow>, String>
 }
 
 /// Re-score every stored run from its saved packets using the current scoring
-/// params (per-zone config over defaults). Returns the number of runs updated.
-/// Used to refresh computed scores after the formula is tuned.
+/// params (per-zone config over defaults), season-adjusted per run: a run is
+/// bound to the in-game season its `started_at` falls in, and outside winter
+/// the tarmac gate is dropped (off-tarmac surfaces pay). Returns the number of
+/// runs updated. Used to refresh computed scores after the formula is tuned.
 pub fn recompute_drift_scores(state: &AppState) -> Result<usize, String> {
     let conn = state.db.lock().unwrap();
     let refs = db::list_drift_run_refs(&conn).map_err(|e| e.to_string())?;
     let mut count = 0;
-    for (run_id, zone_id) in refs {
+    for (run_id, zone_id, started_at) in refs {
+        let season = crate::season::season_at_utc_ms(started_at);
         let params = match zone_id {
             Some(z) => db::get_drift_zone(&conn, z)
                 .map(|row| crate::scoring::ScoringParams::from_config(&row.scoring_config))
                 .unwrap_or_default(),
             None => crate::scoring::ScoringParams::default(),
-        };
+        }
+        .for_season(season);
         let blobs = db::get_drift_run_packets(&conn, run_id).map_err(|e| e.to_string())?;
         let pkts: Vec<_> = blobs
             .iter()

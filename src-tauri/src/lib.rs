@@ -6,6 +6,7 @@ pub mod drift;
 pub mod event;
 pub mod parser;
 pub mod scoring;
+pub mod season;
 #[cfg(feature = "server")]
 pub mod server;
 pub mod session;

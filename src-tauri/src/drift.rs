@@ -348,6 +348,12 @@ impl DriftRunManager {
             self.push_preroll(pkt.timestamp_ms, now_ms, raw, preroll_s);
             return None;
         };
+        // Bind the run to the in-game season at its start: outside winter the
+        // tarmac gate is dropped (grass pays — and therefore also keeps the
+        // starvation timer fed). The seasoned params drive live scoring,
+        // starvation, and the close-time score for this run's whole life.
+        let mut zone = zone;
+        zone.params = zone.params.for_season(crate::season::season_at_utc_ms(now_ms));
 
         match db::open_drift_run(
             conn,
@@ -882,6 +888,57 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("no drift score"));
+    }
+
+    /// Put all four wheels on a rough surface (fully off the tarmac).
+    fn grass(mut p: parser::TelemetryPacket) -> parser::TelemetryPacket {
+        p.surface_rumble_fl = 0.6;
+        p.surface_rumble_fr = 0.6;
+        p.surface_rumble_rl = 0.6;
+        p.surface_rumble_rr = 0.6;
+        p
+    }
+
+    #[test]
+    fn grass_dwell_feeds_starvation_outside_winter_but_starves_in_winter() {
+        // The tarmac gate is seasonal: outside winter, off-tarmac drifting
+        // banks points (grass pays full rate), so a long grass excursion must
+        // keep feeding the starvation timer. In winter the same excursion
+        // banks nothing and the run starves out. Runs are bound to the season
+        // of their wall-clock start time.
+        for (t0, expect_alive) in [
+            (crate::season::SPRING_ANCHOR_MS + 3_600_000, true), // spring
+            (crate::season::SPRING_ANCHOR_MS - 3_600_000, false), // winter
+        ] {
+            let conn = in_memory();
+            save_square_zone(&conn, 0.0);
+            let mut mgr = DriftRunManager::new();
+            let raw = vec![1u8; 324];
+            mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, t0, 1.0, 10.0);
+            let started = mgr
+                .note_packet(&conn, &packet(2.0, 1.0), &raw, t0 + 100, 1.0, 10.0)
+                .unwrap();
+            assert_eq!(started.state, "running");
+            // 2+ s of all-four-wheels-in-the-grass drifting at 100 ms cadence
+            // (starve timeout is 1 s here).
+            let mut last = started;
+            let mut now = t0 + 200;
+            let mut ms = 200u32;
+            while last.state == "running" && now <= t0 + 2400 {
+                last = mgr
+                    .note_packet(&conn, &grass(drifting_packet(2.0, 5.0, ms)), &raw, now, 1.0, 10.0)
+                    .unwrap();
+                now += 100;
+                ms += 100;
+            }
+            if expect_alive {
+                assert_eq!(last.state, "running", "grass keeps a spring run alive");
+                assert!(last.scoring, "spring grass packets are scoring packets");
+            } else {
+                assert_eq!(last.state, "invalid", "winter grass must starve the run");
+                assert!(!last.scoring);
+            }
+        }
     }
 
     #[test]
