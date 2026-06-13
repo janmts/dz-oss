@@ -58,6 +58,14 @@ pub fn get_drift_runs(state: State<'_, Arc<AppState>>) -> Result<Vec<db::DriftRu
 }
 
 #[tauri::command]
+pub fn get_drift_run_packets(
+    state: State<'_, Arc<AppState>>,
+    run_id: i64,
+) -> Result<Vec<parser::TelemetryPacket>, String> {
+    api::drift_run_packets(&state, run_id)
+}
+
+#[tauri::command]
 pub fn recompute_drift_scores(state: State<'_, Arc<AppState>>) -> Result<usize, String> {
     api::recompute_drift_scores(&state)
 }

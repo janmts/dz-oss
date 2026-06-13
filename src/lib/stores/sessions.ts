@@ -39,6 +39,9 @@ export async function clearAllSessions() { await ipc.clearAllSessions(); await l
 export async function renameSession(sessionId: number, name: string | null) { await ipc.renameSession(sessionId, name); await loadSessions(); }
 export async function setSessionBookmark(sessionId: number, bookmarked: boolean) { await ipc.setSessionBookmark(sessionId, bookmarked); await loadSessions(); }
 export async function loadDriftRuns() { driftRuns.set(await ipc.getDriftRuns()); }
+export async function loadDriftRunPackets(runId: number): Promise<TelemetryPacket[]> {
+  return ipc.getDriftRunPackets(runId);
+}
 export async function recomputeDriftScores(): Promise<number> {
   const n = await ipc.recomputeDriftScores();
   await loadDriftRuns();

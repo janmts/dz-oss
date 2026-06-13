@@ -17,6 +17,7 @@
   import { carName } from '$lib/car-name';
   import { CAR_CLASS_LABELS, DRIVETRAIN_LABELS, type DriftRunRow, type DriftZoneRow } from '$lib/types';
   import DriftZoneMap from './DriftZoneMap.svelte';
+  import DriftRunVisualizer from './DriftRunVisualizer.svelte';
 
   let selectedId = $state<number | null>(null);
   let scoreDraft = $state('');
@@ -30,6 +31,7 @@
   let recomputeStatus = $state('');
   let purging = $state(false);
   let zoneQuery = $state('');
+  let stageMode = $state<'zone' | 'run'>('zone');
 
   // Invalid runs across every zone (the purge command is global, matching this).
   let invalidCount = $derived($driftRuns.filter((run) => !run.valid).length);
@@ -161,6 +163,11 @@
 
   function formatScore(n: number | null | undefined) {
     return n === null || n === undefined ? '-' : Math.round(n).toLocaleString();
+  }
+
+  function formatPct(n: number | null | undefined) {
+    if (n === null || n === undefined) return '-';
+    return n < 0.05 && n > 0 ? '<0.1%' : `${n.toFixed(1)}%`;
   }
 
   // ── Drift-angle gauge geometry ────────────────────────────────────────────
@@ -440,6 +447,14 @@
   <main class="map-stage">
     <header class="stage-head">
       <h2>{selectedZone?.name ?? 'Drift Zone'}</h2>
+      <div class="stage-tabs">
+        <button class:active={stageMode === 'zone'} onclick={() => (stageMode = 'zone')}>Zone</button>
+        <button
+          class:active={stageMode === 'run'}
+          disabled={!scoringRun}
+          onclick={() => (stageMode = 'run')}
+        >Run</button>
+      </div>
       <div class="legend">
         <span><i class="left"></i>Left</span>
         <span><i class="right"></i>Right</span>
@@ -450,7 +465,9 @@
     </header>
 
     <div class="map-shell">
-      {#if $settings}
+      {#if stageMode === 'run'}
+        <DriftRunVisualizer run={scoringRun} zone={selectedZone} settings={$settings} livePacket={$displayPacket} />
+      {:else if $settings}
         <DriftZoneMap zone={selectedZone} settings={$settings} livePacket={$displayPacket} />
       {/if}
     </div>
@@ -569,6 +586,11 @@
               </div>
               <div>
                 <span class="mono">act {run.manualScore?.toLocaleString() ?? '—'} · {formatStatus(run)} / {formatDuration(run)}</span>
+                <span
+                  class="oob-pill mono"
+                  class:warn={(run.oobPct ?? 0) > 0}
+                  title="Approx center-point ticks outside saved zone polygon"
+                >OOB {formatPct(run.oobPct)}</span>
               </div>
               <div>
                 <span>{carName(run.carOrdinal)}</span>
@@ -615,6 +637,33 @@
   }
   .run-rail {
     border-left: 1px solid var(--bd-subtle);
+  }
+  .stage-tabs {
+    display: inline-flex;
+    align-items: center;
+    border: 1px solid var(--bd-dim);
+    border-radius: var(--r-sm);
+    overflow: hidden;
+  }
+  .stage-tabs button {
+    border: 0;
+    border-right: 1px solid var(--bd-dim);
+    background: var(--bg-panel);
+    color: var(--tx-dim);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 0.66rem;
+    font-weight: 650;
+    letter-spacing: 0.04em;
+    padding: 0.34rem 0.62rem;
+    text-transform: uppercase;
+  }
+  .stage-tabs button:last-child {
+    border-right: 0;
+  }
+  .stage-tabs button.active {
+    background: color-mix(in srgb, var(--ac) 18%, var(--bg-panel));
+    color: var(--tx-hi);
   }
 
   /* ── Zone selector: compact, fixed-height, searchable ── */
@@ -1178,6 +1227,18 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .oob-pill {
+    flex-shrink: 0;
+    border: 1px solid var(--bd-dim);
+    border-radius: var(--r-sm);
+    color: var(--tx-dim);
+    font-size: 0.62rem;
+    padding: 0.12rem 0.28rem;
+  }
+  .oob-pill.warn {
+    border-color: color-mix(in srgb, var(--warn) 46%, var(--bg-panel));
+    color: var(--warn);
   }
   .empty {
     padding: 1rem;

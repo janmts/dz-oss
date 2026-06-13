@@ -92,6 +92,13 @@ pub async fn list_drift_runs(
     api::list_drift_runs(&s.app).map(Json).map_err(err)
 }
 
+pub async fn drift_run_packets(
+    State(s): State<ServerState>,
+    Path(id): Path<i64>,
+) -> Result<Json<Vec<parser::TelemetryPacket>>, JsonErr> {
+    api::drift_run_packets(&s.app, id).map(Json).map_err(err)
+}
+
 pub async fn drift_run_status(State(s): State<ServerState>) -> Json<crate::drift::DriftRunStatus> {
     Json(api::drift_run_status(&s.app))
 }
@@ -129,7 +136,9 @@ pub async fn delete_drift_run(
 pub async fn delete_invalid_drift_runs(
     State(s): State<ServerState>,
 ) -> Result<Json<usize>, JsonErr> {
-    api::delete_invalid_drift_runs(&s.app).map(Json).map_err(err)
+    api::delete_invalid_drift_runs(&s.app)
+        .map(Json)
+        .map_err(err)
 }
 
 pub async fn list_drift_zones(

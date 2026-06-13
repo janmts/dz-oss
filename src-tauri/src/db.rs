@@ -750,6 +750,9 @@ pub struct DriftRunRow {
     pub manual_notes: Option<String>,
     pub packet_count: i64,
     pub score_breakdown: Option<serde_json::Value>,
+    /// Approximate geometry diagnostic: percentage of valid-position packets
+    /// whose telemetry center point is outside the saved zone corridor polygon.
+    pub oob_pct: Option<f64>,
 }
 
 pub fn list_drift_runs(conn: &Connection) -> Result<Vec<DriftRunRow>> {
@@ -765,9 +768,11 @@ pub fn list_drift_runs(conn: &Connection) -> Result<Vec<DriftRunRow>> {
          SELECT r.id, r.zone_id, r.started_at, r.ended_at, r.car_ordinal,
                 r.car_class, r.car_pi, r.drivetrain_type, r.car_group,
                 r.valid, r.invalid_reason, r.computed_score, s.manual_score,
-                r.packet_count, r.score_breakdown_json, s.notes, n.zone_run_number
+                r.packet_count, r.score_breakdown_json, s.notes, n.zone_run_number,
+                z.left_boundary_json, z.right_boundary_json
          FROM drift_runs r
          LEFT JOIN drift_run_scores s ON s.run_id = r.id
+         LEFT JOIN drift_zones z ON z.id = r.zone_id
          JOIN numbered n ON n.id = r.id
          ORDER BY r.started_at DESC
          LIMIT 200",
@@ -775,6 +780,12 @@ pub fn list_drift_runs(conn: &Connection) -> Result<Vec<DriftRunRow>> {
     let rows = stmt.query_map([], |r| {
         let breakdown: Option<String> = r.get(14)?;
         let started_at: i64 = r.get(2)?;
+        let left_json: Option<String> = r.get(17)?;
+        let right_json: Option<String> = r.get(18)?;
+        let oob_pct = match (left_json, right_json) {
+            (Some(left), Some(right)) => run_oob_pct(conn, r.get(0)?, &left, &right).ok().flatten(),
+            _ => None,
+        };
         Ok(DriftRunRow {
             id: r.get(0)?,
             zone_run_number: r.get(16)?,
@@ -794,9 +805,78 @@ pub fn list_drift_runs(conn: &Connection) -> Result<Vec<DriftRunRow>> {
             manual_notes: r.get(15)?,
             packet_count: r.get(13)?,
             score_breakdown: breakdown.and_then(|s| serde_json::from_str(&s).ok()),
+            oob_pct,
         })
     })?;
     rows.collect()
+}
+
+fn run_oob_pct(
+    conn: &Connection,
+    run_id: i64,
+    left_boundary_json: &str,
+    right_boundary_json: &str,
+) -> Result<Option<f64>> {
+    let polygon = zone_polygon(left_boundary_json, right_boundary_json);
+    if polygon.len() < 3 {
+        return Ok(None);
+    }
+
+    let blobs = get_drift_run_packets(conn, run_id)?;
+    let mut total = 0usize;
+    let mut oob = 0usize;
+    for blob in blobs {
+        let Ok(pkt) = crate::parser::parse(&blob) else {
+            continue;
+        };
+        if pkt.position_x == 0.0 && pkt.position_z == 0.0 {
+            continue;
+        }
+        total += 1;
+        if !point_in_polygon(pkt.position_x as f64, pkt.position_z as f64, &polygon) {
+            oob += 1;
+        }
+    }
+
+    Ok((total > 0).then_some((oob as f64 / total as f64) * 100.0))
+}
+
+fn zone_polygon(left_boundary_json: &str, right_boundary_json: &str) -> Vec<ZonePoint> {
+    let mut left = parse_points_json(left_boundary_json.to_string());
+    let mut right = parse_points_json(right_boundary_json.to_string());
+    right.reverse();
+    left.extend(right);
+    left
+}
+
+fn point_in_polygon(x: f64, z: f64, polygon: &[ZonePoint]) -> bool {
+    let mut inside = false;
+    let mut j = polygon.len() - 1;
+    for i in 0..polygon.len() {
+        let pi = &polygon[i];
+        let pj = &polygon[j];
+
+        let dx = pj.x - pi.x;
+        let dz = pj.z - pi.z;
+        let seg_len2 = dx * dx + dz * dz;
+        if seg_len2 > 0.0 {
+            let t = (((x - pi.x) * dx + (z - pi.z) * dz) / seg_len2).clamp(0.0, 1.0);
+            let px = pi.x + t * dx;
+            let pz = pi.z + t * dz;
+            if (x - px).hypot(z - pz) < 1e-6 {
+                return true;
+            }
+        }
+
+        if (pi.z > z) != (pj.z > z) {
+            let x_cross = (pj.x - pi.x) * (z - pi.z) / (pj.z - pi.z) + pi.x;
+            if x < x_cross {
+                inside = !inside;
+            }
+        }
+        j = i;
+    }
+    inside
 }
 
 #[cfg(test)]

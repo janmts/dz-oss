@@ -56,6 +56,18 @@ pub fn list_drift_runs(state: &AppState) -> Result<Vec<db::DriftRunRow>, String>
     db::list_drift_runs(&conn).map_err(|e| e.to_string())
 }
 
+pub fn drift_run_packets(
+    state: &AppState,
+    run_id: i64,
+) -> Result<Vec<crate::parser::TelemetryPacket>, String> {
+    let conn = state.db.lock().unwrap();
+    let blobs = db::get_drift_run_packets(&conn, run_id).map_err(|e| e.to_string())?;
+    Ok(blobs
+        .iter()
+        .filter_map(|b| crate::parser::parse(b).ok())
+        .collect())
+}
+
 /// Re-score every stored run from its saved packets using the current scoring
 /// params (per-zone config over defaults), season-adjusted per run: a run is
 /// bound to the in-game season its `started_at` falls in, and outside winter
@@ -81,8 +93,13 @@ pub fn recompute_drift_scores(state: &AppState) -> Result<usize, String> {
             .collect();
         let result = crate::scoring::score_run(&pkts, &params);
         let breakdown = serde_json::to_string(&result).ok();
-        db::update_drift_run_score(&conn, run_id, Some(result.score as f32), breakdown.as_deref())
-            .map_err(|e| e.to_string())?;
+        db::update_drift_run_score(
+            &conn,
+            run_id,
+            Some(result.score as f32),
+            breakdown.as_deref(),
+        )
+        .map_err(|e| e.to_string())?;
         count += 1;
     }
     Ok(count)

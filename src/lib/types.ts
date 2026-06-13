@@ -28,6 +28,10 @@ export interface TelemetryPacket {
   tireCombinedSlipFr: number;
   tireCombinedSlipRl: number;
   tireCombinedSlipRr: number;
+  surfaceRumbleFl: number;
+  surfaceRumbleFr: number;
+  surfaceRumbleRl: number;
+  surfaceRumbleRr: number;
   carOrdinal: number;
   carClass: number;
   carPi: number;
@@ -135,6 +139,8 @@ export interface DriftRunRow {
   manualNotes: string | null;
   packetCount: number;
   scoreBreakdown: DriftScoreBreakdown | null;
+  /** Approximate center-point OOB percentage against the saved zone polygon. */
+  oobPct: number | null;
 }
 
 export interface DriftRunStatus {
