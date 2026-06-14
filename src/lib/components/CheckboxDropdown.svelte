@@ -1,6 +1,8 @@
 <script lang="ts">
   // Reusable searchable multi-select dropdown (checkbox list). Used for the run
-  // filters (car / zone / season) and each graph lane's channel picker.
+  // filters (car / zone / season) and each graph lane's channel picker. The
+  // panel is position:fixed and viewport-anchored to the trigger so it never
+  // gets clipped by a scrolling / overflow:hidden container (lane, rail).
   interface Option {
     value: string;
     label: string;
@@ -30,7 +32,13 @@
 
   let open = $state(false);
   let query = $state('');
-  let root = $state<HTMLDivElement | null>(null);
+  let trigger = $state<HTMLButtonElement | null>(null);
+  let pos = $state<{ top: number; left: number | null; right: number | null; minWidth: number }>({
+    top: 0,
+    left: 0,
+    right: null,
+    minWidth: 180,
+  });
 
   let filtered = $derived(
     query.trim()
@@ -38,48 +46,93 @@
       : options,
   );
 
+  function place() {
+    if (!trigger) return;
+    const r = trigger.getBoundingClientRect();
+    const minWidth = Math.max(180, r.width);
+    if (align === 'right') {
+      pos = { top: r.bottom + 4, left: null, right: Math.max(8, window.innerWidth - r.right), minWidth };
+    } else {
+      pos = { top: r.bottom + 4, left: Math.min(r.left, window.innerWidth - minWidth - 8), right: null, minWidth };
+    }
+  }
+
+  function toggleOpen() {
+    if (open) {
+      open = false;
+    } else {
+      place();
+      open = true;
+    }
+  }
+
+  // Keep the panel anchored to the trigger while scrolling/resizing (capture
+  // catches inner scroll containers too); pointerdown outside closes it.
+  $effect(() => {
+    if (!open) return;
+    const onMove = () => place();
+    window.addEventListener('scroll', onMove, true);
+    window.addEventListener('resize', onMove);
+    return () => {
+      window.removeEventListener('scroll', onMove, true);
+      window.removeEventListener('resize', onMove);
+    };
+  });
+
   function onWindowPointerDown(e: PointerEvent) {
-    if (open && root && !root.contains(e.target as Node)) open = false;
+    if (!open) return;
+    const t = e.target as HTMLElement;
+    if (trigger?.contains(t) || t.closest?.('.dd-panel')) return;
+    open = false;
   }
 </script>
 
 <svelte:window onpointerdown={onWindowPointerDown} />
 
-<div class="dd" bind:this={root}>
-  <button type="button" class="dd-btn" class:active={selected.length > 0} onclick={() => (open = !open)}>
-    <span class="dd-label">{label}</span>
-    <span class="dd-count mono">{selected.length > 0 ? selected.length : allLabel}</span>
-    <span class="dd-caret" class:open>▾</span>
-  </button>
+<button
+  bind:this={trigger}
+  type="button"
+  class="dd-btn"
+  class:active={selected.length > 0}
+  onclick={toggleOpen}
+>
+  <span class="dd-label">{label}</span>
+  <span class="dd-count mono">{selected.length > 0 ? selected.length : allLabel}</span>
+  <span class="dd-caret" class:open>▾</span>
+</button>
 
-  {#if open}
-    <div class="dd-panel" class:right={align === 'right'}>
-      {#if searchable}
-        <input class="dd-search" placeholder="Filter…" bind:value={query} />
+{#if open}
+  <div
+    class="dd-panel"
+    style:top="{pos.top}px"
+    style:left={pos.left != null ? `${pos.left}px` : ''}
+    style:right={pos.right != null ? `${pos.right}px` : ''}
+    style:min-width="{pos.minWidth}px"
+  >
+    {#if searchable}
+      <input class="dd-search" placeholder="Filter…" bind:value={query} />
+    {/if}
+    <div class="dd-list">
+      {#each filtered as opt (opt.value)}
+        <label class="dd-opt">
+          <input
+            type="checkbox"
+            checked={selected.includes(opt.value)}
+            onchange={() => onToggle(opt.value)}
+          />
+          {#if opt.swatch}<span class="dd-sw" style:background={opt.swatch}></span>{/if}
+          <span class="dd-opt-label">{opt.label}</span>
+          {#if opt.hint}<span class="dd-opt-hint mono">{opt.hint}</span>{/if}
+        </label>
+      {/each}
+      {#if filtered.length === 0}
+        <div class="dd-empty">{emptyText}</div>
       {/if}
-      <div class="dd-list">
-        {#each filtered as opt (opt.value)}
-          <label class="dd-opt">
-            <input
-              type="checkbox"
-              checked={selected.includes(opt.value)}
-              onchange={() => onToggle(opt.value)}
-            />
-            {#if opt.swatch}<span class="dd-sw" style:background={opt.swatch}></span>{/if}
-            <span class="dd-opt-label">{opt.label}</span>
-            {#if opt.hint}<span class="dd-opt-hint mono">{opt.hint}</span>{/if}
-          </label>
-        {/each}
-        {#if filtered.length === 0}
-          <div class="dd-empty">{emptyText}</div>
-        {/if}
-      </div>
     </div>
-  {/if}
-</div>
+  </div>
+{/if}
 
 <style>
-  .dd { position: relative; }
   .dd-btn {
     display: inline-flex;
     align-items: center;
@@ -102,18 +155,14 @@
   .dd-caret.open { transform: rotate(180deg); }
 
   .dd-panel {
-    position: absolute;
-    top: calc(100% + 4px);
-    left: 0;
-    z-index: 50;
-    width: max(180px, 100%);
+    position: fixed;
+    z-index: 1100;
     background: var(--bg-panel);
     border: 1px solid var(--bd-subtle);
     border-radius: var(--r-md);
-    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
     padding: 5px;
   }
-  .dd-panel.right { left: auto; right: 0; }
   .dd-search {
     width: 100%;
     font-family: inherit;
@@ -125,7 +174,7 @@
     padding: 0.25rem 0.5rem;
     margin-bottom: 5px;
   }
-  .dd-list { max-height: 220px; overflow-y: auto; }
+  .dd-list { max-height: 240px; overflow-y: auto; }
   .dd-opt {
     display: flex;
     align-items: center;

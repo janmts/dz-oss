@@ -22,6 +22,22 @@
   let ready = $state(false);
   let cardPos = $state<{ x: number; y: number } | null>(null);
   let highlight: ReturnType<GameMap['L']['circleMarker']> | null = null;
+  let fitZoom = 0;
+  let lastFitKey = '';
+  let mapCfg: ReturnType<typeof effectiveMapConfig> | null = null;
+  const tickMarkers: { m: ReturnType<GameMap['L']['circleMarker']>; base: number }[] = [];
+
+  // Dot radius scales with zoom like the line weight: full size at/above the
+  // run's fit zoom, shrinking when zoomed out so dense 16 Hz dots don't read as
+  // a caterpillar.
+  function markerScale(): number {
+    if (!gm) return 1;
+    return Math.min(1, Math.max(0.4, Math.pow(2, gm.map.getZoom() - fitZoom)));
+  }
+  function scaleMarkers() {
+    const s = markerScale();
+    for (const { m, base } of tickMarkers) m.setRadius(base * s);
+  }
 
   function stateColors(): Record<ScoreState, string> {
     return {
@@ -37,8 +53,12 @@
     if (!host) return;
     const s = get(settings) ?? (await loadSettings());
     void loadDriftZones();
+    mapCfg = effectiveMapConfig(s);
     try {
-      gm = await createGameMap(host, effectiveMapConfig(s), { zoomControl: true });
+      // extraZoom matches the analysis-oriented zone maps so you can zoom in
+      // close to inspect individual ticks (the live track map caps at viewMaxZoom).
+      gm = await createGameMap(host, mapCfg, { zoomControl: true, extraZoom: 3 });
+      gm.map.on('zoomend', scaleMarkers);
       ready = true;
       redraw();
     } catch (e) {
@@ -135,14 +155,16 @@
     if (!gm) return;
     const { packets, ticks } = view.data;
     const stroke = themeColor('--bg-card', '#18191d');
+    const s = markerScale();
     for (const idx of visibleTickIndices(view.data)) {
       const p = packets[idx];
       if (!nonZero(p)) continue;
       const ll = gm.worldToLatLng({ x: p.positionX, z: p.positionZ });
       const rumble = isRumbleTick(ticks[idx]);
+      const base = rumble ? 2.3 : 1.6;
       const fill = mode === 'scoring' ? col[scoreState(ticks[idx])] : rumble ? col.unpaid : view.color;
       const m = gm.L.circleMarker(ll, {
-        radius: rumble ? 3.4 : 2.8,
+        radius: base * s,
         weight: 1,
         color: stroke,
         fillColor: fill,
@@ -153,13 +175,16 @@
       m.on('mouseover', (e: { containerPoint: { x: number; y: number } }) => {
         hover.set({ runId, index: idx });
         cardPos = { x: e.containerPoint.x, y: e.containerPoint.y };
-        m.setStyle({ radius: 5.5, weight: 2 });
+        m.setStyle({ weight: 2 });
+        m.setRadius(Math.max(5, base * markerScale() * 2));
       });
       m.on('mouseout', () => {
         hover.set(null);
         cardPos = null;
-        m.setStyle({ radius: rumble ? 3.4 : 2.8, weight: 1 });
+        m.setStyle({ weight: 1 });
+        m.setRadius(base * markerScale());
       });
+      tickMarkers.push({ m, base });
     }
   }
 
@@ -168,8 +193,12 @@
     gm.clearLines();
     gm.markers.clearLayers();
     highlight = null;
+    tickMarkers.length = 0;
     const views = $runViews;
-    if (views.length === 0) return;
+    if (views.length === 0) {
+      lastFitKey = '';
+      return;
+    }
 
     const col = stateColors();
     const mode: 'scoring' | 'byRun' = views.length > 1 ? 'byRun' : $traceColorMode;
@@ -177,17 +206,24 @@
     const zone = zoneFor(views[0].row.zoneId);
     if (zone) drawZone(zone);
 
+    const pts: ZonePoint[] = [];
     for (const v of views) {
       drawTrace(v, mode, col);
-      addMarkers(v, mode, col);
+      for (const p of v.data.packets) if (nonZero(p)) pts.push({ x: p.positionX, z: p.positionZ });
     }
 
-    const pts: ZonePoint[] = [];
-    for (const v of views) for (const p of v.data.packets) if (nonZero(p)) pts.push({ x: p.positionX, z: p.positionZ });
-    if (pts.length) {
-      const fitZoom = gm.lockCamera(pts);
-      gm.setWeightRefZoom(fitZoom);
+    // Frame the run only when the SET of runs changes (not on a colour-mode
+    // toggle), so the camera isn't yanked. fitWorld leaves the camera free —
+    // content-clamped zoom + pan like the rest of the app — so you can zoom
+    // right in to inspect individual ticks.
+    const key = views.map((v) => v.runId).join(',');
+    if (pts.length && key !== lastFitKey) {
+      fitZoom = gm.fitWorld(pts, 0.12, mapCfg?.viewMaxZoom);
+      lastFitKey = key;
     }
+    gm.setWeightRefZoom(fitZoom || gm.map.getZoom());
+
+    for (const v of views) addMarkers(v, mode, col);
   }
 
   // Per-tick hover card data.

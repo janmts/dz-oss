@@ -38,6 +38,14 @@
     return `${m}:${(s % 60).toFixed(2).padStart(5, '0')}`;
   }
 
+  // Compact axis labels so large totals (cumulative points) fit the gutter.
+  function fmtCompact(n: number): string {
+    const a = Math.abs(n);
+    if (a >= 1e6) return `${(n / 1e6).toFixed(a >= 1e7 ? 0 : 1)}M`;
+    if (a >= 1e3) return `${(n / 1e3).toFixed(a >= 1e4 ? 0 : 1)}k`;
+    return `${Math.round(n)}`;
+  }
+
   // Tooltip: rows = channels, columns = runs. Series order is run-major,
   // channel-inner → u.data[runIdx * nCh + chIdx + 1].
   function tooltip(channels: string[], runs: Array<{ label: string; color: string }>): uPlot.Plugin {
@@ -132,7 +140,13 @@
       series,
       axes: [
         { stroke: axisColor, grid: { stroke: gridColor }, ticks: { stroke: gridColor } },
-        { stroke: axisColor, grid: { stroke: gridColor }, ticks: { stroke: gridColor }, size: 38 },
+        {
+          stroke: axisColor,
+          grid: { stroke: gridColor },
+          ticks: { stroke: gridColor },
+          size: 50,
+          values: (_u, splits) => splits.map((v) => fmtCompact(v as number)),
+        },
       ],
     };
     plots.set(lane.id, new uPlot(opts, data as uPlot.AlignedData, mount));
