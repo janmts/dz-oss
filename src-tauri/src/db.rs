@@ -1,4 +1,4 @@
-use rusqlite::{Connection, Result};
+use rusqlite::{Connection, OptionalExtension, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -658,6 +658,18 @@ pub fn list_drift_run_refs(conn: &Connection) -> Result<Vec<(i64, Option<i64>, i
     let mut stmt = conn.prepare("SELECT id, zone_id, started_at FROM drift_runs ORDER BY id ASC")?;
     let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
     rows.collect()
+}
+
+/// (zone_id, started_at) for a single run, or `None` if the id doesn't exist —
+/// the per-run version of [`list_drift_run_refs`], used to resolve one run's
+/// per-zone scoring config + season without scanning the table.
+pub fn get_drift_run_ref(conn: &Connection, run_id: i64) -> Result<Option<(Option<i64>, i64)>> {
+    conn.query_row(
+        "SELECT zone_id, started_at FROM drift_runs WHERE id=?1",
+        [run_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .optional()
 }
 
 /// Store a recomputed score + breakdown on an already-closed run. Leaves

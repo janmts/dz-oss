@@ -137,6 +137,30 @@ export interface DriftRunRow {
   scoreBreakdown: DriftScoreBreakdown | null;
 }
 
+/** Authoritative per-packet scoring diagnostics (mirrors scoring::TickScore).
+ *  One entry per packet in `DriftRunPackets.packets`, same order. Drives the
+ *  run-viewer tick colouring — scoring (green), drifting-but-unpaid (red),
+ *  idle (grey) — without re-deriving the season/tarmac gate on the frontend. */
+export interface TickScore {
+  isDrifting: boolean;
+  isScoring: boolean;
+  /** Wheels on tarmac this tick (0–4). */
+  tarmacWheels: number;
+  /** Scaled points banked at this tick; summing all ticks reproduces the score. */
+  points: number;
+}
+
+/** One drift run's full telemetry + scoring diagnostics for the run viewer,
+ *  returned by `getDriftRunPackets`. `packets` and `ticks` are index-aligned. */
+export interface DriftRunPackets {
+  runId: number;
+  zoneId: number | null;
+  season: 'spring' | 'summer' | 'autumn' | 'winter';
+  packets: TelemetryPacket[];
+  ticks: TickScore[];
+  score: DriftScoreBreakdown;
+}
+
 export interface DriftRunStatus {
   state: 'idle' | 'running' | 'completed' | 'invalid';
   runId: number | null;

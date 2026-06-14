@@ -4,6 +4,7 @@ import type {
   AppSettings,
   SessionLap,
   DriftRunRow,
+  DriftRunPackets,
   DriftRunStatus,
   DriftZoneInput,
   DriftZoneRow,
@@ -103,6 +104,10 @@ export const ipc = {
 
   getDriftRuns: (): Promise<DriftRunRow[]> =>
     isTauri ? tauriInvoke('get_drift_runs') : http('/api/drift-runs'),
+
+  getDriftRunPackets: (runId: number): Promise<DriftRunPackets> =>
+    isTauri ? tauriInvoke('get_drift_run_packets', { runId })
+            : http(`/api/drift-runs/${runId}/packets`),
 
   recomputeDriftScores: (): Promise<number> =>
     isTauri ? tauriInvoke('recompute_drift_scores')

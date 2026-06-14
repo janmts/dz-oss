@@ -63,6 +63,14 @@ pub fn recompute_drift_scores(state: State<'_, Arc<AppState>>) -> Result<usize, 
 }
 
 #[tauri::command]
+pub fn get_drift_run_packets(
+    state: State<'_, Arc<AppState>>,
+    run_id: i64,
+) -> Result<api::DriftRunPackets, String> {
+    api::drift_run_packets(&state, run_id)
+}
+
+#[tauri::command]
 pub fn set_drift_run_manual_score(
     state: State<'_, Arc<AppState>>,
     run_id: i64,

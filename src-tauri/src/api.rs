@@ -88,6 +88,55 @@ pub fn recompute_drift_scores(state: &AppState) -> Result<usize, String> {
     Ok(count)
 }
 
+/// One drift run's full per-packet telemetry plus authoritative per-tick scoring
+/// diagnostics, for the run viewer. `packets` and `ticks` are index-aligned.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DriftRunPackets {
+    pub run_id: i64,
+    pub zone_id: Option<i64>,
+    /// Season the run is scored under (drives the off-tarmac gate), derived from
+    /// its `started_at` — the same binding [`recompute_drift_scores`] uses.
+    pub season: &'static str,
+    pub packets: Vec<crate::parser::TelemetryPacket>,
+    pub ticks: Vec<crate::scoring::TickScore>,
+    pub score: crate::scoring::RunScore,
+}
+
+/// Load one run's stored packets and score them with per-tick emission, so the
+/// run viewer can plot the trace + timeline and colour each tick by what the
+/// game actually banked. Resolves the run's season-adjusted per-zone params the
+/// same way [`recompute_drift_scores`] does, so the diagnostics match the stored
+/// `computed_score`.
+pub fn drift_run_packets(state: &AppState, run_id: i64) -> Result<DriftRunPackets, String> {
+    let conn = state.db.lock().unwrap();
+    let (zone_id, started_at) = db::get_drift_run_ref(&conn, run_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("drift run {run_id} not found"))?;
+    let season = crate::season::season_at_utc_ms(started_at);
+    let params = match zone_id {
+        Some(z) => db::get_drift_zone(&conn, z)
+            .map(|row| crate::scoring::ScoringParams::from_config(&row.scoring_config))
+            .unwrap_or_default(),
+        None => crate::scoring::ScoringParams::default(),
+    }
+    .for_season(season);
+    let packets: Vec<crate::parser::TelemetryPacket> = db::get_drift_run_packets(&conn, run_id)
+        .map_err(|e| e.to_string())?
+        .iter()
+        .filter_map(|b| crate::parser::parse(b).ok())
+        .collect();
+    let (score, ticks) = crate::scoring::score_run_with_ticks(&packets, &params);
+    Ok(DriftRunPackets {
+        run_id,
+        zone_id,
+        season: season.as_str(),
+        packets,
+        ticks,
+        score,
+    })
+}
+
 /// Delete one run and its packets/splits/score. Returns Ok even if the id was
 /// already gone (idempotent from the caller's perspective).
 pub fn delete_drift_run(state: &AppState, run_id: i64) -> Result<(), String> {
