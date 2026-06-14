@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { isDesktop } from '$lib/ipc';
+  import { isDesktop, ipc } from '$lib/ipc';
   import { startTelemetryListener, replay } from '$lib/stores/telemetry';
   import { loadSettings, settings, saveSettings } from '$lib/stores/sessions';
   import TopBar, { type AppTab } from '$lib/components/TopBar.svelte';
@@ -22,8 +22,7 @@
   let showSettings = $state(false);
   let toasts = $state<{ id: number; message: string }[]>([]);
   let nextToastId = 0;
-  let pendingUpdate = $state<{ version: string; install: () => Promise<void> } | null>(null);
-  let updateInstalling = $state(false);
+  let newRelease = $state<{ version: string; url: string } | null>(null);
   let popoutRef: Window | null = null;
   let mapPoppedOut = $state(false);
   let controlBc: BroadcastChannel | null = null;
@@ -90,6 +89,45 @@
     }
   }
 
+  // Lightweight update notice: ask GitHub Releases whether a newer version is
+  // out and point the user at the download page. No auto-install. Desktop only —
+  // the headless server is run from source, so a "download the installer" nudge
+  // makes no sense there.
+  function isNewerVersion(latest: string, current: string): boolean {
+    const a = latest.split('-')[0].split('.').map(Number);
+    const b = current.split('-')[0].split('.').map(Number);
+    for (let i = 0; i < 3; i++) {
+      const d = (a[i] ?? 0) - (b[i] ?? 0);
+      if (d !== 0) return d > 0;
+    }
+    return false;
+  }
+
+  async function checkForNewRelease() {
+    try {
+      const [current, res] = await Promise.all([
+        ipc.getAppVersion(),
+        fetch('https://api.github.com/repos/janmts/dz-oss/releases/latest', {
+          headers: { Accept: 'application/vnd.github+json' },
+        }),
+      ]);
+      if (!res.ok) return; // 404 (no releases yet) or rate-limited — stay quiet
+      const data = await res.json();
+      const latest = String(data.tag_name ?? '').replace(/^v/, '');
+      if (latest && isNewerVersion(latest, current)) {
+        newRelease = { version: latest, url: data.html_url };
+      }
+    } catch {
+      // Offline or GitHub unreachable — ignore
+    }
+  }
+
+  async function openRelease() {
+    if (!newRelease) return;
+    const { openUrl } = await import('@tauri-apps/plugin-opener');
+    await openUrl(newRelease.url);
+  }
+
   onDestroy(() => controlBc?.close());
 
   onMount(async () => {
@@ -101,23 +139,7 @@
       if (e.data?.type === 'popout-heartbeat') { resetHeartbeat(); }
       if (e.data?.type === 'popout-closed') { onPopoutClosed(); }
     };
-    if (isDesktop) {
-      try {
-        const { invoke } = await import('@tauri-apps/api/core');
-        const info = await invoke<{ version: string; is_deb: boolean } | null>('check_for_update');
-        if (info) {
-          pendingUpdate = {
-            version: info.version,
-            install: async () => {
-              updateInstalling = true;
-              await invoke('install_update', { isDeb: info.is_deb });
-            },
-          };
-        }
-      } catch {
-        // Offline or update endpoint unreachable — ignore
-      }
-    }
+    if (isDesktop) checkForNewRelease();
   });
 
   let s = $derived($settings);
@@ -128,13 +150,11 @@
   });
 </script>
 
-{#if pendingUpdate}
+{#if newRelease}
   <div class="update-bar">
-    <span>Update v{pendingUpdate.version} available</span>
-    <button class="update-install" disabled={updateInstalling} onclick={() => pendingUpdate?.install()}>
-      {updateInstalling ? 'Installing…' : 'Install & restart'}
-    </button>
-    <button class="update-dismiss" onclick={() => (pendingUpdate = null)}>✕</button>
+    <span>DZ-OSS v{newRelease.version} is available</span>
+    <button class="update-install" onclick={openRelease}>Download</button>
+    <button class="update-dismiss" onclick={() => (newRelease = null)}>✕</button>
   </div>
 {/if}
 
@@ -279,7 +299,6 @@
     padding: 0.2rem 0.65rem; font-size: 0.75rem; font-weight: 600; cursor: pointer;
     font-family: inherit;
   }
-  .update-install:disabled { opacity: 0.6; cursor: default; }
   .update-dismiss {
     background: none; border: none; color: var(--tx-dim);
     font-size: 0.85rem; cursor: pointer; padding: 0 0.25rem;

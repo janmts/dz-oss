@@ -8,5 +8,5 @@ fn main() {
 
 #[cfg(not(feature = "desktop"))]
 fn main() {
-    eprintln!("This binary was built without the `desktop` feature. Use fh6-tel-serve instead.");
+    eprintln!("This binary was built without the `desktop` feature. Use dz-oss-serve instead.");
 }

@@ -23,21 +23,12 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src ipc: http://ipc.localhost"
-    }
-  },
-  "plugins": {
-    "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQ0RjIwQjBGNTZBMUMwNzYKUldSMndLRldEd3Z5Uko4ZXdudmVhb0J2VERyaXEwRFVGVU1NRkpuTlhkcGFZaU5pVkk1ZnkvU1MK",
-      "endpoints": [
-        "https://github.com/janmts/dz-oss/releases/latest/download/latest.json"
-      ]
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src ipc: http://ipc.localhost https://api.github.com"
     }
   },
   "bundle": {
     "active": true,
     "targets": "all",
-    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

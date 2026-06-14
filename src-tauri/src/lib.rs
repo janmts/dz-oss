@@ -12,8 +12,6 @@ pub mod server;
 pub mod session;
 pub mod settings;
 pub mod udp;
-#[cfg(feature = "desktop")]
-pub mod update;
 
 use drift::DriftRunManager;
 use session::SessionManager;
@@ -61,8 +59,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_opener::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler({
@@ -113,8 +110,6 @@ pub fn run() {
             commands::delete_drift_zone,
             commands::get_settings,
             commands::save_settings,
-            update::check_for_update,
-            update::install_update,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();

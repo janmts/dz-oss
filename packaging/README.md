@@ -1,12 +1,12 @@
-# fh6-tel-serve — headless server
+# dz-oss-serve — headless server
 
-`fh6-tel-serve` runs the telemetry ingest + dashboard without a desktop window.
+`dz-oss-serve` runs the telemetry ingest + dashboard without a desktop window.
 Run EITHER the desktop app OR the server on a machine (one process owns the UDP
 socket and the SQLite database).
 
 ## Usage
 
-    fh6-tel-serve [--ip 127.0.0.1] [--port 8080] [--auth-token <token>] [--udp-port <port>]
+    dz-oss-serve [--ip 127.0.0.1] [--port 8080] [--auth-token <token>] [--udp-port <port>]
 
 - `--ip`         HTTP bind address. Default `127.0.0.1`. Use `0.0.0.0` for LAN access.
 - `--port`       HTTP port. Default `8080`.

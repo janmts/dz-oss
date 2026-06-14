@@ -2,10 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>com.fh6-tel.server</string>
+  <key>Label</key><string>com.dz-oss.server</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/local/bin/fh6-tel-serve</string>
+    <string>/usr/local/bin/dz-oss-serve</string>
     <string>--ip</string><string>0.0.0.0</string>
     <string>--port</string><string>8080</string>
     <string>--auth-token</string><string>CHANGE_ME</string>

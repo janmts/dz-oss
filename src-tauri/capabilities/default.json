@@ -9,7 +9,6 @@
     "core:window:allow-set-focus",
     "core:window:allow-close",
     "shell:default",
-    "updater:default",
-    "process:allow-restart"
+    "opener:default"
   ]
 }

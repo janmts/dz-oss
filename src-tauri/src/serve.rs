@@ -9,7 +9,7 @@ use fh6_tel_lib::{
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "fh6-tel-serve",
+    name = "dz-oss-serve",
     about = "Headless FH6 Telemetry server + web host"
 )]
 struct Cli {
