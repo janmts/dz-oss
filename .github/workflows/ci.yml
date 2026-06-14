@@ -10,7 +10,7 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: ./.github/actions/setup-build-env
 
@@ -30,7 +30,7 @@ jobs:
 
       - name: Build server feature
         working-directory: src-tauri
-        run: cargo build --no-default-features --features server --bin fh6-tel-serve
+        run: cargo build --no-default-features --features server --bin dz-oss-serve
 
       - name: Test server feature
         working-directory: src-tauri

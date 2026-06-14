@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Validate version
         shell: bash
@@ -62,24 +62,17 @@ jobs:
           git tag "v${{ inputs.version }}" 2>/dev/null || echo "Tag already exists locally"
           git push origin "v${{ inputs.version }}" 2>/dev/null || echo "Tag already exists on remote"
 
+  # The game is Windows/Xbox-only, so the desktop app ships for Windows. Linux/macOS
+  # users and anyone running the headless web server build from source (see the README
+  # and docs/headless-server.md) — no prebuilt binaries for those paths.
   build:
     needs: prepare
     permissions:
       contents: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: macos-latest
-            args: '--target universal-apple-darwin'
-          - platform: ubuntu-22.04
-            args: ''
-          - platform: windows-latest
-            args: ''
-    runs-on: ${{ matrix.platform }}
+    runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: v${{ inputs.version }}
 
@@ -89,103 +82,22 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          args: ${{ matrix.args }}
-          updaterJsonPath: latest.json
-          updaterJsonPreferNsis: true
+          args: ''
           tagName: v${{ inputs.version }}
-          releaseName: FH6 Telemetry v${{ inputs.version }}
+          releaseName: DZ-OSS v${{ inputs.version }}
           releaseBody: |
-            | | Windows | macOS | Linux |
-            |---|---|---|---|
-            | **Desktop app** | [.exe installer](https://github.com/${{ github.repository }}/releases/download/v${{ inputs.version }}/FH6.Telemetry_${{ inputs.version }}_x64-setup.exe) · [.msi](https://github.com/${{ github.repository }}/releases/download/v${{ inputs.version }}/FH6.Telemetry_${{ inputs.version }}_x64_en-US.msi) | [.dmg (Intel + Apple Silicon)](https://github.com/${{ github.repository }}/releases/download/v${{ inputs.version }}/FH6.Telemetry_${{ inputs.version }}_universal.dmg) | [.AppImage](https://github.com/${{ github.repository }}/releases/download/v${{ inputs.version }}/FH6.Telemetry_${{ inputs.version }}_amd64.AppImage) · [.deb](https://github.com/${{ github.repository }}/releases/download/v${{ inputs.version }}/FH6.Telemetry_${{ inputs.version }}_amd64.deb) · [.rpm](https://github.com/${{ github.repository }}/releases/download/v${{ inputs.version }}/FH6.Telemetry-${{ inputs.version }}-1.x86_64.rpm) |
-            | **Headless server** | [.exe](https://github.com/${{ github.repository }}/releases/download/v${{ inputs.version }}/fh6-tel-serve-windows-x86_64.exe) | [universal binary](https://github.com/${{ github.repository }}/releases/download/v${{ inputs.version }}/fh6-tel-serve-macos-universal) | [x86\_64 binary](https://github.com/${{ github.repository }}/releases/download/v${{ inputs.version }}/fh6-tel-serve-linux-x86_64) |
+            ### Windows desktop app
 
-            > **macOS desktop** — build is unsigned. On first launch right-click → **Open**, or run:
-            > `xattr -dr com.apple.quarantine "/Applications/FH6 Telemetry.app"`
+            Download and run the installer:
 
-            **Headless server** — serves the full dashboard in any browser without a desktop window.
-            Run `fh6-tel-serve --ip 0.0.0.0 --port 8080 --auth-token <secret>` then open `http://<ip>:8080`.
-            Docker: `docker pull ghcr.io/${{ github.repository_owner }}/fh6-tel-serve:${{ inputs.version }}`
-            See [packaging/](https://github.com/${{ github.repository }}/tree/main/packaging/) for service setup.
+            - [**.exe installer**](https://github.com/${{ github.repository }}/releases/download/v${{ inputs.version }}/DZ-OSS_${{ inputs.version }}_x64-setup.exe) — recommended
+            - [.msi](https://github.com/${{ github.repository }}/releases/download/v${{ inputs.version }}/DZ-OSS_${{ inputs.version }}_x64_en-US.msi)
 
-            **Forza setup** — Settings → HUD and Gameplay → Data Out: **On** · Format: **Car Dash** · IP: your PC's IP · Port: **20440**
+            **Forza setup** — Settings → HUD and Gameplay → Data Out: **On** · Format: **Car Dash** · IP: `127.0.0.1` · Port: **20440**
+
+            ---
+
+            **Linux / macOS, or the headless web server?** Build from source — it's a quick `npm install && npm run tauri build` (add `--features server` for the `dz-oss-serve` headless binary). See [Running from Source](https://github.com/${{ github.repository }}#running-from-source) and the [headless server guide](https://github.com/${{ github.repository }}/blob/main/docs/headless-server.md).
           releaseDraft: true
           prerelease: false
-
-      - name: Build server binary (non-macOS)
-        if: runner.os != 'macOS'
-        shell: bash
-        working-directory: src-tauri
-        run: cargo build --release --no-default-features --features server --bin fh6-tel-serve
-
-      - name: Build server binary (macOS universal)
-        if: runner.os == 'macOS'
-        shell: bash
-        working-directory: src-tauri
-        run: |
-          cargo build --release --no-default-features --features server --bin fh6-tel-serve --target aarch64-apple-darwin
-          cargo build --release --no-default-features --features server --bin fh6-tel-serve --target x86_64-apple-darwin
-          lipo -create \
-            target/aarch64-apple-darwin/release/fh6-tel-serve \
-            target/x86_64-apple-darwin/release/fh6-tel-serve \
-            -output target/release/fh6-tel-serve
-
-      - name: Stage and upload server binary
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          TAG="v${{ inputs.version }}"
-          case "${{ runner.os }}" in
-            Windows) SRC="src-tauri/target/release/fh6-tel-serve.exe"; OUT="fh6-tel-serve-windows-x86_64.exe" ;;
-            Linux)   SRC="src-tauri/target/release/fh6-tel-serve";     OUT="fh6-tel-serve-linux-x86_64" ;;
-            macOS)   SRC="src-tauri/target/release/fh6-tel-serve";     OUT="fh6-tel-serve-macos-universal" ;;
-          esac
-          cp "$SRC" "$OUT"
-          gh release upload "$TAG" "$OUT" --clobber --repo "$GITHUB_REPOSITORY"
-
-  docker:
-    needs: prepare
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: v${{ inputs.version }}
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Docker metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          # metadata-action lowercases the image name, so a mixed-case owner is fine.
-          images: ghcr.io/${{ github.repository_owner }}/fh6-tel-serve
-          tags: |
-            type=raw,value=${{ inputs.version }}
-            type=raw,value=latest,enable=${{ !contains(inputs.version, '-') }}
-
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build and push image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
