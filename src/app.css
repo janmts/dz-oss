@@ -43,13 +43,18 @@
   --info:   #82a7c8;
   --violet: #a995cf;
 
-  /* ── Map / zone semantics ── */
-  --map-left:  #84b577;
-  --map-right: #82a7c8;
-  --gate-a:    #d2a24c;
-  --gate-b:    #d56c62;
-  --gate-split:#a995cf;
-  --live-dot:  #ecc274;
+  /* ── Map / zone semantics ──
+     Geometry overlays sit on busy game terrain, so these run a notch brighter /
+     higher-chroma than the muted status palette — they must read at a glance
+     while sculpting a zone. left=green, right=azure, scoring-ring=orchid (its
+     own token, distinct from the muted --gate-split violet the split lines use). */
+  --map-left:     #57c95e;
+  --map-right:    #4fb0ec;
+  --gate-a:       #d2a24c;
+  --gate-b:       #d56c62;
+  --gate-split:   #a995cf;
+  --scoring-ring: #cf72e0;
+  --live-dot:     #ecc274;
 
   /* ── Attitude indicator ── */
   --adi-sky:    #20262e;

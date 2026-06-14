@@ -164,7 +164,7 @@
       for (const ring of scoringRings(zone.scoringConfig)) {
         if (ring.length > 1) {
           gm.addLine(ringCurve(ring, mode).map(gm.worldToLatLng), 3, {
-            color: themeColor('--violet', '#a995cf'),
+            color: themeColor('--scoring-ring', '#cf72e0'),
             opacity: 0.92,
           });
         }

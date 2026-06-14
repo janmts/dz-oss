@@ -107,7 +107,7 @@
       gm.addLine(boundaryCurve(zone.rightBoundary, mode).map(toLL), 2.5, { color: themeColor('--map-right', '#82a7c8'), opacity: 0.85 });
     for (const ring of scoringRings(zone.scoringConfig)) {
       if (ring.length > 1)
-        gm.addLine(ringCurve(ring, mode).map(toLL), 2.5, { color: themeColor('--violet', '#a995cf'), opacity: 0.85 });
+        gm.addLine(ringCurve(ring, mode).map(toLL), 2.5, { color: themeColor('--scoring-ring', '#cf72e0'), opacity: 0.85 });
     }
     const a0 = zone.leftBoundary[0], b0 = zone.rightBoundary[0];
     const aN = zone.leftBoundary.at(-1), bN = zone.rightBoundary.at(-1);

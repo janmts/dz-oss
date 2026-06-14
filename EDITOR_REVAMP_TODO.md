@@ -52,36 +52,37 @@ Rust `tessellate` mirror).
 
 ## Pain points being fixed (current editor)
 
-- [ ] **Insert dumps the live point on top of the selection.** `insertAtSelected`
-      inserts the live telemetry point, not a point between neighbours. → Insert at
-      the **midpoint of the curve segment** next to the selection, pre-selected and
-      draggable.
-- [ ] **Every edit yanks the camera.** `fitMapToGeometry` is called on
-      capture/insert/select. → Fit ONLY on the explicit button + first zone-select;
-      otherwise leave the camera where the user put it.
-- [ ] **"Remove last L/R" nukes a gate anchor.** It slices the literal last point
-      in the chain. → **Delete *selected* point** (logic already exists as
-      `deletePoint`).
-- [ ] **No undo/redo.** Fatal for sculpting. → Snapshot stack of the draft
-      geometry, pushed on each mutating op (Ctrl+Z / Ctrl+Y).
-- [ ] **Split gates can't be authored.** They render but there's no UI. → Falls out
-      of the target selector below.
+- [x] **Insert dumps the live point on top of the selection.** ✅ `insertOnCurve`
+      now places a point ON the drawn curve at the midpoint of the segment next to
+      the selection (chord midpoint for linear/<3 anchors), pre-selected & draggable.
+- [x] **Every edit yanks the camera.** ✅ `fitMapToGeometry` runs ONLY on zone-select
+      (first load) + the explicit Fit button; the stray capture/insert fit calls are
+      gone, so the camera stays where the user put it while sculpting.
+- [x] **"Remove last L/R" nukes a gate anchor.** ✅ Replaced by **Delete selected**
+      (toolbar + Delete key → `deletePoint(selectedPoint)`); `removeLastPoint` deleted.
+- [x] **No undo/redo.** ✅ Snapshot stack of draft geometry + structural state
+      (anchors/ring/splits/curve/selection), pushed before each mutating op + marker
+      `dragstart`; Ctrl+Z / Ctrl+Y (Ctrl+Shift+Z), guarded against text-field undo;
+      cleared on zone-select/new/save. 100-entry cap.
+- [x] **Split gates can't be authored.** ✅ Step 5 below — `'split'` target + gate
+      sub-selector.
 
 ## Layout & UX
 
-- [ ] **Map is the hero.** Move zone metadata (name/description/slack/active) into
-      the sidebar under the zone list — stop it eating the strip above the map.
-- [ ] **Grouped toolbar** (hairline dividers, data-logger style), not one flat row:
-      *Target* segmented (`Left edge · Right edge · Scoring ring · Split`) ·
-      *Point ops* (`Insert · Delete selected · Undo · Redo`) ·
-      *View* (`Fit · Show tessellated` toggle · `Seed from boundary` for the ring) ·
-      *Capture* (`Capture live point` + readout, de-emphasised).
-- [ ] **Replace the long data boxes** with compact inline status chips
-      (`L 6 · R 5 · ring 12 · split 0`) to reclaim vertical space for the map.
-- [ ] **Drop the SVG fallback** (`makeCalib` never nulls with the bundled map; an
-      uncalibrated, map-less editor is useless for zone mapping). Replace with a
-      "calibrate the map first →" guard pointing at the calibrator. (`DriftZoneMap`
-      has the same inherited fallback — clean it the same way, separately.)
+- [x] **Map is the hero.** ✅ Metadata (name/description/slack/active) moved into the
+      sidebar under the zone list; the map fills the main panel (flex:1).
+- [x] **Grouped toolbar** ✅ hairline-divider groups: *Target* segmented
+      (`Left · Right · Ring · Split`) · *Point ops* (`Insert · Delete · Undo · Redo`)
+      · *View* (`Fit · Smooth · Seed ring`) · *Capture* (`Capture live` + readout,
+      de-emphasised, right-aligned). (Smooth sits in View per the spec; it's the
+      persisted curve toggle = display==scored, not a transient view-only toggle.)
+- [x] **Replace the long data boxes** ✅ compact inline status chips
+      (`L 6 · R 5 · ring 12 · split 0` + selected-point label).
+- [x] **Drop the SVG fallback** ✅ removed entirely (svgEl/dragging/toSvg/fromClient/
+      path/transform + all SVG markup/CSS); replaced with a calibration guard that
+      links to Settings → Calibrate map via a new `onOpenSettings` prop wired in
+      `+page.svelte`. (`DriftZoneMap` still has its inherited fallback — clean
+      separately; see Deferred.)
 
 ## Backend touch (Stage 1 only)
 
@@ -96,9 +97,9 @@ Rust `tessellate` mirror).
 1. [x] **`tessellate()` — JS (`src/lib/curve.ts`) + Rust (`drift.rs`) + shared
        golden-value parity test** (`scripts/check-curve.mjs` ↔
        `drift.rs::tests::tessellate_matches_golden_and_invariants`). ✅
-2. [ ] Editor shell rebuild: layout (sidebar metadata, grouped toolbar, status
+2. [x] Editor shell rebuild: layout (sidebar metadata, grouped toolbar, status
        chips), drop SVG fallback → calibration guard, stable camera, undo/redo,
-       insert-on-curve, delete-selected.
+       insert-on-curve, delete-selected. ✅ See Shipped.
 3. [x] Curve flag wiring (display + save + `from_row`). ✅ A "Smooth" toggle in the
        editor flips `scoringConfig.curve`; boundaries render the centripetal curve
        on all 3 surfaces (editor / DriftZoneMap / RunMap) with markers staying on
@@ -110,7 +111,13 @@ Rust `tessellate` mirror).
        RunMap; persists in `scoringConfig.scoringRegion.anchors` (no migration);
        the Smooth toggle curves it (closed). Adversarially reviewed (no bugs;
        5 fixes applied). Backend does NOT score it yet (Stage 2).
-5. [ ] Split target (nearly free once the target model exists).
+5. [x] Split target. ✅ `'split'` joins the segmented target; splits are a COLLECTION
+       (`draft.splitGates: ZonePoint[][]`, each gate exactly 2 points) so it gets a
+       gate sub-selector (`gate 1 · gate 2 · + Add gate · Delete gate`) — multi-gate
+       per the user's call. `selectedSplit` indexes the active gate; map-click /
+       Capture place its 2 points (capped, auto-create on first), dashed-violet line
+       + `1a/1b` markers, dblclick/Delete removes the whole gate, incomplete gates
+       pruned on save. Backend already stores `split_gates_json` (no change needed).
 
 ## Deferred
 
@@ -139,13 +146,16 @@ Rust `tessellate` mirror).
       direction" must swap the directed rings too (or bind rings to gate coords,
       not order). Frontend then needs an `a | b | both` sub-target picker; the
       backend reader/scorer is Stage 2.
-- [ ] **Ring colour token.** The ring currently reuses `--violet` (== `--gate-split`
-      `#a995cf`); on the maps a ring (solid) and a split gate (dashed) are the same
-      hue. Decide: keep the solid-vs-dashed convention, or give the ring its own
-      token. (Editor has no split rendering, so no collision there.)
-- [ ] **SVG fallback ring.** The uncalibrated SVG-fallback editor doesn't render
-      the ring; the Ring/Seed controls are disabled there for now. Moot once the
-      fallback is dropped in the editor rebuild (step 2).
+- [x] **Ring colour token.** ✅ The ring now has its own `--scoring-ring` (#cf72e0
+      orchid), distinct from the muted `--gate-split` violet the splits keep; applied
+      on all 3 surfaces (editor / DriftZoneMap / RunMap). Also (user ask, 2026-06-14)
+      brightened the boundary tokens for at-a-glance legibility on terrain:
+      `--map-left` #84b577→#57c95e, `--map-right` #82a7c8→#4fb0ec (shared everywhere
+      the boundary semantic renders — DriftRunDashboard legend, MapCalibrator too).
+- [x] **SVG fallback ring.** ✅ Moot — the editor's SVG fallback was dropped in the
+      step-2 rebuild (replaced by the calibration guard). NOTE `DriftZoneMap` still
+      carries its own inherited SVG fallback (renders boundaries/gates/splits but not
+      the ring) — clean that one separately if/when it matters.
 - [ ] **Cross-surface visual polish** (line casing, shared legend, gate
       iconography) from the earlier rendering review — though a shared zone-style
       preset is worth introducing during the rebuild so the new ring/split shapes
@@ -177,3 +187,56 @@ Rust `tessellate` mirror).
   no bugs; applied fixes: ring-aware `reverseBoundaries` selection, Ring/Seed
   disabled in the uncalibrated fallback, `ringAnchors` in fit/transform, seed guard
   ≥2/side, and the Stage-2 ring-scorer contract documented on `ringCurve`.
+- **Editor shell rebuild + split target (build-order steps 2 & 5).** Reshaped
+  `DriftZoneEditor.svelte` (kept the proven map/curve/render core; rewrote the
+  shell). Layout: zone metadata moved to the sidebar under the zone list, map is the
+  hero (flex:1), grouped hairline toolbar (Target `Left·Right·Ring·Split` / Point ops
+  `Insert·Delete·Undo·Redo` / View `Fit·Smooth·Seed ring` / Capture, de-emphasised),
+  compact status chips replacing the data boxes. Behaviour: insert-on-curve (point on
+  the drawn curve, not a live-telemetry dump), stable camera (fit only on zone-select
+  + Fit button), delete-selected (retired `removeLastPoint`), full undo/redo (geometry
+  + structural snapshot stack, Ctrl+Z/Y, text-field-safe, cleared on select/new/save).
+  SVG fallback dropped → calibration guard linking to Settings → Calibrate map (new
+  `onOpenSettings` prop wired in `+page.svelte`). Split authoring (step 5): `'split'`
+  target + multi-gate sub-selector (`draft.splitGates`, each gate 2 points, dashed
+  violet, `1a/1b` markers); backend already stores splits (no change). Colour: new
+  `--scoring-ring` (#cf72e0) token decouples ring from split; `--map-left`/`--map-right`
+  brightened for legibility — applied across editor / DriftZoneMap / RunMap. Frontend-
+  only, NO DB migration (scoringConfig + split_gates_json round-trip raw; verified the
+  save path stores `scoring_config` as an opaque `serde_json::Value`). svelte-check 0 /
+  prod build green; verified in-browser vs the real DB (zone load, insert/undo/redo,
+  seed ring, 2-gate split authoring, palette, 0 console errors). 5-reviewer adversarial
+  pass: most findings were false positives (undo order, gate-curve kink, splitLines
+  staleness — all disproven); applied 4 real/hardening fixes (save() clears undo
+  stacks; defensive selection clamp in `applySnapshot`; IPC cast order; split-dragstart
+  comment). **Feedback round ([[user]], 2026-06-14):** (1) Delete-zone moved out of the
+  footer (too easy to hit next to Save) to a quiet underlined link at the bottom of the
+  sidebar zone-meta; footer is now Save-only. (2) [SUPERSEDED same day by the Split SECTOR model — see the final Shipped bullet; this first cut is kept for history.] Split gates were NAMEABLE —
+  `splitGateNames` (index-aligned `string[]` in `scoringConfig.splitGateNames`, opaque
+  round-trip, undo-tracked, pruned with gates on save); the sub-selector chip + status
+  use the name (else "gate N"), the on-map markers stay `1a/1b` (creation order). Both
+  re-verified in-browser. NOT yet committed/branched (working tree on `main`). DEFERRED still:
+  P3 keybinds, Stage-2 position gate, directed per-gate ring sub-target, DriftZoneMap's
+  own SVG fallback.
+- **Split SECTOR model (supersedes the same-day gate-naming first cut).** Decided with
+  the user: name the GAPS between dividers, not the split lines. A split is a *divider*;
+  N splits make N+1 *sectors* (`A → split1 → … → splitN → B`). Names live on the sectors
+  (`sectorNames`, length N+1, in `scoringConfig.sectorNames` — opaque round-trip,
+  undo-tracked, pruned in lockstep with incomplete splits on save). Why: it dodges the
+  fencepost (N split lines but N+1 names — anchoring the name to a line orphans one end
+  sector, and *which* end flips with run direction) and is direction-stable (names attach
+  to physical sectors; the entry gate only sets traversal order; A/B never need names —
+  they're the caps of the first/last sectors). New splits **auto-insert in driving order**
+  (`splitPathPos` = arc-length of the gate midpoint projected onto the boundary), so
+  "split 1" is the first reached from A, killing the "split 4 is first" confusion. UI =
+  an interleaved strip `A · ⟦sector⟧ · |split| · ⟦sector⟧ · B` (sector text inputs in the
+  gaps, numbered split-node chips as dividers); the on-map markers stay numeric `1a/1b`
+  (now path-ordered). Verified in-browser: reverse-order placement auto-sorts to A→B,
+  naming, delete→sector-merge (keeps the left name), and undo all correct; svelte-check 0,
+  build green. KNOWN LIMITATION: dragging a split clean *past* another doesn't re-order
+  (rare — delete + re-place). **NEXT, backend = the crossing-count per-sector scorer:**
+  bucket each tick's points by how many splits the run has crossed from its entry gate,
+  emit per-sector point totals (for run-viewer "where did I score" readouts). User signed
+  off on crossing-count first; arc-length banding (project car position onto the path,
+  bucket by band) is the fallback if back-and-forth wobble miscounts. Entry gate is
+  already known to the backend (`crossed_a`/`crossed_b`, drift.rs).

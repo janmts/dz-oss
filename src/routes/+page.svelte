@@ -167,7 +167,7 @@
         </div>
       </div>
     {:else if tab === 'zones'}
-      <DriftZoneEditor />
+      <DriftZoneEditor onOpenSettings={() => (showSettings = true)} />
     {:else if tab === 'sessions'}
       <SessionsTab useMph={s?.useMph ?? true} onReplayStarted={() => (tab = 'gauges')} />
     {:else if tab === 'runs'}
