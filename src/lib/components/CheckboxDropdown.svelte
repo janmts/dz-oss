@@ -33,12 +33,14 @@
   let open = $state(false);
   let query = $state('');
   let trigger = $state<HTMLButtonElement | null>(null);
-  let pos = $state<{ top: number; left: number | null; right: number | null; minWidth: number }>({
-    top: 0,
-    left: 0,
-    right: null,
-    minWidth: 180,
-  });
+  let pos = $state<{
+    top: number | null;
+    bottom: number | null;
+    left: number | null;
+    right: number | null;
+    minWidth: number;
+    maxHeight: number;
+  }>({ top: 0, bottom: null, left: 0, right: null, minWidth: 180, maxHeight: 290 });
 
   let filtered = $derived(
     query.trim()
@@ -50,10 +52,17 @@
     if (!trigger) return;
     const r = trigger.getBoundingClientRect();
     const minWidth = Math.max(180, r.width);
-    if (align === 'right') {
-      pos = { top: r.bottom + 4, left: null, right: Math.max(8, window.innerWidth - r.right), minWidth };
+    const left = align === 'right' ? null : Math.min(r.left, window.innerWidth - minWidth - 8);
+    const right = align === 'right' ? Math.max(8, window.innerWidth - r.right) : null;
+    const estH = 290;
+    const spaceBelow = window.innerHeight - r.bottom - 8;
+    const spaceAbove = r.top - 8;
+    if (spaceBelow < estH && spaceAbove > spaceBelow) {
+      // Not enough room below (e.g. the bottom lane) → flip up, anchoring the
+      // panel's bottom just above the trigger, and cap height to the space.
+      pos = { top: null, bottom: window.innerHeight - r.top + 4, left, right, minWidth, maxHeight: Math.min(estH, spaceAbove) };
     } else {
-      pos = { top: r.bottom + 4, left: Math.min(r.left, window.innerWidth - minWidth - 8), right: null, minWidth };
+      pos = { top: r.bottom + 4, bottom: null, left, right, minWidth, maxHeight: Math.min(estH, spaceBelow) };
     }
   }
 
@@ -104,10 +113,12 @@
 {#if open}
   <div
     class="dd-panel"
-    style:top="{pos.top}px"
+    style:top={pos.top != null ? `${pos.top}px` : ''}
+    style:bottom={pos.bottom != null ? `${pos.bottom}px` : ''}
     style:left={pos.left != null ? `${pos.left}px` : ''}
     style:right={pos.right != null ? `${pos.right}px` : ''}
     style:min-width="{pos.minWidth}px"
+    style:max-height="{pos.maxHeight}px"
   >
     {#if searchable}
       <input class="dd-search" placeholder="Filter…" bind:value={query} />
@@ -157,11 +168,14 @@
   .dd-panel {
     position: fixed;
     z-index: 1100;
+    display: flex;
+    flex-direction: column;
     background: var(--bg-panel);
     border: 1px solid var(--bd-subtle);
     border-radius: var(--r-md);
     box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
     padding: 5px;
+    overflow: hidden;
   }
   .dd-search {
     width: 100%;
@@ -174,7 +188,7 @@
     padding: 0.25rem 0.5rem;
     margin-bottom: 5px;
   }
-  .dd-list { max-height: 240px; overflow-y: auto; }
+  .dd-list { flex: 1; min-height: 0; overflow-y: auto; }
   .dd-opt {
     display: flex;
     align-items: center;

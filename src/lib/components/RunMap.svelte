@@ -9,8 +9,8 @@
   import {
     scoreState,
     visibleTickIndices,
-    isRumbleTick,
     driftAngleDeg,
+    TELEMETRY_HZ,
     SCORE_STATE_LABEL,
     type ScoreState,
     type RunView,
@@ -25,19 +25,6 @@
   let fitZoom = 0;
   let lastFitKey = '';
   let mapCfg: ReturnType<typeof effectiveMapConfig> | null = null;
-  const tickMarkers: { m: ReturnType<GameMap['L']['circleMarker']>; base: number }[] = [];
-
-  // Dot radius scales with zoom like the line weight: full size at/above the
-  // run's fit zoom, shrinking when zoomed out so dense 16 Hz dots don't read as
-  // a caterpillar.
-  function markerScale(): number {
-    if (!gm) return 1;
-    return Math.min(1, Math.max(0.4, Math.pow(2, gm.map.getZoom() - fitZoom)));
-  }
-  function scaleMarkers() {
-    const s = markerScale();
-    for (const { m, base } of tickMarkers) m.setRadius(base * s);
-  }
 
   function stateColors(): Record<ScoreState, string> {
     return {
@@ -58,7 +45,6 @@
       // extraZoom matches the analysis-oriented zone maps so you can zoom in
       // close to inspect individual ticks (the live track map caps at viewMaxZoom).
       gm = await createGameMap(host, mapCfg, { zoomControl: true, extraZoom: 3 });
-      gm.map.on('zoomend', scaleMarkers);
       ready = true;
       redraw();
     } catch (e) {
@@ -96,10 +82,11 @@
       highlight.setLatLng(ll);
     } else {
       highlight = gm.L.circleMarker(ll, {
-        radius: 6,
-        weight: 2,
-        color: themeColor('--ac-bright', '#ecc274'),
-        fill: false,
+        radius: 4.5,
+        weight: 1.5,
+        color: themeColor('--bg-card', '#18191d'),
+        fillColor: themeColor('--ac-bright', '#ecc274'),
+        fillOpacity: 1,
         interactive: false,
       }).addTo(gm.markers);
     }
@@ -151,40 +138,33 @@
     }
   }
 
-  function addMarkers(view: RunView, mode: 'scoring' | 'byRun', col: Record<ScoreState, string>) {
+  // Invisible hover targets: the trace LINE is the visual; each tick gets a
+  // generous transparent hit circle so hovering needs no pixel-perfect aim
+  // (the amber highlight dot + per-tick card are the feedback).
+  function addMarkers(view: RunView) {
     if (!gm) return;
-    const { packets, ticks } = view.data;
-    const stroke = themeColor('--bg-card', '#18191d');
-    const s = markerScale();
+    const { packets } = view.data;
     for (const idx of visibleTickIndices(view.data)) {
       const p = packets[idx];
       if (!nonZero(p)) continue;
       const ll = gm.worldToLatLng({ x: p.positionX, z: p.positionZ });
-      const rumble = isRumbleTick(ticks[idx]);
-      const base = rumble ? 2.3 : 1.6;
-      const fill = mode === 'scoring' ? col[scoreState(ticks[idx])] : rumble ? col.unpaid : view.color;
       const m = gm.L.circleMarker(ll, {
-        radius: base * s,
-        weight: 1,
-        color: stroke,
-        fillColor: fill,
-        fillOpacity: 0.95,
+        radius: 9,
+        stroke: false,
+        fill: true,
+        fillOpacity: 0,
         interactive: true,
+        bubblingMouseEvents: false,
       }).addTo(gm.markers);
       const runId = view.runId;
       m.on('mouseover', (e: { containerPoint: { x: number; y: number } }) => {
         hover.set({ runId, index: idx });
         cardPos = { x: e.containerPoint.x, y: e.containerPoint.y };
-        m.setStyle({ weight: 2 });
-        m.setRadius(Math.max(5, base * markerScale() * 2));
       });
       m.on('mouseout', () => {
         hover.set(null);
         cardPos = null;
-        m.setStyle({ weight: 1 });
-        m.setRadius(base * markerScale());
       });
-      tickMarkers.push({ m, base });
     }
   }
 
@@ -193,7 +173,6 @@
     gm.clearLines();
     gm.markers.clearLayers();
     highlight = null;
-    tickMarkers.length = 0;
     const views = $runViews;
     if (views.length === 0) {
       lastFitKey = '';
@@ -223,7 +202,7 @@
     }
     gm.setWeightRefZoom(fitZoom || gm.map.getZoom());
 
-    for (const v of views) addMarkers(v, mode, col);
+    for (const v of views) addMarkers(v);
   }
 
   // Per-tick hover card data.
@@ -235,12 +214,14 @@
     const p = view.data.packets[h.index];
     const t = view.data.ticks[h.index];
     if (!p || !t) return null;
-    const t0 = view.data.packets[0]?.timestampMs ?? 0;
     const on = (r: number) => r <= 0.05;
     return {
       color: view.color,
       runId: view.runId,
-      tSec: (p.timestampMs - t0) / 1000,
+      // Sample clock (index / 64 Hz), matching the graph x-axis + cursor so the
+      // card time and the timeline cursor agree (wall-clock timestampMs diverges
+      // because FH6 emits duplicate timestamps).
+      tSec: h.index / TELEMETRY_HZ,
       idx: h.index,
       angle: driftAngleDeg(p),
       speed: p.speedMs,

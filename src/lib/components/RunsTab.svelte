@@ -26,7 +26,6 @@
             <span class="lg"><i style="background:var(--ok)"></i>scoring</span>
             <span class="lg"><i style="background:var(--bad)"></i>off-tarmac / unpaid</span>
             <span class="lg"><i style="background:var(--tx-dim)"></i>idle</span>
-            <span class="lg"><span class="rdot"></span>rumble tick</span>
           </div>
         {:else}
           <div class="legend">
@@ -94,7 +93,6 @@
   .legend { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
   .lg { display: inline-flex; align-items: center; gap: 5px; font-size: 0.66rem; color: var(--tx-lo); }
   .lg i { width: 13px; height: 3px; border-radius: 2px; display: inline-block; }
-  .rdot { width: 7px; height: 7px; border-radius: 50%; border: 1.4px solid var(--bad); display: inline-block; }
 
   .status { font-size: 0.66rem; color: var(--tx-dim); }
   .status.err { color: var(--bad); }
