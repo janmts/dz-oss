@@ -42,7 +42,9 @@ runs:
       if: runner.os == 'Windows'
       shell: pwsh
       run: |
-        $vsPath = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise"
+        $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        $vsPath = & $vswhere -latest -products '*' -property installationPath
+        if (-not $vsPath) { throw "Visual Studio installation not found via vswhere" }
         $ver = (Get-Content "$vsPath\VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt").Trim()
         $link = "$vsPath\VC\Tools\MSVC\$ver\bin\Hostx64\x64\link.exe"
         Write-Host "Linker: $link (exists=$(Test-Path $link))"
