@@ -15,6 +15,7 @@
   import SettingsModal from '$lib/components/SettingsModal.svelte';
   import DriftZoneEditor from '$lib/components/DriftZoneEditor.svelte';
   import DriftRunDashboard from '$lib/components/DriftRunDashboard.svelte';
+  import RunsTab from '$lib/components/RunsTab.svelte';
 
   // Drift-first: the run dashboard is the primary working screen.
   let tab = $state<AppTab>('drift');
@@ -169,6 +170,8 @@
       <DriftZoneEditor />
     {:else if tab === 'sessions'}
       <SessionsTab useMph={s?.useMph ?? true} onReplayStarted={() => (tab = 'gauges')} />
+    {:else if tab === 'runs'}
+      <RunsTab />
     {/if}
   </main>
 

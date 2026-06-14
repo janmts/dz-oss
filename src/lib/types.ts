@@ -28,6 +28,12 @@ export interface TelemetryPacket {
   tireCombinedSlipFr: number;
   tireCombinedSlipRl: number;
   tireCombinedSlipRr: number;
+  /** Per-wheel surface roughness: 0 on smooth tarmac, >0 on grass/dirt/gravel.
+   *  The off-tarmac / scoring tarmac-gate signal. */
+  surfaceRumbleFl: number;
+  surfaceRumbleFr: number;
+  surfaceRumbleRl: number;
+  surfaceRumbleRr: number;
   carOrdinal: number;
   carClass: number;
   carPi: number;
