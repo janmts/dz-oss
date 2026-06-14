@@ -19,18 +19,22 @@
     parseScoringRegion,
     ringCurve,
     sharedScoringRing,
+    tessellate,
     zoneCurveMode,
+    DEFAULT_SEGMENTS,
     type ScoringRegion,
     type ZoneCurveMode,
   } from '$lib/curve';
 
-  // 'ring' is the closed scoring region; it reuses the same point-edit machinery
-  // as the two open road-edge boundaries (the name is kept for minimal churn).
-  type BoundarySide = 'left' | 'right' | 'ring';
+  // The editor needs the calibrated game map; when it isn't calibrated we show a
+  // guard that links back to Settings → Calibrate map (wired from +page.svelte).
+  let { onOpenSettings }: { onOpenSettings?: () => void } = $props();
 
-  const width = 1000;
-  const height = 640;
-  const pad = 48;
+  // Edit targets. 'ring' is the closed scoring region; 'split' is the collection
+  // of mid-run split gates (each a 2-point line) — both reuse the point-edit
+  // machinery of the two open road-edge boundaries.
+  type BoundarySide = 'left' | 'right' | 'ring' | 'split';
+
   const editorExtraZoom = 4;
 
   function blankZone(): DriftZoneInput {
@@ -66,6 +70,8 @@
   let draft = $state<DriftZoneInput>(blankZone());
   let selectedId = $state<number | null>(null);
   let activeSide = $state<BoundarySide>('left');
+  // Which split gate (index into draft.splitGates) the 'split' target edits.
+  let selectedSplit = $state(-1);
   let status = $state('');
   let saving = $state(false);
   // Per-zone boundary slack (m). Lives in scoringConfig.boundarySlackM; mirrored
@@ -77,16 +83,26 @@
   // Closed scoring ring (the per-tick scoreable region — separate from the
   // road-edge boundary). Lives in scoringConfig.scoringRegion.anchors.
   let ringAnchors = $state<ZonePoint[]>([]);
+  // SECTOR names — names for the GAPS between dividers, not the split lines. With N
+  // splits there are N+1 sectors (A→split₁ … split_N→B); `sectorNames` is length
+  // N+1, index-aligned to driving order. The split lines stay pure geometry (markers
+  // 1a/1b). Lives in scoringConfig.sectorNames (opaque JSON, no migration). A split
+  // is a divider — it ends one sector and starts the next — so the name belongs on
+  // the gap, which also dodges the "N lines but N+1 names" fencepost.
+  let sectorNames = $state<string[]>([]);
 
   function syncFromConfig() {
     const v = draft.scoringConfig?.boundarySlackM;
     slackM = typeof v === 'number' ? v : 3;
     curveMode = zoneCurveMode(draft.scoringConfig);
     ringAnchors = sharedScoringRing(draft.scoringConfig).map((p) => ({ ...p }));
+    const names = draft.scoringConfig?.sectorNames;
+    sectorNames = Array.from({ length: draft.splitGates.length + 1 }, (_, i) =>
+      Array.isArray(names) && typeof names[i] === 'string' ? (names[i] as string) : ''
+    );
   }
-  let dragging = $state<{ side: BoundarySide; index: number } | null>(null);
+
   let selectedPoint = $state<{ side: BoundarySide; index: number } | null>(null);
-  let svgEl = $state<SVGSVGElement | null>(null);
   let mapHost = $state<HTMLDivElement | null>(null);
   let gm: GameMap | null = null;
   let liveMarker: Marker | null = null;
@@ -97,15 +113,94 @@
   let startGateLine: Polyline | null = null;
   let finishGateLine: Polyline | null = null;
   let ringLine: Polyline | null = null;
+  let splitLines: (Polyline | null)[] = [];
   let unsubscribeShortcut: (() => void) | null = null;
   let lastKnownPoint = $state<ZonePoint | null>(null);
   let lastKnownAt = $state(0);
   let mapReady = $state(false);
 
+  // ── Undo / redo ──────────────────────────────────────────────────────────
+  // Snapshot the draft GEOMETRY + structural state (anchors, ring, splits, curve
+  // mode, selection) before each mutating op. Text metadata (name/desc/slack/
+  // active) is intentionally NOT tracked — that's standard form behaviour.
+  type GeomSnapshot = {
+    left: ZonePoint[];
+    right: ZonePoint[];
+    ring: ZonePoint[];
+    splits: ZonePoint[][];
+    sectorNames: string[];
+    curve: ZoneCurveMode;
+    selectedPoint: { side: BoundarySide; index: number } | null;
+    selectedSplit: number;
+    activeSide: BoundarySide;
+  };
+  let undoStack = $state<GeomSnapshot[]>([]);
+  let redoStack = $state<GeomSnapshot[]>([]);
+
+  function snapshot(): GeomSnapshot {
+    return {
+      left: draft.leftBoundary.map((p) => ({ ...p })),
+      right: draft.rightBoundary.map((p) => ({ ...p })),
+      ring: ringAnchors.map((p) => ({ ...p })),
+      splits: draft.splitGates.map((g) => g.map((p) => ({ ...p }))),
+      sectorNames: sectorNames.slice(),
+      curve: curveMode,
+      selectedPoint: selectedPoint ? { ...selectedPoint } : null,
+      selectedSplit,
+      activeSide,
+    };
+  }
+
+  // Push the CURRENT state so a later undo can return to it. Call BEFORE mutating.
+  function pushUndo() {
+    undoStack = [...undoStack, snapshot()];
+    if (undoStack.length > 100) undoStack = undoStack.slice(-100);
+    redoStack = [];
+  }
+
+  function applySnapshot(s: GeomSnapshot) {
+    draft.leftBoundary = s.left.map((p) => ({ ...p }));
+    draft.rightBoundary = s.right.map((p) => ({ ...p }));
+    ringAnchors = s.ring.map((p) => ({ ...p }));
+    draft.splitGates = s.splits.map((g) => g.map((p) => ({ ...p })));
+    sectorNames = s.sectorNames.slice();
+    curveMode = s.curve;
+    selectedSplit = s.selectedSplit;
+    activeSide = s.activeSide;
+    // Restore selection, defensively clamped to the restored geometry. Snapshots
+    // are internally consistent, but a clamp keeps a stray index from ever
+    // pointing past the array it refers to.
+    let sp = s.selectedPoint ? { ...s.selectedPoint } : null;
+    if (sp) {
+      const len = boundary(sp.side).length;
+      if (len === 0) sp = null;
+      else if (sp.index >= len) sp = { side: sp.side, index: len - 1 };
+    }
+    selectedPoint = sp;
+  }
+
+  function undo() {
+    if (!undoStack.length) return;
+    redoStack = [...redoStack, snapshot()];
+    const s = undoStack[undoStack.length - 1];
+    undoStack = undoStack.slice(0, -1);
+    applySnapshot(s);
+    status = 'Undo.';
+  }
+
+  function redo() {
+    if (!redoStack.length) return;
+    undoStack = [...undoStack, snapshot()];
+    const s = redoStack[redoStack.length - 1];
+    redoStack = redoStack.slice(0, -1);
+    applySnapshot(s);
+    status = 'Redo.';
+  }
+
   onMount(async () => {
     void loadDriftZones();
     unsubscribeShortcut = await ipc.subscribeDriftZoneCapture(({ side }) => {
-      capturePoint(side ?? activeSide, true);
+      capturePoint((side ?? activeSide) as BoundarySide, true);
     });
     window.addEventListener('keydown', onLocalKeydown);
   });
@@ -125,13 +220,9 @@
   });
 
   let livePoint = $derived(lastKnownPoint);
-
   let liveAgeSecs = $derived(lastKnownAt ? Math.max(0, (Date.now() - lastKnownAt) / 1000) : 0);
-
   let cfg = $derived($settings ? effectiveMapConfig($settings) : null);
-
   let calib = $derived(cfg ? makeCalib(cfg) : null);
-
   let mapUsable = $derived(!!cfg && !!calib);
 
   let allPoints = $derived([
@@ -143,53 +234,6 @@
     ...ringAnchors,
     ...(livePoint ? [livePoint] : []),
   ]);
-
-  let transform = $derived.by(() => {
-    if (allPoints.length === 0) {
-      return {
-        minX: -50,
-        maxX: 50,
-        minZ: -50,
-        maxZ: 50,
-        scale: 1,
-      };
-    }
-    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
-    for (const p of allPoints) {
-      minX = Math.min(minX, p.x);
-      maxX = Math.max(maxX, p.x);
-      minZ = Math.min(minZ, p.z);
-      maxZ = Math.max(maxZ, p.z);
-    }
-    const spanX = Math.max(1, maxX - minX);
-    const spanZ = Math.max(1, maxZ - minZ);
-    const scale = Math.min((width - pad * 2) / spanX, (height - pad * 2) / spanZ);
-    const extraX = ((width - pad * 2) / scale - spanX) / 2;
-    const extraZ = ((height - pad * 2) / scale - spanZ) / 2;
-    return {
-      minX: minX - extraX,
-      maxX: maxX + extraX,
-      minZ: minZ - extraZ,
-      maxZ: maxZ + extraZ,
-      scale,
-    };
-  });
-
-  function toSvg(p: ZonePoint): [number, number] {
-    const x = pad + (p.x - transform.minX) * transform.scale;
-    const y = pad + (transform.maxZ - p.z) * transform.scale;
-    return [x, y];
-  }
-
-  function fromClient(e: MouseEvent | PointerEvent): ZonePoint {
-    const rect = svgEl!.getBoundingClientRect();
-    const sx = ((e.clientX - rect.left) / rect.width) * width;
-    const sy = ((e.clientY - rect.top) / rect.height) * height;
-    return {
-      x: transform.minX + (sx - pad) / transform.scale,
-      z: transform.maxZ - (sy - pad) / transform.scale,
-    };
-  }
 
   function worldToLatLng(point: ZonePoint): LatLng {
     return gm!.worldToLatLng(point);
@@ -218,7 +262,13 @@
 
   function markerIcon(side: BoundarySide, label: string, selected = false) {
     const cls =
-      side === 'left' ? 'zone-marker-left' : side === 'right' ? 'zone-marker-right' : 'zone-marker-ring';
+      side === 'left'
+        ? 'zone-marker-left'
+        : side === 'right'
+          ? 'zone-marker-right'
+          : side === 'ring'
+            ? 'zone-marker-ring'
+            : 'zone-marker-split';
     return gm!.L.divIcon({
       className: `zone-marker ${cls}${selected ? ' zone-marker-selected' : ''}`,
       html: `<span>${label}</span>`,
@@ -257,16 +307,17 @@
     startGateLine = null;
     finishGateLine = null;
     ringLine = null;
+    splitLines = [];
 
     if (draft.leftBoundary.length > 1) {
       leftLine = gm.addLine(boundaryLatLngs('left'), 5, {
-        color: themeColor('--map-left', '#84b577'),
+        color: themeColor('--map-left', '#57c95e'),
         opacity: 0.95,
       });
     }
     if (draft.rightBoundary.length > 1) {
       rightLine = gm.addLine(boundaryLatLngs('right'), 5, {
-        color: themeColor('--map-right', '#82a7c8'),
+        color: themeColor('--map-right', '#4fb0ec'),
         opacity: 0.95,
       });
     }
@@ -294,6 +345,7 @@
           icon: markerIcon(side, `${side[0].toUpperCase()}${index + 1}`, selected),
         }).addTo(gm!.markers);
         marker.on('click', () => selectPoint(side, index));
+        marker.on('dragstart', () => pushUndo());
         marker.on('drag', () => updateLinesDuringDrag(side, index, marker.getLatLng()));
         marker.on('dragend', () => {
           const points = [...boundary(side)];
@@ -309,7 +361,7 @@
     // road-edge boundary. Drawn over the corridor; markers stay on raw anchors.
     if (ringAnchors.length > 1) {
       ringLine = gm.addLine(ringLatLngs(), 4, {
-        color: themeColor('--violet', '#a995cf'),
+        color: themeColor('--scoring-ring', '#cf72e0'),
         opacity: 0.92,
       });
     }
@@ -320,6 +372,7 @@
         icon: markerIcon('ring', `S${index + 1}`, selected),
       }).addTo(gm!.markers);
       marker.on('click', () => selectPoint('ring', index));
+      marker.on('dragstart', () => pushUndo());
       marker.on('drag', () => updateLinesDuringDrag('ring', index, marker.getLatLng()));
       marker.on('dragend', () => {
         const points = [...boundary('ring')];
@@ -328,6 +381,48 @@
         selectPoint('ring', index);
       });
       marker.on('dblclick', () => deletePoint('ring', index));
+    });
+
+    // Split gates: a collection of mid-run 2-point lines (sector splits). Each is
+    // dashed violet; the two endpoints are draggable. Selecting/dragging a gate's
+    // point makes that gate the active split target.
+    draft.splitGates.forEach((gate, gi) => {
+      if (gate.length === 2) {
+        splitLines[gi] = gm!.addLine(gate.map(worldToLatLng), 3, {
+          color: themeColor('--gate-split', '#a995cf'),
+          dashArray: '6 6',
+          opacity: 0.9,
+        });
+      } else {
+        splitLines[gi] = null;
+      }
+      gate.forEach((point, pi) => {
+        const selected =
+          selectedPoint?.side === 'split' && selectedSplit === gi && selectedPoint.index === pi;
+        const marker = gm!.L.marker(worldToLatLng(point), {
+          draggable: true,
+          icon: markerIcon('split', `${gi + 1}${pi === 0 ? 'a' : 'b'}`, selected),
+        }).addTo(gm!.markers);
+        marker.on('click', () => {
+          selectedSplit = gi;
+          selectPoint('split', pi);
+        });
+        marker.on('dragstart', () => {
+          // selectedSplit before pushUndo so the snapshot records the gate being
+          // edited — undo then restores both the points AND the active gate.
+          selectedSplit = gi;
+          pushUndo();
+        });
+        marker.on('drag', () => updateSplitLineDuringDrag(gi, pi, marker.getLatLng()));
+        marker.on('dragend', () => {
+          const g = [...draft.splitGates[gi]];
+          g[pi] = latLngToWorld(marker.getLatLng());
+          draft.splitGates = draft.splitGates.map((x, i) => (i === gi ? g : x));
+          selectedSplit = gi;
+          selectPoint('split', pi);
+        });
+        marker.on('dblclick', () => deleteSplitGate(gi));
+      });
     });
 
     // Re-add the live marker (cleared above); untracked so rebuilding the
@@ -378,6 +473,13 @@
     }
   }
 
+  function updateSplitLineDuringDrag(gi: number, pi: number, latlng: LatLng) {
+    if (!mapUsable) return;
+    const gate = draft.splitGates[gi];
+    if (!gate || gate.length !== 2) return;
+    splitLines[gi]?.setLatLngs(gate.map((p, k) => (k === pi ? latlng : worldToLatLng(p))));
+  }
+
   function fitMapToGeometry() {
     if (!gm || !mapUsable || !cfg || allPoints.length === 0) return;
     const fitZoom = gm.fitWorld(allPoints, 0.2, cfg.viewMaxZoom + editorExtraZoom);
@@ -390,6 +492,8 @@
   $effect(() => {
     void draft.leftBoundary;
     void draft.rightBoundary;
+    void draft.splitGates;
+    void selectedSplit;
     void selectedPoint;
     void curveMode;
     void ringAnchors;
@@ -402,21 +506,17 @@
     if (mapReady) updateLiveMarker();
   });
 
-  function path(points: ZonePoint[]): string {
-    return points
-      .map((p) => {
-        const [x, y] = toSvg(p);
-        return `${x.toFixed(1)},${y.toFixed(1)}`;
-      })
-      .join(' ');
-  }
-
   function selectZone(zone: DriftZoneRow) {
     draft = toInput(zone);
     selectedId = zone.id;
     selectedPoint = null;
+    selectedSplit = zone.splitGates.length ? 0 : -1;
+    activeSide = 'left';
+    undoStack = [];
+    redoStack = [];
     status = '';
     syncFromConfig();
+    // Fit once on zone load; thereafter the camera stays where the user put it.
     setTimeout(fitMapToGeometry, 0);
   }
 
@@ -424,22 +524,136 @@
     draft = blankZone();
     selectedId = null;
     selectedPoint = null;
+    selectedSplit = -1;
+    activeSide = 'left';
+    undoStack = [];
+    redoStack = [];
     status = '';
     syncFromConfig();
   }
 
   function boundary(side: BoundarySide): ZonePoint[] {
     if (side === 'ring') return ringAnchors;
+    if (side === 'split') return draft.splitGates[selectedSplit] ?? [];
     return side === 'left' ? draft.leftBoundary : draft.rightBoundary;
   }
 
   function setBoundary(side: BoundarySide, points: ZonePoint[]) {
     if (side === 'ring') ringAnchors = points;
-    else if (side === 'left') draft.leftBoundary = points;
+    else if (side === 'split') {
+      if (selectedSplit < 0) return;
+      draft.splitGates = draft.splitGates.map((g, i) => (i === selectedSplit ? points : g));
+    } else if (side === 'left') draft.leftBoundary = points;
     else draft.rightBoundary = points;
   }
 
+  function setTarget(side: BoundarySide) {
+    activeSide = side;
+    if (side === 'split' && selectedSplit < 0 && draft.splitGates.length) selectedSplit = 0;
+  }
+
+  // N splits → N+1 sectors (the gaps, including the A-side and B-side ends).
+  let sectorSlots = $derived(Array.from({ length: draft.splitGates.length + 1 }, (_, i) => i));
+
+  // Arc-length of the point on `path` nearest to p — orders splits ALONG the
+  // corridor so "split 1" is the first one reached from gate A, not the first authored.
+  function arcLengthOf(p: ZonePoint, path: ZonePoint[]): number {
+    let bestDist = Infinity;
+    let bestArc = 0;
+    let arc = 0;
+    for (let i = 0; i < path.length - 1; i++) {
+      const a = path[i];
+      const b = path[i + 1];
+      const dx = b.x - a.x;
+      const dz = b.z - a.z;
+      const len2 = dx * dx + dz * dz || 1e-9;
+      const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.z - a.z) * dz) / len2));
+      const d = (p.x - (a.x + t * dx)) ** 2 + (p.z - (a.z + t * dz)) ** 2;
+      const segLen = Math.sqrt(len2);
+      if (d < bestDist) {
+        bestDist = d;
+        bestArc = arc + t * segLen;
+      }
+      arc += segLen;
+    }
+    return bestArc;
+  }
+
+  function splitPathPos(gate: ZonePoint[]): number {
+    if (gate.length < 2) return Infinity; // incomplete sorts last
+    const ref = draft.leftBoundary.length >= 2 ? draft.leftBoundary : draft.rightBoundary;
+    if (ref.length < 2) return 0;
+    const mid = { x: (gate[0].x + gate[1].x) / 2, z: (gate[0].z + gate[1].z) / 2 };
+    return arcLengthOf(mid, ref);
+  }
+
+  // Slot a freshly-completed split into driving order (A→…→B), carrying its (blank)
+  // trailing sector name. Only fresh gates are re-slotted, so there's no named sector
+  // to lose; dragging an existing split past another does NOT re-order (rare — delete
+  // and re-place it if you need it moved).
+  function sortNewSplitIntoPlace(from: number) {
+    if (draft.leftBoundary.length < 2 && draft.rightBoundary.length < 2) return;
+    const gate = draft.splitGates[from];
+    if (!gate || gate.length < 2) return;
+    const pos = splitPathPos(gate);
+    let target = 0;
+    draft.splitGates.forEach((g, i) => {
+      if (i !== from && g.length === 2 && splitPathPos(g) < pos) target++;
+    });
+    if (target === from) return;
+    const gates = draft.splitGates.slice();
+    gates.splice(from, 1);
+    const names = sectorNames.slice();
+    const movedName = names.splice(from + 1, 1)[0] ?? '';
+    const insertAt = from < target ? target - 1 : target;
+    gates.splice(insertAt, 0, gate);
+    names.splice(insertAt + 1, 0, movedName);
+    draft.splitGates = gates;
+    sectorNames = names;
+    selectedSplit = insertAt;
+    selectedPoint = null;
+  }
+
+  function renameSector(i: number, value: string) {
+    const next = sectorNames.slice();
+    while (next.length <= i) next.push('');
+    next[i] = value;
+    sectorNames = next;
+  }
+
   function appendBoundaryPoint(side: BoundarySide, point: ZonePoint, source: 'map' | 'telemetry') {
+    if (side === 'split') {
+      // No split selected yet → start a fresh divider with this point (and a new
+      // trailing sector slot).
+      if (selectedSplit < 0 || selectedSplit >= draft.splitGates.length) {
+        pushUndo();
+        draft.splitGates = [...draft.splitGates, [{ ...point }]];
+        sectorNames = [...sectorNames, ''];
+        selectedSplit = draft.splitGates.length - 1;
+        activeSide = 'split';
+        selectedPoint = { side: 'split', index: 0 };
+        status = 'Started split — place its second point across the road.';
+        return;
+      }
+      const gate = draft.splitGates[selectedSplit];
+      if (gate.length >= 2) {
+        status = 'Split complete. Add another split, or drag its points to refine.';
+        return;
+      }
+      pushUndo();
+      const next = [...gate, { ...point }];
+      setBoundary('split', next);
+      activeSide = 'split';
+      selectedPoint = { side: 'split', index: next.length - 1 };
+      if (next.length === 2) {
+        sortNewSplitIntoPlace(selectedSplit);
+        status = 'Split complete — slotted into driving order.';
+      } else {
+        status = 'Split — place its second point across the road.';
+      }
+      return;
+    }
+    pushUndo();
     const nextIndex = boundary(side).length;
     setBoundary(side, [...boundary(side), { ...point }]);
     activeSide = side;
@@ -455,77 +669,124 @@
     appendBoundaryPoint(activeSide, latLngToWorld(e.latlng), 'map');
   }
 
-  function onSvgMapPointerUp(e: PointerEvent) {
-    if (!svgEl) return;
-    appendBoundaryPoint(activeSide, fromClient(e), 'map');
+  function pointLabel(side: BoundarySide, index: number): string {
+    if (side === 'left') return `L${index + 1}`;
+    if (side === 'right') return `R${index + 1}`;
+    if (side === 'ring') return `S${index + 1}`;
+    return `split ${selectedSplit + 1}${index === 0 ? 'a' : 'b'}`;
   }
 
-  function selectedBoundaryPointLabel(): string {
-    if (!selectedPoint) return 'No point selected';
-    const prefix = selectedPoint.side === 'left' ? 'L' : selectedPoint.side === 'ring' ? 'S' : 'R';
-    return `${prefix}${selectedPoint.index + 1}`;
+  function selectedLabel(): string {
+    if (activeSide === 'split') {
+      if (selectedSplit < 0) return 'No split';
+      return selectedPoint?.side === 'split'
+        ? pointLabel('split', selectedPoint.index)
+        : `split ${selectedSplit + 1}`;
+    }
+    return selectedPoint ? pointLabel(selectedPoint.side, selectedPoint.index) : 'No point selected';
   }
 
   function capturePoint(side: BoundarySide = activeSide, fromShortcut = false) {
     if (!livePoint) {
-      status = 'Waiting for the first telemetry world position. Drive briefly, then reopen/click capture.';
+      status = 'Waiting for the first telemetry world position. Drive briefly, then capture.';
       return;
     }
     appendBoundaryPoint(side, livePoint, 'telemetry');
     if (fromShortcut && side !== activeSide) activeSide = side;
-    const shortcutLabel = fromShortcut ? ' via shortcut' : '';
-    if (shortcutLabel) status = `${status.replace(/\.$/, '')}${shortcutLabel}.`;
-    setTimeout(fitMapToGeometry, 0);
+    if (fromShortcut) status = `${status.replace(/\.$/, '')} via shortcut.`;
   }
 
-  function insertAtSelected(offset: 0 | 1) {
-    if (!selectedPoint) {
-      status = 'Select a boundary point first.';
+  // The curve point at the midpoint of the segment between anchors i and j — ON
+  // the drawn curve (so inserting an anchor there barely changes the shape, just
+  // adds a draggable handle). Linear / <3 anchors fall back to the chord midpoint.
+  function curvePointBetween(pts: ZonePoint[], i: number, j: number, closed: boolean): ZonePoint {
+    const a = pts[i];
+    const b = pts[j];
+    if (curveMode === 'linear' || pts.length < 3) {
+      return { x: (a.x + b.x) / 2, z: (a.z + b.z) / 2 };
+    }
+    const curve = tessellate(pts, { closed });
+    const idx = i * DEFAULT_SEGMENTS + Math.floor(DEFAULT_SEGMENTS / 2);
+    const k = closed ? idx % curve.length : Math.min(idx, curve.length - 1);
+    return { x: curve[k].x, z: curve[k].z };
+  }
+
+  // Insert a new anchor on the curve next to the selection (no live telemetry):
+  // between the selected anchor and its successor (or predecessor if it's last),
+  // pre-selected and ready to drag.
+  function insertOnCurve() {
+    const side = activeSide;
+    if (side === 'split') {
+      status = 'Insert doesn’t apply to split gates (they are 2-point lines).';
       return;
     }
-    if (!livePoint) {
-      status = 'Waiting for the first telemetry world position before inserting.';
+    const pts = boundary(side);
+    if (pts.length < 2) {
+      status = 'Add at least 2 points to this target before inserting.';
       return;
     }
-    const points = [...boundary(selectedPoint.side)];
-    const insertIndex = selectedPoint.index + offset;
-    points.splice(insertIndex, 0, { ...livePoint });
-    setBoundary(selectedPoint.side, points);
-    selectedPoint = { side: selectedPoint.side, index: insertIndex };
-    activeSide = selectedPoint.side;
-    status = `Inserted ${selectedBoundaryPointLabel()} from last known telemetry.`;
-    setTimeout(fitMapToGeometry, 0);
+    const closed = side === 'ring';
+    let i = selectedPoint?.side === side ? selectedPoint.index : pts.length - 1;
+    let j: number;
+    let insertAt: number;
+    if (closed) {
+      j = (i + 1) % pts.length;
+      insertAt = i + 1;
+    } else if (i < pts.length - 1) {
+      j = i + 1;
+      insertAt = i + 1;
+    } else {
+      // Last anchor: insert into the segment before it.
+      j = i;
+      i = i - 1;
+      insertAt = j;
+    }
+    const mid = curvePointBetween(pts, i, j, closed);
+    pushUndo();
+    const next = [...pts];
+    next.splice(insertAt, 0, mid);
+    setBoundary(side, next);
+    activeSide = side;
+    selectedPoint = { side, index: insertAt };
+    status = `Inserted ${pointLabel(side, insertAt)} on the curve.`;
   }
 
   function onLocalKeydown(e: KeyboardEvent) {
-    if (!e.ctrlKey || !e.altKey) return;
+    const tag = (e.target as HTMLElement | null)?.tagName;
+    const inField = tag === 'INPUT' || tag === 'TEXTAREA';
     const key = e.key.toLowerCase();
-    if (key === 'z') {
-      e.preventDefault();
-      capturePoint(activeSide, true);
-    } else if (key === 'l') {
-      e.preventDefault();
-      capturePoint('left', true);
-    } else if (key === 'r') {
-      e.preventDefault();
-      capturePoint('right', true);
+    // Global capture (works while FH6 has focus too) — alt distinguishes from undo.
+    if (e.ctrlKey && e.altKey) {
+      if (key === 'z') {
+        e.preventDefault();
+        capturePoint(activeSide, true);
+      } else if (key === 'l') {
+        e.preventDefault();
+        capturePoint('left', true);
+      } else if (key === 'r') {
+        e.preventDefault();
+        capturePoint('right', true);
+      }
+      return;
     }
-  }
-
-  function removeLastPoint() {
-    const points = boundary(activeSide);
-    if (points.length === 0) return;
-    setBoundary(activeSide, points.slice(0, -1));
-    if (selectedPoint?.side === activeSide && selectedPoint.index >= points.length - 1) {
-      selectedPoint = points.length > 1 ? { side: activeSide, index: points.length - 2 } : null;
+    // Undo / redo — but never steal a text field's own undo.
+    if (e.ctrlKey && !inField) {
+      if (key === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        undo();
+      } else if (key === 'y' || (key === 'z' && e.shiftKey)) {
+        e.preventDefault();
+        redo();
+      }
     }
   }
 
   function reverseBoundaries() {
+    pushUndo();
     draft.leftBoundary = [...draft.leftBoundary].reverse();
     draft.rightBoundary = [...draft.rightBoundary].reverse();
-    // Only the left/right arrays were reversed — don't remap a ring selection.
-    if (selectedPoint && selectedPoint.side !== 'ring') {
+    // Only the left/right arrays were reversed — don't remap a ring/split selection.
+    if (selectedPoint && (selectedPoint.side === 'left' || selectedPoint.side === 'right')) {
       const len = boundary(selectedPoint.side).length;
       selectedPoint = { side: selectedPoint.side, index: len - selectedPoint.index - 1 };
     }
@@ -539,6 +800,7 @@
       status = 'Map the left and right boundary (at least 2 points each) before seeding the scoring ring.';
       return;
     }
+    pushUndo();
     ringAnchors = [
       ...draft.leftBoundary.map((p) => ({ ...p })),
       ...draft.rightBoundary.map((p) => ({ ...p })).reverse(),
@@ -548,12 +810,58 @@
     status = `Seeded scoring ring from boundary (${ringAnchors.length} points). Drag inward to tighten.`;
   }
 
+  function toggleSmooth() {
+    pushUndo();
+    curveMode = curveMode === 'catmull' ? 'linear' : 'catmull';
+  }
+
   function deletePoint(side: BoundarySide, index: number) {
-    setBoundary(side, boundary(side).filter((_, i) => i !== index));
+    pushUndo();
+    setBoundary(
+      side,
+      boundary(side).filter((_, i) => i !== index)
+    );
     if (selectedPoint?.side === side) {
       const nextLen = boundary(side).length;
       selectedPoint = nextLen === 0 ? null : { side, index: Math.min(index, nextLen - 1) };
     }
+  }
+
+  function addSplitGate() {
+    pushUndo();
+    draft.splitGates = [...draft.splitGates, []];
+    // A new divider at the end opens a new trailing sector.
+    sectorNames = [...sectorNames, ''];
+    selectedSplit = draft.splitGates.length - 1;
+    activeSide = 'split';
+    selectedPoint = null;
+    status = 'New split — click two points across the road (or capture) to place it.';
+  }
+
+  function deleteSplitGate(idx: number) {
+    if (idx < 0 || idx >= draft.splitGates.length) return;
+    pushUndo();
+    draft.splitGates = draft.splitGates.filter((_, i) => i !== idx);
+    // Removing divider idx merges sector idx and idx+1 — keep the left one's name.
+    sectorNames = sectorNames.filter((_, i) => i !== idx + 1);
+    selectedSplit = Math.min(selectedSplit, draft.splitGates.length - 1);
+    if (selectedPoint?.side === 'split') selectedPoint = null;
+    status = 'Removed split.';
+  }
+
+  // Toolbar "Delete" / Delete key: a split gate is atomic (its point can't stand
+  // alone), so deleting on the split target removes the whole gate.
+  function deleteSelected() {
+    if (activeSide === 'split') {
+      if (selectedSplit >= 0) deleteSplitGate(selectedSplit);
+      else status = 'Select a split gate to delete.';
+      return;
+    }
+    if (!selectedPoint) {
+      status = 'Select a point to delete.';
+      return;
+    }
+    deletePoint(selectedPoint.side, selectedPoint.index);
   }
 
   function selectPoint(side: BoundarySide, index: number) {
@@ -561,46 +869,19 @@
     activeSide = side;
   }
 
-  function onPointKeydown(e: KeyboardEvent, side: BoundarySide, index: number) {
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      selectPoint(side, index);
-    } else if (e.key === 'Delete' || e.key === 'Backspace') {
-      e.preventDefault();
-      deletePoint(side, index);
-    }
-  }
-
-  function startDrag(e: PointerEvent, side: BoundarySide, index: number) {
-    e.preventDefault();
-    e.stopPropagation();
-    selectPoint(side, index);
-    dragging = { side, index };
-    (e.currentTarget as SVGElement).setPointerCapture(e.pointerId);
-  }
-
-  function moveDrag(e: PointerEvent) {
-    if (!dragging || !svgEl) return;
-    const points = [...boundary(dragging.side)];
-    points[dragging.index] = fromClient(e);
-    setBoundary(dragging.side, points);
-  }
-
-  function stopDrag() {
-    dragging = null;
-  }
-
-  function sideLabel(side: BoundarySide) {
-    return side === 'left' ? 'Left boundary' : 'Right boundary';
-  }
-
-  function gateLine(points: ZonePoint[]): string {
-    return points.length === 2 ? path(points) : '';
-  }
-
   async function save() {
     saving = true;
-    // Persist slack + curve mode + the scoring ring into the per-zone config bag.
+    // Drop incomplete splits (a divider needs both points). Removing divider i
+    // merges its two sectors, so drop the name on its right; iterate high→low so
+    // indices stay valid.
+    for (let i = draft.splitGates.length - 1; i >= 0; i--) {
+      if (draft.splitGates[i].length !== 2) {
+        draft.splitGates = draft.splitGates.filter((_, k) => k !== i);
+        sectorNames = sectorNames.filter((_, k) => k !== i + 1);
+      }
+    }
+    selectedSplit = draft.splitGates.length ? Math.min(Math.max(selectedSplit, 0), draft.splitGates.length - 1) : -1;
+    // Persist slack + curve mode + scoring ring + sector names into the bag.
     const cfg: Record<string, unknown> = {
       ...draft.scoringConfig,
       boundarySlackM: Math.max(0, slackM),
@@ -612,11 +893,19 @@
     else delete region.anchors;
     if (region.anchors?.length || region.byGate) cfg.scoringRegion = region;
     else delete cfg.scoringRegion;
+    if (sectorNames.some((n) => n && n.trim())) cfg.sectorNames = sectorNames.map((n) => n ?? '');
+    else delete cfg.sectorNames;
+    delete cfg.splitGateNames; // retired: names live on sectors now, not gates
     draft.scoringConfig = cfg;
     try {
       const saved = await saveDriftZone(draft);
       draft = toInput(saved);
       selectedId = saved.id;
+      syncFromConfig();
+      selectedSplit = draft.splitGates.length ? Math.min(Math.max(selectedSplit, 0), draft.splitGates.length - 1) : -1;
+      // Save is a commit point; the reloaded draft makes prior snapshots stale.
+      undoStack = [];
+      redoStack = [];
       status = `Saved ${saved.name}.`;
     } finally {
       saving = false;
@@ -652,173 +941,134 @@
         <p class="empty">No zones saved yet.</p>
       {/each}
     </div>
-  </aside>
 
-  <section class="main-panel">
-    <header class="head">
-      <div>
-        <h2>{selectedId ? 'Edit Drift Zone' : 'New Drift Zone'}</h2>
-        <p>Click the map or capture live telemetry to add road-edge points, then drag to refine.</p>
-      </div>
-    </header>
-
-    <div class="form-row">
+    <div class="zone-meta">
+      <div class="meta-head">{selectedId ? 'Edit zone' : 'New zone'}</div>
       <label>
         <span class="cap">Name</span>
         <input bind:value={draft.name} />
       </label>
-      <label class="num" title="Metres a run may stray past the boundary before it voids. ~3 m suits most zones; raise it for sparsely-mapped or wide zones.">
-        <span class="cap">Slack (m)</span>
-        <input class="mono" type="number" min="0" step="0.5" bind:value={slackM} />
+      <label>
+        <span class="cap">Description</span>
+        <input bind:value={draft.description} placeholder="Optional notes for this zone" />
       </label>
-      <label class="checkbox">
-        <input type="checkbox" bind:checked={draft.active} />
-        Active
-      </label>
-      <label class="checkbox" title="Draw and score this zone's boundary as a smooth centripetal Catmull-Rom curve through the anchors — the display matches scoring. Off = straight segments between points.">
-        <input
-          type="checkbox"
-          checked={curveMode === 'catmull'}
-          onchange={(e) => (curveMode = e.currentTarget.checked ? 'catmull' : 'linear')}
-        />
-        Smooth
-      </label>
-    </div>
-
-    <label>
-      <span class="cap">Description</span>
-      <input bind:value={draft.description} placeholder="Optional notes for this zone" />
-    </label>
-
-    <div class="toolbar">
-      <div class="segmented">
-        <button class:active={activeSide === 'left'} onclick={() => (activeSide = 'left')}>Left</button>
-        <button class:active={activeSide === 'right'} onclick={() => (activeSide = 'right')}>Right</button>
-        <button class:active={activeSide === 'ring'} disabled={!mapUsable} onclick={() => (activeSide = 'ring')}>Ring</button>
+      <div class="meta-row">
+        <label class="num" title="Metres a run may stray past the boundary before it voids. ~3 m suits most zones; raise it for sparsely-mapped or wide zones.">
+          <span class="cap">Slack (m)</span>
+          <input class="mono" type="number" min="0" step="0.5" bind:value={slackM} />
+        </label>
+        <label class="checkbox">
+          <input type="checkbox" bind:checked={draft.active} />
+          Active
+        </label>
       </div>
-      <button onclick={() => capturePoint()}>Capture live point</button>
-      <button onclick={() => insertAtSelected(0)}>Insert before</button>
-      <button onclick={() => insertAtSelected(1)}>Insert after</button>
-      <button onclick={removeLastPoint}>Remove last {activeSide}</button>
-      <button onclick={reverseBoundaries}>Reverse direction</button>
-      <button onclick={seedRingFromBoundary} disabled={!mapUsable} title="Copy left ++ reversed-right into the scoring ring, then drag anchors inward to tighten it.">Seed ring</button>
-      <button onclick={fitMapToGeometry}>Fit map</button>
-      <span class="live mono">
-        {livePoint
-          ? `Last X ${livePoint.x.toFixed(1)} / Z ${livePoint.z.toFixed(1)}${liveAgeSecs > 2 ? ` (${liveAgeSecs.toFixed(0)}s old)` : ''}`
-          : 'Waiting for telemetry'}
-      </span>
+      {#if selectedId}
+        <button class="danger-link" onclick={removeZone}>Delete this zone…</button>
+      {/if}
+    </div>
+  </aside>
+
+  <section class="main-panel">
+    <div class="toolbar">
+      <div class="group">
+        <div class="segmented">
+          <button class:active={activeSide === 'left'} onclick={() => setTarget('left')}>Left</button>
+          <button class:active={activeSide === 'right'} onclick={() => setTarget('right')}>Right</button>
+          <button class:active={activeSide === 'ring'} onclick={() => setTarget('ring')}>Ring</button>
+          <button class:active={activeSide === 'split'} onclick={() => setTarget('split')}>Split</button>
+        </div>
+      </div>
+
+      <span class="divider"></span>
+
+      <div class="group">
+        <button onclick={insertOnCurve} title="Insert a point on the curve next to the selected one, ready to drag">Insert</button>
+        <button onclick={deleteSelected} title="Delete the selected point (or split gate)">Delete</button>
+        <button onclick={undo} disabled={!undoStack.length} title="Undo (Ctrl+Z)">Undo</button>
+        <button onclick={redo} disabled={!redoStack.length} title="Redo (Ctrl+Y)">Redo</button>
+      </div>
+
+      <span class="divider"></span>
+
+      <div class="group">
+        <button onclick={fitMapToGeometry} title="Frame the whole zone (the only thing that moves the camera)">Fit</button>
+        <button
+          class:active={curveMode === 'catmull'}
+          onclick={toggleSmooth}
+          title="Curve the display AND scoring through the anchors (centripetal Catmull-Rom). Off = straight segments."
+        >Smooth</button>
+        <button onclick={seedRingFromBoundary} title="Copy left ++ reversed-right into the scoring ring, then drag anchors inward to tighten it.">Seed ring</button>
+      </div>
+
+      <div class="group capture">
+        <button class="subtle" onclick={() => capturePoint()} title="Append the last known telemetry position to the active target">Capture live</button>
+        <span class="live mono">
+          {livePoint
+            ? `X ${livePoint.x.toFixed(0)} · Z ${livePoint.z.toFixed(0)}${liveAgeSecs > 2 ? ` · ${liveAgeSecs.toFixed(0)}s` : ''}`
+            : 'no telemetry'}
+        </span>
+      </div>
     </div>
 
-    <p class="shortcut-hint">
-      Global shortcuts while FH6 has focus: <strong>Ctrl+Alt+Z</strong> captures selected side,
-      <strong>Ctrl+Alt+L</strong> captures left, <strong>Ctrl+Alt+R</strong> captures right.
-      Selected point: <strong>{selectedBoundaryPointLabel()}</strong>.
-    </p>
+    {#if activeSide === 'split'}
+      <div class="splitbar">
+        <span class="cap">Sectors</span>
+        <span class="endcap a" title="Entry/finish gate A (boundary start)">A</span>
+        {#each sectorSlots as i}
+          <input
+            class="sector-name"
+            placeholder={`sector ${i + 1}`}
+            value={sectorNames[i] ?? ''}
+            oninput={(e) => renameSector(i, e.currentTarget.value)}
+          />
+          {#if i < draft.splitGates.length}
+            <button
+              class="btn-sm splitnode"
+              class:active={selectedSplit === i}
+              class:incomplete={draft.splitGates[i].length < 2}
+              title={draft.splitGates[i].length < 2
+                ? 'Incomplete — place its 2 points across the road'
+                : `split ${i + 1} — click to select its line`}
+              onclick={() => {
+                selectedSplit = i;
+                selectedPoint = null;
+              }}
+            >{i + 1}</button>
+          {/if}
+        {/each}
+        <span class="endcap b" title="Entry/finish gate B (boundary end)">B</span>
+        <button class="btn-sm gatechip add" onclick={addSplitGate}>+ Split</button>
+        {#if selectedSplit >= 0}
+          <button class="btn-sm gatechip del" onclick={() => deleteSplitGate(selectedSplit)}>Delete split {selectedSplit + 1}</button>
+        {/if}
+      </div>
+    {/if}
+
+    <div class="chips">
+      <span class="chip">L <b>{draft.leftBoundary.length}</b></span>
+      <span class="chip">R <b>{draft.rightBoundary.length}</b></span>
+      <span class="chip">ring <b>{ringAnchors.length}</b></span>
+      <span class="chip">split <b>{draft.splitGates.length}</b></span>
+      <span class="chip sel">{selectedLabel()}</span>
+    </div>
 
     <div class="map-wrap">
       {#if mapUsable}
         <div class="leaflet-host" bind:this={mapHost}></div>
       {:else}
-        <div class="fallback-note">Map calibration unavailable; showing uncalibrated world-coordinate editor.</div>
-        <svg
-          bind:this={svgEl}
-          viewBox={`0 0 ${width} ${height}`}
-          onpointermove={moveDrag}
-          onpointerup={stopDrag}
-          onpointercancel={stopDrag}
-          role="img"
-          aria-label="Drift zone boundary editor"
-        >
-          <rect
-            class="map-bg"
-            x="0"
-            y="0"
-            width={width}
-            height={height}
-            role="presentation"
-            onpointerup={onSvgMapPointerUp}
-          />
-
-          {#if draft.leftBoundary.length > 1}
-            <polyline class="boundary left" points={path(draft.leftBoundary)} />
-          {/if}
-          {#if draft.rightBoundary.length > 1}
-            <polyline class="boundary right" points={path(draft.rightBoundary)} />
-          {/if}
-
-          {#if draft.leftBoundary.length > 0 && draft.rightBoundary.length > 0}
-            <polyline
-              class="gate start"
-              points={gateLine([draft.leftBoundary[0], draft.rightBoundary[0]])}
-            />
-            <polyline
-              class="gate finish"
-              points={gateLine([
-                draft.leftBoundary[draft.leftBoundary.length - 1],
-                draft.rightBoundary[draft.rightBoundary.length - 1],
-              ])}
-            />
-          {/if}
-
-          {#if livePoint}
-            {@const live = toSvg(livePoint)}
-            <circle class="live-dot" cx={live[0]} cy={live[1]} r="7" />
-          {/if}
-
-          {#each draft.leftBoundary as point, index}
-            {@const p = toSvg(point)}
-            <g class="point-group">
-              <circle
-                class="point left"
-                cx={p[0]}
-                cy={p[1]}
-                r="8"
-                role="button"
-                tabindex="0"
-                aria-label={`Select left point ${index + 1}`}
-                class:selected={selectedPoint?.side === 'left' && selectedPoint.index === index}
-                onpointerdown={(e) => startDrag(e, 'left', index)}
-                onkeydown={(e) => onPointKeydown(e, 'left', index)}
-                ondblclick={() => deletePoint('left', index)}
-              />
-              <text x={p[0] + 12} y={p[1] - 10}>L{index + 1}</text>
-            </g>
-          {/each}
-
-          {#each draft.rightBoundary as point, index}
-            {@const p = toSvg(point)}
-            <g class="point-group">
-              <circle
-                class="point right"
-                cx={p[0]}
-                cy={p[1]}
-                r="8"
-                role="button"
-                tabindex="0"
-                aria-label={`Select right point ${index + 1}`}
-                class:selected={selectedPoint?.side === 'right' && selectedPoint.index === index}
-                onpointerdown={(e) => startDrag(e, 'right', index)}
-                onkeydown={(e) => onPointKeydown(e, 'right', index)}
-                ondblclick={() => deletePoint('right', index)}
-              />
-              <text x={p[0] + 12} y={p[1] - 10}>R{index + 1}</text>
-            </g>
-          {/each}
-        </svg>
+        <div class="cal-guard">
+          <p class="cal-title">Map isn’t calibrated yet</p>
+          <p class="cal-body">
+            Mapping a drift zone needs the calibrated game map. Calibrate it once in
+            Settings, then this editor can place points against the real terrain.
+          </p>
+          <button class="primary" onclick={() => onOpenSettings?.()}>Open calibration settings →</button>
+        </div>
       {/if}
-    </div>
-
-    <div class="details">
-      <div><strong>{sideLabel('left')}</strong><span class="mono">{draft.leftBoundary.length} points</span></div>
-      <div><strong>{sideLabel('right')}</strong><span class="mono">{draft.rightBoundary.length} points</span></div>
-      <div><strong>End gates</strong><span>First &amp; last point pairs — enter either, exit the other</span></div>
-      <div><strong>Editing</strong><span>Click map to add; drag points to refine</span></div>
     </div>
 
     <footer>
       <span class="status">{status}</span>
-      <button class="danger" disabled={!selectedId} onclick={removeZone}>Delete</button>
       <button class="primary" disabled={saving} onclick={save}>{saving ? 'Saving…' : 'Save zone'}</button>
     </footer>
   </section>
@@ -828,7 +1078,7 @@
   .editor {
     min-height: 0;
     display: grid;
-    grid-template-columns: 240px 1fr;
+    grid-template-columns: 280px 1fr;
     background: var(--bg-body);
     overflow: hidden;
   }
@@ -846,24 +1096,7 @@
     gap: 1rem;
     padding: 0.75rem 0.9rem;
     border-bottom: 1px solid var(--bd-dim);
-  }
-  .head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 1rem;
-    padding: 0.85rem 0 0.25rem;
-  }
-  h2 {
-    margin: 0;
-    color: var(--tx-hi);
-    font-size: 0.95rem;
-    font-weight: 650;
-  }
-  .head p {
-    margin-top: 0.2rem;
-    color: var(--tx-dim);
-    font-size: 0.74rem;
+    flex: none;
   }
   .zone-list {
     padding: 0.55rem;
@@ -871,6 +1104,8 @@
     flex-direction: column;
     gap: 0.3rem;
     overflow-y: auto;
+    flex: 1;
+    min-height: 4rem;
   }
   .zone-row {
     text-align: left;
@@ -898,33 +1133,47 @@
     color: var(--tx-dim);
     font-size: 0.64rem;
   }
-  .main-panel {
-    min-height: 0;
-    overflow-y: auto;
-    padding: 0 1rem 1rem;
+  .zone-meta {
+    border-top: 1px solid var(--bd-subtle);
+    padding: 0.6rem 0.7rem 0.75rem;
     display: flex;
     flex-direction: column;
+    gap: 0.5rem;
+    flex: none;
+    background: var(--bg-panel);
+  }
+  .meta-head {
+    color: var(--tx-mid);
+    font-size: 0.7rem;
+    font-weight: 600;
+  }
+  .meta-row {
+    display: flex;
     gap: 0.7rem;
+    align-items: end;
+  }
+  .main-panel {
+    min-height: 0;
+    overflow: hidden;
+    padding: 0.7rem 1rem 0.85rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
   }
   label {
     display: flex;
     flex-direction: column;
     gap: 0.3rem;
     color: var(--tx-lo);
-    font-size: 0.75rem;
-  }
-  .form-row {
-    display: grid;
-    grid-template-columns: 1fr auto auto auto;
-    gap: 0.75rem;
-    align-items: end;
+    font-size: 0.74rem;
   }
   .num input {
-    width: 5.5rem;
+    width: 5rem;
   }
   .checkbox {
     flex-direction: row;
     align-items: center;
+    gap: 0.4rem;
     padding-bottom: 0.42rem;
     accent-color: var(--ac);
   }
@@ -933,7 +1182,7 @@
     border: 1px solid var(--bd-muted);
     border-radius: var(--r-sm);
     color: var(--tx-hi);
-    padding: 0.42rem 0.55rem;
+    padding: 0.4rem 0.55rem;
     font-family: inherit;
     font-size: 0.8rem;
   }
@@ -941,11 +1190,30 @@
     outline: none;
     border-color: color-mix(in srgb, var(--ac) 60%, var(--bg-panel));
   }
+
+  /* ── Grouped, data-logger toolbar ── */
   .toolbar {
     display: flex;
     align-items: center;
-    gap: 0.45rem;
+    gap: 0.4rem;
     flex-wrap: wrap;
+    flex: none;
+  }
+  .group {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+  }
+  .group.capture {
+    margin-left: auto;
+    gap: 0.45rem;
+  }
+  .divider {
+    width: 1px;
+    align-self: stretch;
+    min-height: 1.5rem;
+    background: var(--bd-subtle);
+    margin: 0 0.1rem;
   }
   .segmented {
     display: flex;
@@ -977,8 +1245,22 @@
     color: var(--tx-hi);
   }
   button:disabled {
-    opacity: 0.45;
+    opacity: 0.4;
     cursor: default;
+  }
+  .group button.active {
+    border-color: color-mix(in srgb, var(--ac) 55%, var(--bg-panel));
+    color: var(--ac);
+    background: var(--ac-wash);
+  }
+  button.subtle {
+    background: none;
+    color: var(--tx-dim);
+    border-color: var(--bd-muted);
+    font-size: 0.68rem;
+  }
+  button.subtle:hover:not(:disabled) {
+    color: var(--tx-mid);
   }
   button.ghost {
     background: none;
@@ -994,49 +1276,154 @@
     color: var(--tx-hi);
     border-color: var(--bd-strong);
   }
-  .live {
-    margin-left: auto;
-    color: var(--tx-dim);
+  .btn-sm {
+    padding: 0.22rem 0.5rem;
     font-size: 0.66rem;
   }
-  .shortcut-hint {
+  .live {
     color: var(--tx-dim);
-    font-size: 0.7rem;
-    line-height: 1.45;
-    margin-top: -0.2rem;
+    font-size: 0.66rem;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
   }
-  .shortcut-hint strong {
-    color: var(--tx-lo);
-    font-weight: 600;
+
+  /* ── Split-gate sub-selector ── */
+  .splitbar {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    flex-wrap: wrap;
+    padding: 0.32rem 0.45rem;
+    background: var(--bg-card);
+    border: 1px solid var(--bd-dim);
+    border-radius: var(--r-sm);
+    flex: none;
+  }
+  .splitbar .cap {
+    margin-right: 0.2rem;
+  }
+  .endcap {
+    min-width: 1.5rem;
+    text-align: center;
     font-family: var(--font-mono);
     font-size: 0.66rem;
+    font-weight: 700;
+    padding: 0.22rem 0.5rem;
+    border: 1px solid var(--bd-muted);
+    border-radius: var(--r-sm);
+    background: var(--bg-elevated);
   }
+  .endcap.a {
+    color: var(--gate-a);
+    border-color: color-mix(in srgb, var(--gate-a) 45%, var(--bd-muted));
+  }
+  .endcap.b {
+    color: var(--gate-b);
+    border-color: color-mix(in srgb, var(--gate-b) 45%, var(--bd-muted));
+  }
+  .sector-name {
+    width: 7rem;
+    padding: 0.2rem 0.45rem;
+    font-size: 0.68rem;
+  }
+  .splitnode {
+    min-width: 1.5rem;
+    text-align: center;
+    color: var(--gate-split);
+    border-color: color-mix(in srgb, var(--gate-split) 40%, var(--bd-muted));
+    background: var(--bg-elevated);
+  }
+  .splitnode.active {
+    color: var(--tx-hi);
+    border-color: color-mix(in srgb, var(--gate-split) 70%, var(--bg-panel));
+    background: color-mix(in srgb, var(--gate-split) 18%, transparent);
+  }
+  .splitnode.incomplete {
+    border-style: dashed;
+    opacity: 0.7;
+  }
+  .gatechip.del {
+    color: var(--bad-tx);
+    border-color: color-mix(in srgb, var(--bad) 40%, var(--bg-panel));
+  }
+  .gatechip.del:hover:not(:disabled) {
+    border-color: var(--bad);
+  }
+
+  /* ── Status chips ── */
+  .chips {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    flex-wrap: wrap;
+    flex: none;
+  }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    background: var(--bg-card);
+    border: 1px solid var(--bd-dim);
+    border-radius: var(--r-xs);
+    padding: 0.18rem 0.45rem;
+    font-size: 0.62rem;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--tx-dim);
+  }
+  .chip b {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--tx-mid);
+    font-weight: 600;
+  }
+  .chip.sel {
+    margin-left: auto;
+    text-transform: none;
+    letter-spacing: 0;
+    color: var(--tx-lo);
+  }
+
+  /* ── Map (the hero) ── */
   .map-wrap {
     border: 1px solid var(--bd-subtle);
     border-radius: var(--r-md);
     overflow: hidden;
     background: var(--bg-body);
+    flex: 1;
+    min-height: 380px;
     /* Keep leaflet's pane z-indexes from escaping above app overlays. */
     isolation: isolate;
   }
-  svg {
-    display: block;
-    width: 100%;
-    height: min(56vh, 640px);
-    touch-action: none;
-  }
   .leaflet-host {
     width: 100%;
-    height: min(56vh, 640px);
+    height: 100%;
     min-height: 380px;
   }
-  .fallback-note {
-    padding: 0.45rem 0.6rem;
-    color: var(--tx-dim);
-    font-size: 0.7rem;
-    border-bottom: 1px solid var(--bd-dim);
-    background: var(--bg-card);
+  .cal-guard {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.7rem;
+    height: 100%;
+    min-height: 380px;
+    text-align: center;
+    padding: 2rem;
   }
+  .cal-title {
+    color: var(--tx-hi);
+    font-size: 0.95rem;
+    font-weight: 650;
+  }
+  .cal-body {
+    color: var(--tx-dim);
+    font-size: 0.78rem;
+    line-height: 1.5;
+    max-width: 42ch;
+  }
+
+  /* ── Markers ── */
   :global(.zone-marker) {
     background: none;
     border: none;
@@ -1060,7 +1447,10 @@
     background: var(--map-right);
   }
   :global(.zone-marker-ring span) {
-    background: var(--violet);
+    background: var(--scoring-ring);
+  }
+  :global(.zone-marker-split span) {
+    background: var(--gate-split);
   }
   :global(.zone-marker-live span) {
     background: var(--live-dot);
@@ -1074,107 +1464,40 @@
     background: var(--bg-card);
     font: inherit;
   }
-  .map-bg {
-    fill: var(--bg-body);
-    cursor: crosshair;
-  }
-  .boundary {
-    fill: none;
-    stroke-width: 5;
-    stroke-linecap: round;
-    stroke-linejoin: round;
-    pointer-events: none;
-  }
-  .boundary.left {
-    stroke: var(--map-left);
-  }
-  .boundary.right {
-    stroke: var(--map-right);
-  }
-  .gate {
-    fill: none;
-    stroke-width: 3;
-    stroke-dasharray: 10 7;
-    pointer-events: none;
-  }
-  .gate.start {
-    stroke: var(--gate-a);
-  }
-  .gate.finish {
-    stroke: var(--gate-b);
-  }
-  .point {
-    stroke: var(--bg-body);
-    stroke-width: 2;
-    cursor: grab;
-  }
-  .point.left {
-    fill: var(--map-left);
-  }
-  .point.right {
-    fill: var(--map-right);
-  }
-  .point:active {
-    cursor: grabbing;
-  }
-  .point.selected {
-    stroke: var(--ac-bright);
-    stroke-width: 4;
-  }
-  .point-group text {
-    fill: var(--tx-lo);
-    font-size: 18px;
-    user-select: none;
-    pointer-events: none;
-  }
-  .live-dot {
-    fill: var(--live-dot);
-    stroke: var(--bg-body);
-    stroke-width: 2;
-    pointer-events: none;
-  }
-  .details {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 0.5rem;
-  }
-  .details div {
-    background: var(--bg-card);
-    border: 1px solid var(--bd-dim);
-    border-radius: var(--r-md);
-    padding: 0.55rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
-  }
-  .details strong {
-    color: var(--tx-mid);
-    font-size: 0.7rem;
-    font-weight: 600;
-  }
-  .details span, .empty {
-    color: var(--tx-dim);
-    font-size: 0.66rem;
-  }
+
+  /* ── Footer ── */
   footer {
     display: flex;
     align-items: center;
     justify-content: flex-end;
     gap: 0.5rem;
-    padding-top: 0.25rem;
+    flex: none;
   }
   .status {
     margin-right: auto;
     color: var(--tx-dim);
     font-size: 0.74rem;
   }
-  .danger {
-    color: var(--bad-tx);
-    border-color: color-mix(in srgb, var(--bad) 45%, var(--bg-panel));
+  .empty {
+    color: var(--tx-dim);
+    font-size: 0.7rem;
+    padding: 0.4rem;
   }
-  .danger:hover:not(:disabled) {
+  .danger-link {
+    align-self: flex-start;
+    margin-top: 0.1rem;
+    background: none;
+    border: none;
+    color: var(--tx-dim);
+    font-size: 0.66rem;
+    padding: 0.15rem 0;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    cursor: pointer;
+  }
+  .danger-link:hover:not(:disabled) {
     color: var(--bad-tx);
-    border-color: var(--bad);
+    border-color: transparent;
   }
   .primary {
     background: var(--ac);
