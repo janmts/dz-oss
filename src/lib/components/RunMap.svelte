@@ -6,6 +6,7 @@
   import { settings, loadSettings, driftZones, loadDriftZones } from '$lib/stores/sessions';
   import { runViews, hover, traceColorMode } from '$lib/stores/runViewer';
   import { themeColor } from '$lib/theme';
+  import { boundaryCurve, ringCurve, scoringRings, zoneCurveMode } from '$lib/curve';
   import {
     scoreState,
     visibleTickIndices,
@@ -99,10 +100,15 @@
   function drawZone(zone: DriftZoneRow) {
     if (!gm) return;
     const toLL = (p: ZonePoint) => gm!.worldToLatLng(p);
+    const mode = zoneCurveMode(zone.scoringConfig);
     if (zone.leftBoundary.length > 1)
-      gm.addLine(zone.leftBoundary.map(toLL), 2.5, { color: themeColor('--map-left', '#84b577'), opacity: 0.85 });
+      gm.addLine(boundaryCurve(zone.leftBoundary, mode).map(toLL), 2.5, { color: themeColor('--map-left', '#84b577'), opacity: 0.85 });
     if (zone.rightBoundary.length > 1)
-      gm.addLine(zone.rightBoundary.map(toLL), 2.5, { color: themeColor('--map-right', '#82a7c8'), opacity: 0.85 });
+      gm.addLine(boundaryCurve(zone.rightBoundary, mode).map(toLL), 2.5, { color: themeColor('--map-right', '#82a7c8'), opacity: 0.85 });
+    for (const ring of scoringRings(zone.scoringConfig)) {
+      if (ring.length > 1)
+        gm.addLine(ringCurve(ring, mode).map(toLL), 2.5, { color: themeColor('--violet', '#a995cf'), opacity: 0.85 });
+    }
     const a0 = zone.leftBoundary[0], b0 = zone.rightBoundary[0];
     const aN = zone.leftBoundary.at(-1), bN = zone.rightBoundary.at(-1);
     if (a0 && b0) gm.addLine([toLL(a0), toLL(b0)], 3, { color: themeColor('--gate-a', '#d2a24c'), dashArray: '8 6' });

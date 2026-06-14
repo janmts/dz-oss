@@ -14,8 +14,19 @@
   import { themeColor } from '$lib/theme';
   import { ipc } from '$lib/ipc';
   import type { DriftZoneInput, DriftZoneRow, ZonePoint } from '$lib/types';
+  import {
+    boundaryCurve,
+    parseScoringRegion,
+    ringCurve,
+    sharedScoringRing,
+    zoneCurveMode,
+    type ScoringRegion,
+    type ZoneCurveMode,
+  } from '$lib/curve';
 
-  type BoundarySide = 'left' | 'right';
+  // 'ring' is the closed scoring region; it reuses the same point-edit machinery
+  // as the two open road-edge boundaries (the name is kept for minimal churn).
+  type BoundarySide = 'left' | 'right' | 'ring';
 
   const width = 1000;
   const height = 640;
@@ -60,10 +71,18 @@
   // Per-zone boundary slack (m). Lives in scoringConfig.boundarySlackM; mirrored
   // here for a typed number input and written back on save.
   let slackM = $state(3);
+  // Boundary interpolation. Lives in scoringConfig.curve; 'catmull' draws AND
+  // scores the boundary as a centripetal curve through the anchors.
+  let curveMode = $state<ZoneCurveMode>('linear');
+  // Closed scoring ring (the per-tick scoreable region — separate from the
+  // road-edge boundary). Lives in scoringConfig.scoringRegion.anchors.
+  let ringAnchors = $state<ZonePoint[]>([]);
 
-  function syncSlack() {
+  function syncFromConfig() {
     const v = draft.scoringConfig?.boundarySlackM;
     slackM = typeof v === 'number' ? v : 3;
+    curveMode = zoneCurveMode(draft.scoringConfig);
+    ringAnchors = sharedScoringRing(draft.scoringConfig).map((p) => ({ ...p }));
   }
   let dragging = $state<{ side: BoundarySide; index: number } | null>(null);
   let selectedPoint = $state<{ side: BoundarySide; index: number } | null>(null);
@@ -77,6 +96,7 @@
   let rightLine: Polyline | null = null;
   let startGateLine: Polyline | null = null;
   let finishGateLine: Polyline | null = null;
+  let ringLine: Polyline | null = null;
   let unsubscribeShortcut: (() => void) | null = null;
   let lastKnownPoint = $state<ZonePoint | null>(null);
   let lastKnownAt = $state(0);
@@ -120,6 +140,7 @@
     ...draft.startGate,
     ...draft.finishGate,
     ...draft.splitGates.flat(),
+    ...ringAnchors,
     ...(livePoint ? [livePoint] : []),
   ]);
 
@@ -178,8 +199,26 @@
     return gm!.latLngToWorld(latlng);
   }
 
+  // Latlngs for a boundary's rendered LINE: the centripetal curve through the
+  // side's anchors when smoothed (straight chords otherwise), with `dragIndex`
+  // optionally overridden by an in-progress drag. Markers stay on the raw
+  // anchors — only the line follows the curve. Matches the scorer's tessellation
+  // (drift.rs from_row) so the drawn boundary equals the scored one.
+  function boundaryLatLngs(side: BoundarySide, dragIndex = -1, dragLL: LatLng | null = null): LatLng[] {
+    const pts = boundary(side).map((p, i) => (i === dragIndex && dragLL ? latLngToWorld(dragLL) : p));
+    return boundaryCurve(pts, curveMode).map(worldToLatLng);
+  }
+
+  // Latlngs for the closed scoring-ring LINE: the curve through the ring anchors
+  // closed back to the start, with an optional in-progress drag override.
+  function ringLatLngs(dragIndex = -1, dragLL: LatLng | null = null): LatLng[] {
+    const pts = ringAnchors.map((p, i) => (i === dragIndex && dragLL ? latLngToWorld(dragLL) : p));
+    return ringCurve(pts, curveMode).map(worldToLatLng);
+  }
+
   function markerIcon(side: BoundarySide, label: string, selected = false) {
-    const cls = side === 'left' ? 'zone-marker-left' : 'zone-marker-right';
+    const cls =
+      side === 'left' ? 'zone-marker-left' : side === 'right' ? 'zone-marker-right' : 'zone-marker-ring';
     return gm!.L.divIcon({
       className: `zone-marker ${cls}${selected ? ' zone-marker-selected' : ''}`,
       html: `<span>${label}</span>`,
@@ -217,15 +256,16 @@
     rightLine = null;
     startGateLine = null;
     finishGateLine = null;
+    ringLine = null;
 
     if (draft.leftBoundary.length > 1) {
-      leftLine = gm.addLine(draft.leftBoundary.map(worldToLatLng), 5, {
+      leftLine = gm.addLine(boundaryLatLngs('left'), 5, {
         color: themeColor('--map-left', '#84b577'),
         opacity: 0.95,
       });
     }
     if (draft.rightBoundary.length > 1) {
-      rightLine = gm.addLine(draft.rightBoundary.map(worldToLatLng), 5, {
+      rightLine = gm.addLine(boundaryLatLngs('right'), 5, {
         color: themeColor('--map-right', '#82a7c8'),
         opacity: 0.95,
       });
@@ -265,6 +305,31 @@
       });
     }
 
+    // Scoring ring (closed): the per-tick scoreable region, distinct from the
+    // road-edge boundary. Drawn over the corridor; markers stay on raw anchors.
+    if (ringAnchors.length > 1) {
+      ringLine = gm.addLine(ringLatLngs(), 4, {
+        color: themeColor('--violet', '#a995cf'),
+        opacity: 0.92,
+      });
+    }
+    ringAnchors.forEach((point, index) => {
+      const selected = selectedPoint?.side === 'ring' && selectedPoint.index === index;
+      const marker = gm!.L.marker(worldToLatLng(point), {
+        draggable: true,
+        icon: markerIcon('ring', `S${index + 1}`, selected),
+      }).addTo(gm!.markers);
+      marker.on('click', () => selectPoint('ring', index));
+      marker.on('drag', () => updateLinesDuringDrag('ring', index, marker.getLatLng()));
+      marker.on('dragend', () => {
+        const points = [...boundary('ring')];
+        points[index] = latLngToWorld(marker.getLatLng());
+        setBoundary('ring', points);
+        selectPoint('ring', index);
+      });
+      marker.on('dblclick', () => deletePoint('ring', index));
+    });
+
     // Re-add the live marker (cleared above); untracked so rebuilding the
     // boundaries never subscribes this path to the 64 Hz live position.
     liveMarker = null;
@@ -293,12 +358,16 @@
   // so we move the affected line vertices imperatively and commit the state on `dragend`.
   function updateLinesDuringDrag(side: BoundarySide, index: number, latlng: LatLng) {
     if (!mapUsable) return;
+    if (side === 'ring') {
+      ringLine?.setLatLngs(ringLatLngs(index, latlng));
+      return;
+    }
     // Position of vertex (s, i): the live drag latlng for the moving point, else stored world pos.
     const at = (s: BoundarySide, i: number): LatLng =>
       s === side && i === index ? latlng : worldToLatLng(boundary(s)[i]);
 
     const sideLine = side === 'left' ? leftLine : rightLine;
-    sideLine?.setLatLngs(boundary(side).map((_, i) => at(side, i)));
+    sideLine?.setLatLngs(boundaryLatLngs(side, index, latlng));
 
     if (draft.leftBoundary.length && draft.rightBoundary.length) {
       startGateLine?.setLatLngs([at('left', 0), at('right', 0)]);
@@ -322,6 +391,8 @@
     void draft.leftBoundary;
     void draft.rightBoundary;
     void selectedPoint;
+    void curveMode;
+    void ringAnchors;
     if (mapReady) redrawLeaflet();
   });
 
@@ -345,7 +416,7 @@
     selectedId = zone.id;
     selectedPoint = null;
     status = '';
-    syncSlack();
+    syncFromConfig();
     setTimeout(fitMapToGeometry, 0);
   }
 
@@ -354,15 +425,17 @@
     selectedId = null;
     selectedPoint = null;
     status = '';
-    syncSlack();
+    syncFromConfig();
   }
 
   function boundary(side: BoundarySide): ZonePoint[] {
+    if (side === 'ring') return ringAnchors;
     return side === 'left' ? draft.leftBoundary : draft.rightBoundary;
   }
 
   function setBoundary(side: BoundarySide, points: ZonePoint[]) {
-    if (side === 'left') draft.leftBoundary = points;
+    if (side === 'ring') ringAnchors = points;
+    else if (side === 'left') draft.leftBoundary = points;
     else draft.rightBoundary = points;
   }
 
@@ -389,7 +462,8 @@
 
   function selectedBoundaryPointLabel(): string {
     if (!selectedPoint) return 'No point selected';
-    return `${selectedPoint.side === 'left' ? 'L' : 'R'}${selectedPoint.index + 1}`;
+    const prefix = selectedPoint.side === 'left' ? 'L' : selectedPoint.side === 'ring' ? 'S' : 'R';
+    return `${prefix}${selectedPoint.index + 1}`;
   }
 
   function capturePoint(side: BoundarySide = activeSide, fromShortcut = false) {
@@ -450,10 +524,28 @@
   function reverseBoundaries() {
     draft.leftBoundary = [...draft.leftBoundary].reverse();
     draft.rightBoundary = [...draft.rightBoundary].reverse();
-    if (selectedPoint) {
+    // Only the left/right arrays were reversed — don't remap a ring selection.
+    if (selectedPoint && selectedPoint.side !== 'ring') {
       const len = boundary(selectedPoint.side).length;
       selectedPoint = { side: selectedPoint.side, index: len - selectedPoint.index - 1 };
     }
+  }
+
+  // Seed the closed scoring ring from the road-edge boundary: left ++ reversed
+  // right — the same corridor ring the scorer builds — then tighten by dragging
+  // anchors inward. A one-time copy; editing the ring never moves the boundary.
+  function seedRingFromBoundary() {
+    if (draft.leftBoundary.length < 2 || draft.rightBoundary.length < 2) {
+      status = 'Map the left and right boundary (at least 2 points each) before seeding the scoring ring.';
+      return;
+    }
+    ringAnchors = [
+      ...draft.leftBoundary.map((p) => ({ ...p })),
+      ...draft.rightBoundary.map((p) => ({ ...p })).reverse(),
+    ];
+    activeSide = 'ring';
+    selectedPoint = null;
+    status = `Seeded scoring ring from boundary (${ringAnchors.length} points). Drag inward to tighten.`;
   }
 
   function deletePoint(side: BoundarySide, index: number) {
@@ -508,8 +600,19 @@
 
   async function save() {
     saving = true;
-    // Persist the boundary slack into the per-zone config bag.
-    draft.scoringConfig = { ...draft.scoringConfig, boundarySlackM: Math.max(0, slackM) };
+    // Persist slack + curve mode + the scoring ring into the per-zone config bag.
+    const cfg: Record<string, unknown> = {
+      ...draft.scoringConfig,
+      boundarySlackM: Math.max(0, slackM),
+      curve: curveMode,
+    };
+    // Preserve any directed per-gate rings — the editor only authors the shared ring.
+    const region: ScoringRegion = { ...parseScoringRegion(draft.scoringConfig) };
+    if (ringAnchors.length) region.anchors = ringAnchors.map((p) => ({ ...p }));
+    else delete region.anchors;
+    if (region.anchors?.length || region.byGate) cfg.scoringRegion = region;
+    else delete cfg.scoringRegion;
+    draft.scoringConfig = cfg;
     try {
       const saved = await saveDriftZone(draft);
       draft = toInput(saved);
@@ -572,6 +675,14 @@
         <input type="checkbox" bind:checked={draft.active} />
         Active
       </label>
+      <label class="checkbox" title="Draw and score this zone's boundary as a smooth centripetal Catmull-Rom curve through the anchors — the display matches scoring. Off = straight segments between points.">
+        <input
+          type="checkbox"
+          checked={curveMode === 'catmull'}
+          onchange={(e) => (curveMode = e.currentTarget.checked ? 'catmull' : 'linear')}
+        />
+        Smooth
+      </label>
     </div>
 
     <label>
@@ -583,12 +694,14 @@
       <div class="segmented">
         <button class:active={activeSide === 'left'} onclick={() => (activeSide = 'left')}>Left</button>
         <button class:active={activeSide === 'right'} onclick={() => (activeSide = 'right')}>Right</button>
+        <button class:active={activeSide === 'ring'} disabled={!mapUsable} onclick={() => (activeSide = 'ring')}>Ring</button>
       </div>
       <button onclick={() => capturePoint()}>Capture live point</button>
       <button onclick={() => insertAtSelected(0)}>Insert before</button>
       <button onclick={() => insertAtSelected(1)}>Insert after</button>
       <button onclick={removeLastPoint}>Remove last {activeSide}</button>
       <button onclick={reverseBoundaries}>Reverse direction</button>
+      <button onclick={seedRingFromBoundary} disabled={!mapUsable} title="Copy left ++ reversed-right into the scoring ring, then drag anchors inward to tighten it.">Seed ring</button>
       <button onclick={fitMapToGeometry}>Fit map</button>
       <span class="live mono">
         {livePoint
@@ -802,7 +915,7 @@
   }
   .form-row {
     display: grid;
-    grid-template-columns: 1fr auto auto;
+    grid-template-columns: 1fr auto auto auto;
     gap: 0.75rem;
     align-items: end;
   }
@@ -945,6 +1058,9 @@
   }
   :global(.zone-marker-right span) {
     background: var(--map-right);
+  }
+  :global(.zone-marker-ring span) {
+    background: var(--violet);
   }
   :global(.zone-marker-live span) {
     background: var(--live-dot);

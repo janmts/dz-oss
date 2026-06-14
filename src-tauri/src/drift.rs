@@ -449,7 +449,8 @@ impl RunnableZone {
         }
         // The end gates ARE the first/last boundary point pairs — always derived
         // from the current boundary, never the stored gate (which can go stale
-        // when the boundary is edited after the first save).
+        // when the boundary is edited after the first save). Tessellation
+        // preserves the endpoints, so the gates are identical curved or straight.
         let gate_a = [
             Point::from(row.left_boundary.first()?),
             Point::from(row.right_boundary.first()?),
@@ -458,8 +459,22 @@ impl RunnableZone {
             Point::from(row.left_boundary.last()?),
             Point::from(row.right_boundary.last()?),
         ];
-        let mut polygon: Vec<Point> = row.left_boundary.iter().map(Point::from).collect();
-        polygon.extend(row.right_boundary.iter().rev().map(Point::from));
+        // The entry-detection polygon follows the SAME centripetal curve the editor
+        // and maps draw when the zone is smoothed (`curve == "catmull"`), so a run
+        // is tested against the boundary that's on screen. Linear zones keep the
+        // raw straight chords. `left ++ reversed(right)` closes the corridor ring.
+        let left: Vec<Point> = row.left_boundary.iter().map(Point::from).collect();
+        let right: Vec<Point> = row.right_boundary.iter().map(Point::from).collect();
+        let (left, right) = if curve_is_catmull(&row.scoring_config) {
+            (
+                tessellate(&left, false, CURVE_DEFAULT_SEGMENTS),
+                tessellate(&right, false, CURVE_DEFAULT_SEGMENTS),
+            )
+        } else {
+            (left, right)
+        };
+        let mut polygon = left;
+        polygon.extend(right.iter().rev().copied());
         if polygon.len() < 3 {
             return None;
         }
@@ -484,6 +499,13 @@ fn slack_from_config(config: &serde_json::Value) -> f64 {
         .and_then(|v| v.as_f64())
         .unwrap_or(3.0)
         .max(0.0)
+}
+
+/// Whether a zone's boundary is a centripetal Catmull-Rom curve
+/// (`scoring_config.curve == "catmull"`) rather than straight chords. Mirrors
+/// `zoneCurveMode` in `src/lib/curve.ts` so display geometry equals scored.
+fn curve_is_catmull(config: &serde_json::Value) -> bool {
+    config.get("curve").and_then(|v| v.as_str()) == Some("catmull")
 }
 
 /// True if `point` is inside the polygon, or outside it by no more than
@@ -520,6 +542,112 @@ fn point_segment_dist(p: Point, a: Point, b: Point) -> f64 {
     let projx = a.x + t * dx;
     let projz = a.z + t * dz;
     ((p.x - projx).powi(2) + (p.z - projz).powi(2)).sqrt()
+}
+
+/// Interpolated points emitted per anchor span when tessellating a curved zone
+/// shape (mirrors `DEFAULT_SEGMENTS` in `src/lib/curve.ts`).
+pub const CURVE_DEFAULT_SEGMENTS: usize = 10;
+
+/// Centripetal Catmull-Rom (alpha = 0.5) densification of a zone shape, in world
+/// metres. This is the SHARED geometry contract with the frontend: it MUST stay
+/// byte-for-byte identical to `src/lib/curve.ts::tessellate` so the boundary the
+/// editor/maps draw is exactly the boundary the scorer tests — display == scored.
+/// The `tessellate_matches_golden_and_invariants` test below pins the same golden
+/// numbers asserted by `scripts/check-curve.mjs` on the JS side. Knot deltas use
+/// `sqrt().sqrt()` (dist^0.5), NOT `powf(0.25)`: IEEE sqrt is correctly-rounded
+/// and matches JS `Math.sqrt` to the bit, whereas `pow` is not guaranteed to.
+///
+/// `closed` selects a closed ring (a scoring region) vs an open polyline (a
+/// road-edge boundary). Fewer than 3 anchors can't form a curve (a 2-point gate,
+/// a single point), so they pass through unchanged.
+pub fn tessellate(anchors: &[Point], closed: bool, segments: usize) -> Vec<Point> {
+    let seg = segments.max(1);
+    let n = anchors.len();
+    if n < 3 {
+        return anchors.to_vec();
+    }
+    let mut out: Vec<Point> = Vec::new();
+    if closed {
+        for i in 0..n {
+            emit_span(
+                &mut out,
+                anchors[(i + n - 1) % n],
+                anchors[i],
+                anchors[(i + 1) % n],
+                anchors[(i + 2) % n],
+                seg,
+            );
+        }
+    } else {
+        // Reflect the endpoints so the curve reaches the first/last anchor with a
+        // natural tangent and no zero-length end span (which would divide by zero
+        // in the knot deltas).
+        let start = Point {
+            x: 2.0 * anchors[0].x - anchors[1].x,
+            z: 2.0 * anchors[0].z - anchors[1].z,
+        };
+        let end = Point {
+            x: 2.0 * anchors[n - 1].x - anchors[n - 2].x,
+            z: 2.0 * anchors[n - 1].z - anchors[n - 2].z,
+        };
+        for i in 0..n - 1 {
+            let p0 = if i == 0 { start } else { anchors[i - 1] };
+            let p3 = if i + 2 <= n - 1 { anchors[i + 2] } else { end };
+            emit_span(&mut out, p0, anchors[i], anchors[i + 1], p3, seg);
+        }
+        out.push(anchors[n - 1]);
+    }
+    out
+}
+
+/// Centripetal knot delta between two control points: dist^0.5, written as a
+/// double sqrt for bit-exact parity with the JS reference.
+fn knot_delta(a: Point, b: Point) -> f64 {
+    let dx = b.x - a.x;
+    let dz = b.z - a.z;
+    (dx * dx + dz * dz).sqrt().sqrt()
+}
+
+/// Emit `seg` points along the Catmull-Rom span p1->p2 (neighbours p0, p3) via
+/// the Barry-Goldman pyramid. k = 0..seg-1 (t = t1 included, t = t2 excluded);
+/// t = t1 evaluates exactly to p1, so each anchor lands in the output once and the
+/// curve interpolates its anchors. Mirrors `emitSpan` in curve.ts exactly.
+fn emit_span(out: &mut Vec<Point>, p0: Point, p1: Point, p2: Point, p3: Point, seg: usize) {
+    let t0 = 0.0;
+    let t1 = t0 + knot_delta(p0, p1);
+    let t2 = t1 + knot_delta(p1, p2);
+    let t3 = t2 + knot_delta(p2, p3);
+
+    // Coincident control points collapse a knot interval; fall back to a straight
+    // p1->p2 chord for this span rather than dividing by zero.
+    if !(t1 > t0) || !(t2 > t1) || !(t3 > t2) {
+        for k in 0..seg {
+            let u = k as f64 / seg as f64;
+            out.push(Point {
+                x: p1.x + (p2.x - p1.x) * u,
+                z: p1.z + (p2.z - p1.z) * u,
+            });
+        }
+        return;
+    }
+
+    for k in 0..seg {
+        let t = t1 + (t2 - t1) * (k as f64 / seg as f64);
+        let a1x = ((t1 - t) / (t1 - t0)) * p0.x + ((t - t0) / (t1 - t0)) * p1.x;
+        let a1z = ((t1 - t) / (t1 - t0)) * p0.z + ((t - t0) / (t1 - t0)) * p1.z;
+        let a2x = ((t2 - t) / (t2 - t1)) * p1.x + ((t - t1) / (t2 - t1)) * p2.x;
+        let a2z = ((t2 - t) / (t2 - t1)) * p1.z + ((t - t1) / (t2 - t1)) * p2.z;
+        let a3x = ((t3 - t) / (t3 - t2)) * p2.x + ((t - t2) / (t3 - t2)) * p3.x;
+        let a3z = ((t3 - t) / (t3 - t2)) * p2.z + ((t - t2) / (t3 - t2)) * p3.z;
+        let b1x = ((t2 - t) / (t2 - t0)) * a1x + ((t - t0) / (t2 - t0)) * a2x;
+        let b1z = ((t2 - t) / (t2 - t0)) * a1z + ((t - t0) / (t2 - t0)) * a2z;
+        let b2x = ((t3 - t) / (t3 - t1)) * a2x + ((t - t1) / (t3 - t1)) * a3x;
+        let b2z = ((t3 - t) / (t3 - t1)) * a2z + ((t - t1) / (t3 - t1)) * a3z;
+        out.push(Point {
+            x: ((t2 - t) / (t2 - t1)) * b1x + ((t - t1) / (t2 - t1)) * b2x,
+            z: ((t2 - t) / (t2 - t1)) * b1z + ((t - t1) / (t2 - t1)) * b2z,
+        });
+    }
 }
 
 /// Re-read a run's stored packets and score them. Runs once on close, off the
@@ -761,6 +889,93 @@ mod tests {
         let zone = RunnableZone::from_row(&square_zone()).unwrap();
         assert!(point_in_polygon(Point { x: 2.5, z: 5.0 }, &zone.polygon));
         assert!(!point_in_polygon(Point { x: 8.0, z: 5.0 }, &zone.polygon));
+    }
+
+    #[test]
+    fn tessellate_matches_golden_and_invariants() {
+        // Goldens are duplicated verbatim in scripts/check-curve.mjs; identical
+        // numbers on both sides + identical arithmetic == display equals scored.
+        let near = |a: f64, b: f64| (a - b).abs() <= 1e-9;
+        let pt = |x: f64, z: f64| Point { x, z };
+
+        // open L-corner, seg = 4 → (n-1)*seg + 1 = 9 points, interpolates anchors
+        let l = vec![pt(0.0, 0.0), pt(10.0, 0.0), pt(10.0, 10.0)];
+        let a = tessellate(&l, false, 4);
+        assert_eq!(a.len(), 9);
+        assert!(near(a[0].x, 0.0) && near(a[0].z, 0.0));
+        assert!(near(a[4].x, 10.0) && near(a[4].z, 0.0), "anchor 1 at index seg");
+        assert!(near(a[8].x, 10.0) && near(a[8].z, 10.0), "last anchor");
+        assert!(near(a[2].x, 5.625) && near(a[2].z, -0.625), "a[2] = {:?}", a[2]);
+        assert!(a.iter().all(|p| p.x.is_finite() && p.z.is_finite()));
+
+        // closed square, seg = 4 → n*seg = 16 points, anchors at every i*seg
+        let sq = vec![pt(0.0, 0.0), pt(10.0, 0.0), pt(10.0, 10.0), pt(0.0, 10.0)];
+        let b = tessellate(&sq, true, 4);
+        assert_eq!(b.len(), 16);
+        assert!(near(b[0].x, 0.0) && near(b[0].z, 0.0));
+        assert!(near(b[4].x, 10.0) && near(b[4].z, 0.0));
+        assert!(near(b[8].x, 10.0) && near(b[8].z, 10.0));
+        assert!(near(b[12].x, 0.0) && near(b[12].z, 10.0));
+        assert!(near(b[2].x, 5.0) && near(b[2].z, -1.25), "b[2] = {:?}", b[2]);
+
+        // unevenly-spaced open: the irrational sqrt-path parity lock
+        let un = vec![pt(0.0, 0.0), pt(10.0, 0.0), pt(12.0, 8.0)];
+        let u = tessellate(&un, false, 4);
+        assert_eq!(u.len(), 9);
+        assert!(
+            near(u[2].x, 5.510823710739302) && near(u[2].z, -0.5771314068283177),
+            "u[2] = {:?}",
+            u[2]
+        );
+        assert!(
+            near(u[6].x, 11.421236023089621) && near(u[6].z, 3.524085249957107),
+            "u[6] = {:?}",
+            u[6]
+        );
+
+        // collinear anchors stay on the line (affine blends of collinear points)
+        let col = vec![pt(0.0, 0.0), pt(5.0, 0.0), pt(10.0, 0.0), pt(20.0, 0.0)];
+        for p in tessellate(&col, false, 3) {
+            assert!(near(p.z, 0.0), "collinear drifted off-axis: {:?}", p);
+        }
+
+        // fewer than 3 anchors → passthrough copy (gates / single points)
+        let two = vec![pt(1.0, 2.0), pt(3.0, 4.0)];
+        assert_eq!(tessellate(&two, false, 4), two);
+    }
+
+    #[test]
+    fn curved_zone_tessellates_entry_polygon_yet_preserves_gates() {
+        // 3-point boundaries per side so tessellation actually engages (<3 = no-op).
+        let mut row = square_zone();
+        row.left_boundary = vec![
+            db::ZonePoint { x: 0.0, z: 0.0 },
+            db::ZonePoint { x: 0.0, z: 5.0 },
+            db::ZonePoint { x: 0.0, z: 10.0 },
+        ];
+        row.right_boundary = vec![
+            db::ZonePoint { x: 6.0, z: 0.0 },
+            db::ZonePoint { x: 5.0, z: 5.0 },
+            db::ZonePoint { x: 6.0, z: 10.0 },
+        ];
+
+        // Linear (no curve flag): the polygon is just the 6 raw points.
+        let linear = RunnableZone::from_row(&row).unwrap();
+        assert_eq!(linear.polygon.len(), 6);
+
+        // Curved: each side densifies to (3-1)*seg + 1 points, both sides joined.
+        row.scoring_config = serde_json::json!({ "curve": "catmull" });
+        let curved = RunnableZone::from_row(&row).unwrap();
+        assert_eq!(curved.polygon.len(), 2 * (2 * CURVE_DEFAULT_SEGMENTS + 1));
+        assert!(curved.polygon.len() > linear.polygon.len());
+
+        // Gates are the raw endpoints in BOTH cases — tessellation preserves them,
+        // so smoothing never moves where a run starts/finishes.
+        assert_eq!(curved.gate_a, linear.gate_a);
+        assert_eq!(curved.gate_b, linear.gate_b);
+        let near = |a: Point, x: f64, z: f64| (a.x - x).abs() < 1e-9 && (a.z - z).abs() < 1e-9;
+        assert!(near(curved.gate_a[0], 0.0, 0.0) && near(curved.gate_a[1], 6.0, 0.0));
+        assert!(near(curved.gate_b[0], 0.0, 10.0) && near(curved.gate_b[1], 6.0, 10.0));
     }
 
     #[test]

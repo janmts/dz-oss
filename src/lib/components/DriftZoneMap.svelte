@@ -3,6 +3,7 @@
   import { effectiveMapConfig } from '$lib/mapDefaults';
   import { createGameMap, makeCalib, type GameMap } from '$lib/mapView';
   import { themeColor } from '$lib/theme';
+  import { boundaryCurve, ringCurve, scoringRings, zoneCurveMode } from '$lib/curve';
   import type { AppSettings, DriftZoneRow, TelemetryPacket, ZonePoint } from '$lib/types';
 
   let {
@@ -40,6 +41,7 @@
     ...(zone?.startGate ?? []),
     ...(zone?.finishGate ?? []),
     ...(zone?.splitGates.flat() ?? []),
+    ...(zone ? scoringRings(zone.scoringConfig).flat() : []),
     ...(livePoint ? [livePoint] : []),
   ]);
 
@@ -146,17 +148,26 @@
     gm.clearLines();
 
     if (zone) {
+      const mode = zoneCurveMode(zone.scoringConfig);
       if (zone.leftBoundary.length > 1) {
-        gm.addLine(zone.leftBoundary.map(gm.worldToLatLng), 5, {
+        gm.addLine(boundaryCurve(zone.leftBoundary, mode).map(gm.worldToLatLng), 5, {
           color: themeColor('--map-left', '#84b577'),
           opacity: 0.95,
         });
       }
       if (zone.rightBoundary.length > 1) {
-        gm.addLine(zone.rightBoundary.map(gm.worldToLatLng), 5, {
+        gm.addLine(boundaryCurve(zone.rightBoundary, mode).map(gm.worldToLatLng), 5, {
           color: themeColor('--map-right', '#82a7c8'),
           opacity: 0.95,
         });
+      }
+      for (const ring of scoringRings(zone.scoringConfig)) {
+        if (ring.length > 1) {
+          gm.addLine(ringCurve(ring, mode).map(gm.worldToLatLng), 3, {
+            color: themeColor('--violet', '#a995cf'),
+            opacity: 0.92,
+          });
+        }
       }
       const start = derivedStartGate(zone);
       const finish = derivedFinishGate(zone);
