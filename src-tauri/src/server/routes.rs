@@ -92,6 +92,13 @@ pub async fn list_drift_runs(
     api::list_drift_runs(&s.app).map(Json).map_err(err)
 }
 
+pub async fn drift_run_packets(
+    State(s): State<ServerState>,
+    Path(id): Path<i64>,
+) -> Result<Json<api::DriftRunPackets>, JsonErr> {
+    api::drift_run_packets(&s.app, id).map(Json).map_err(err)
+}
+
 pub async fn drift_run_status(State(s): State<ServerState>) -> Json<crate::drift::DriftRunStatus> {
     Json(api::drift_run_status(&s.app))
 }

@@ -28,6 +28,12 @@ export interface TelemetryPacket {
   tireCombinedSlipFr: number;
   tireCombinedSlipRl: number;
   tireCombinedSlipRr: number;
+  /** Per-wheel surface roughness: 0 on smooth tarmac, >0 on grass/dirt/gravel.
+   *  The off-tarmac / scoring tarmac-gate signal. */
+  surfaceRumbleFl: number;
+  surfaceRumbleFr: number;
+  surfaceRumbleRl: number;
+  surfaceRumbleRr: number;
   carOrdinal: number;
   carClass: number;
   carPi: number;
@@ -135,6 +141,30 @@ export interface DriftRunRow {
   manualNotes: string | null;
   packetCount: number;
   scoreBreakdown: DriftScoreBreakdown | null;
+}
+
+/** Authoritative per-packet scoring diagnostics (mirrors scoring::TickScore).
+ *  One entry per packet in `DriftRunPackets.packets`, same order. Drives the
+ *  run-viewer tick colouring — scoring (green), drifting-but-unpaid (red),
+ *  idle (grey) — without re-deriving the season/tarmac gate on the frontend. */
+export interface TickScore {
+  isDrifting: boolean;
+  isScoring: boolean;
+  /** Wheels on tarmac this tick (0–4). */
+  tarmacWheels: number;
+  /** Scaled points banked at this tick; summing all ticks reproduces the score. */
+  points: number;
+}
+
+/** One drift run's full telemetry + scoring diagnostics for the run viewer,
+ *  returned by `getDriftRunPackets`. `packets` and `ticks` are index-aligned. */
+export interface DriftRunPackets {
+  runId: number;
+  zoneId: number | null;
+  season: 'spring' | 'summer' | 'autumn' | 'winter';
+  packets: TelemetryPacket[];
+  ticks: TickScore[];
+  score: DriftScoreBreakdown;
 }
 
 export interface DriftRunStatus {

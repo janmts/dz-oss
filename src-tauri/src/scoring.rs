@@ -261,6 +261,24 @@ pub struct RunScore {
     pub flip_pause_pts: f64,
 }
 
+/// Per-packet scoring diagnostics emitted alongside the run score, one entry per
+/// input packet in the same order. Lets the run viewer colour each tick by what
+/// the scorer actually did — banking (green), drifting-but-unpaid (red), or idle
+/// (grey) — without re-deriving the season/tarmac gate on the frontend.
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TickScore {
+    /// Sliding hard enough to count as drifting (speed/angle/slip gates), surface aside.
+    pub is_drifting: bool,
+    /// Banking points this tick: drifting AND (gate off OR enough wheels on tarmac).
+    pub is_scoring: bool,
+    /// Wheels on tarmac (SurfaceRumble ≈ 0) this tick, 0–4.
+    pub tarmac_wheels: u32,
+    /// Scaled points banked at this tick (main credit less the flip-pause, plus
+    /// any transit credit re-paid here). Summing these reproduces the run score.
+    pub points: f64,
+}
+
 /// Signed chassis sideslip (drift angle) in **degrees** — positive when sliding
 /// one way, negative the other; the live instrument and flip counting need the
 /// sign.
@@ -406,6 +424,27 @@ fn frame_dt(prev_ms: u32, cur_ms: u32) -> f64 {
 
 /// Score a run from its packets in time order. Returns zeros for an empty run.
 pub fn score_run(packets: &[TelemetryPacket], p: &ScoringParams) -> RunScore {
+    score_run_inner(packets, p, None)
+}
+
+/// Like [`score_run`] but also returns one [`TickScore`] per input packet (same
+/// order) — the authoritative per-tick diagnostics the run viewer overlays on
+/// the map trace and timeline. The aggregate [`RunScore`] is byte-for-byte
+/// identical to [`score_run`]'s (same arithmetic; the buffer is write-only).
+pub fn score_run_with_ticks(
+    packets: &[TelemetryPacket],
+    p: &ScoringParams,
+) -> (RunScore, Vec<TickScore>) {
+    let mut ticks = Vec::with_capacity(packets.len());
+    let result = score_run_inner(packets, p, Some(&mut ticks));
+    (result, ticks)
+}
+
+fn score_run_inner(
+    packets: &[TelemetryPacket],
+    p: &ScoringParams,
+    mut ticks: Option<&mut Vec<TickScore>>,
+) -> RunScore {
     let mut total = 0.0;
     let mut drift_time = 0.0;
     let mut total_time = 0.0;
@@ -443,6 +482,11 @@ pub fn score_run(packets: &[TelemetryPacket], p: &ScoringParams) -> RunScore {
         let angle = signed.abs();
         let sign = if signed >= 0.0 { 1i8 } else { -1i8 };
         let drifting = is_drifting(pkt, p);
+        // Per-tick diagnostics (write-only; never feed back into the score).
+        let tarmac_wheels = tarmac_wheel_count(pkt);
+        let on_tarmac_now = tarmac_wheels >= p.min_tarmac_wheels;
+        let scoring_tick = drifting && (!p.require_tarmac_contact || on_tarmac_now);
+        let mut tick_pts_raw = 0.0_f64;
 
         if drifting {
             // Resuming after a dip: count a linked flick only if drifting picked
@@ -466,7 +510,7 @@ pub fn score_run(packets: &[TelemetryPacket], p: &ScoringParams) -> RunScore {
             max_multiplier = max_multiplier.max(multiplier);
             // Points accrue only with enough tyres on tarmac (when the gate is
             // on); off-track sliding still counts as drift time / continuity.
-            if !p.require_tarmac_contact || on_tarmac(pkt, p) {
+            if !p.require_tarmac_contact || on_tarmac_now {
                 let rate =
                     p.base_rate * angle_factor(angle, speed, p) * speed_factor(speed, p) * multiplier;
                 // Transit credit: resuming after >=1 non-crediting packet
@@ -480,6 +524,7 @@ pub fn score_run(packets: &[TelemetryPacket], p: &ScoringParams) -> RunScore {
                                 p.transit_gain * w * lrate * (total_time - lt).min(TRANSIT_CAP_S);
                             total += credit;
                             transit_raw += credit;
+                            tick_pts_raw += credit;
                         }
                     }
                 }
@@ -499,6 +544,7 @@ pub fn score_run(packets: &[TelemetryPacket], p: &ScoringParams) -> RunScore {
                 score_sign = sign;
                 let supp = if total_time < pause_until { pause_w } else { 0.0 };
                 total += rate * (1.0 - supp) * dt;
+                tick_pts_raw += rate * (1.0 - supp) * dt;
                 pause_raw += rate * supp * dt;
                 last_credit = Some((idx, total_time, rate, speed));
             }
@@ -513,6 +559,15 @@ pub fn score_run(packets: &[TelemetryPacket], p: &ScoringParams) -> RunScore {
             if out_time > p.transition_grace_s {
                 drift_duration = 0.0; // sustained break: combo is lost
             }
+        }
+
+        if let Some(ts) = ticks.as_mut() {
+            ts.push(TickScore {
+                is_drifting: drifting,
+                is_scoring: scoring_tick,
+                tarmac_wheels,
+                points: tick_pts_raw * p.scale,
+            });
         }
     }
 
@@ -1050,6 +1105,55 @@ mod tests {
         let r = score_run(&[], &ScoringParams::default());
         assert_eq!(r.score, 0.0);
         assert_eq!(r.sample_count, 0);
+    }
+
+    #[test]
+    fn ticks_align_with_predicates_and_reconstruct_score() {
+        // score_run_with_ticks emits one TickScore per packet, in order; the
+        // per-tick flags match the scoring predicates exactly; and the per-tick
+        // points sum back to the run score (the buffer never alters the math).
+        let p = ScoringParams::default();
+        let mut pkts = Vec::new();
+        let mut ms = 0u32;
+        for _ in 0..60 {
+            pkts.push(at(drifting_packet(40.0, 20.0), ms)); // banking (on tarmac)
+            ms += 16;
+        }
+        for _ in 0..30 {
+            pkts.push(at(all_wheels_off_tarmac(drifting_packet(40.0, 20.0)), ms)); // drifting, gated off
+            ms += 16;
+        }
+        for _ in 0..30 {
+            pkts.push(at(drifting_packet(0.0, 20.0), ms)); // straight: idle
+            ms += 16;
+        }
+        for _ in 0..60 {
+            pkts.push(at(drifting_packet(40.0, 20.0), ms)); // banking again
+            ms += 16;
+        }
+
+        let (agg, ticks) = score_run_with_ticks(&pkts, &p);
+        assert_eq!(ticks.len(), pkts.len());
+        // Aggregate is identical to the plain scorer.
+        assert_eq!(agg.score, score_run(&pkts, &p).score);
+        // Flags line up packet-for-packet with the predicates.
+        for (pkt, t) in pkts.iter().zip(&ticks) {
+            assert_eq!(t.is_drifting, is_drifting(pkt, &p));
+            assert_eq!(t.is_scoring, is_scoring_packet(pkt, &p));
+            assert_eq!(t.tarmac_wheels, tarmac_wheel_count(pkt));
+        }
+        // The grass stretch is drifting but unpaid; the straight is neither.
+        assert!(ticks[70].is_drifting && !ticks[70].is_scoring);
+        assert_eq!(ticks[70].tarmac_wheels, 0);
+        assert!(!ticks[100].is_drifting);
+        // Per-tick points reconstruct the run total.
+        let cum: f64 = ticks.iter().map(|t| t.points).sum();
+        assert!(agg.score > 0.0);
+        assert!(
+            (cum - agg.score).abs() <= agg.score.abs() * 1e-9 + 1e-6,
+            "cumulative tick points {cum} vs score {}",
+            agg.score
+        );
     }
 
     /// Low-speed composite parity vs the Python mirror on real packet data:

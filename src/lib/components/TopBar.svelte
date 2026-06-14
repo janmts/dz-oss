@@ -1,5 +1,5 @@
 <script module lang="ts">
-  export type AppTab = 'drift' | 'gauges' | 'zones' | 'sessions';
+  export type AppTab = 'drift' | 'gauges' | 'zones' | 'sessions' | 'runs';
 </script>
 
 <script lang="ts">
@@ -33,6 +33,7 @@
     { id: 'gauges', label: 'Gauges' },
     { id: 'zones', label: 'Zones' },
     { id: 'sessions', label: 'Sessions' },
+    { id: 'runs', label: 'Runs' },
   ];
 
   let pkt = $derived($displayPacket);
