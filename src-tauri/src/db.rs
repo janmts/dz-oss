@@ -15,7 +15,20 @@ pub fn open() -> Result<Connection> {
     let conn = Connection::open(&path)?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
     init(&conn)?;
+    // First-run seed of the bundled drift zones (only-if-absent). Best-effort:
+    // a seed failure must never block app startup, so it's logged, not fatal.
+    if let Err(e) = seed_drift_zones_if_empty(&conn, now_unix_ms()) {
+        eprintln!("[db] bundled-zone seeding skipped: {e}");
+    }
     Ok(conn)
+}
+
+fn now_unix_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 pub fn init(conn: &Connection) -> Result<()> {
@@ -541,6 +554,56 @@ pub fn delete_drift_zone(conn: &Connection, id: i64) -> Result<()> {
     conn.execute("UPDATE drift_runs SET zone_id=NULL WHERE zone_id=?1", [id])?;
     conn.execute("DELETE FROM drift_zones WHERE id=?1", [id])?;
     Ok(())
+}
+
+/// The drift zones shipped with the app, embedded in the binary at compile time
+/// (so it reaches both the desktop build and the build-from-source headless
+/// server without any runtime resource lookup). Each entry is a
+/// [`DriftZoneInput`] with no id, timestamps, or derived end gates — those are
+/// assigned on insert. Regenerate with `scripts/export_seed_zones.py` whenever
+/// the authored zone set changes.
+const BUNDLED_ZONES_JSON: &str = include_str!("seed_zones.json");
+
+/// Seed the bundled drift zones the first time the app runs against a fresh DB,
+/// so a freshly-installed app opens onto a populated drift workbench instead of
+/// a blank one.
+///
+/// Only-if-absent: if `drift_zones` already has any rows this is a no-op, so a
+/// user's own authored or edited zones are never clobbered, nor are the bundled
+/// zones re-inserted on every launch. Returns the number of zones inserted.
+///
+/// Called from [`open`] (the real desktop + server entry points) but NOT from
+/// [`init`], which the test suite drives directly and expects to leave empty.
+pub fn seed_drift_zones_if_empty(conn: &Connection, now_ms: i64) -> Result<usize> {
+    // Fast path for the common case (an already-seeded DB): a plain read, no
+    // transaction and no write lock on every launch.
+    if count_drift_zones(conn)? > 0 {
+        return Ok(0);
+    }
+    // Parse the embedded set before touching the DB so a malformed embed fails
+    // with zero rows written, leaving the next launch free to retry cleanly.
+    let zones: Vec<DriftZoneInput> = serde_json::from_str(BUNDLED_ZONES_JSON)
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+
+    // Seed atomically. The transaction makes the insert loop all-or-nothing: if
+    // any insert fails the batch rolls back (on the guard's drop), so we never
+    // commit a PARTIAL set that the count check above would then lock in for
+    // good. The write lock also serializes a concurrent seeder — the desktop app
+    // and the headless server share one DB file — so the loser re-reads a
+    // non-empty count inside the lock and bails instead of double-seeding.
+    let tx = conn.unchecked_transaction()?;
+    if count_drift_zones(&tx)? > 0 {
+        return Ok(0); // another process seeded first; tx rolls back on drop
+    }
+    for zone in &zones {
+        save_drift_zone(&tx, zone, now_ms)?;
+    }
+    tx.commit()?;
+    Ok(zones.len())
+}
+
+fn count_drift_zones(conn: &Connection) -> Result<i64> {
+    conn.query_row("SELECT COUNT(*) FROM drift_zones", [], |r| r.get(0))
 }
 
 pub fn open_drift_run(
@@ -1283,5 +1346,97 @@ mod tests {
             )
             .unwrap();
         assert_eq!((leftover, leftover_preroll), (0, 0));
+    }
+
+    #[test]
+    fn bundled_zones_json_is_valid_and_complete() {
+        // The embedded seed must always deserialize into DriftZoneInput so a
+        // bad regeneration is caught here at test time, never silently at the
+        // user's first run (where a parse failure would seed nothing).
+        let zones: Vec<DriftZoneInput> =
+            serde_json::from_str(BUNDLED_ZONES_JSON).expect("bundled seed JSON must parse");
+        assert_eq!(zones.len(), 10, "expected the 10 authored zones");
+
+        let mut level_zones = 0;
+        for z in &zones {
+            assert!(!z.name.trim().is_empty(), "zone has an empty name");
+            assert!(
+                !z.name.to_lowercase().contains("test"),
+                "working-title leaked into bundled zone name: {:?}",
+                z.name
+            );
+            assert!(z.active, "bundled zones ship active: {:?}", z.name);
+            assert!(
+                z.left_boundary.len() >= 2 && z.right_boundary.len() >= 2,
+                "zone {:?} needs a real boundary",
+                z.name
+            );
+            assert!(z.id.is_none(), "seed zones must not carry an id");
+            if z.scoring_config.get("levels").is_some() {
+                level_zones += 1;
+            }
+        }
+        // The rejected per-anchor `y` must never ship: ZonePoint is x/z only,
+        // and zone height lives in scoringConfig.levels, not on each point.
+        let raw: serde_json::Value = serde_json::from_str(BUNDLED_ZONES_JSON).unwrap();
+        for z in raw.as_array().unwrap() {
+            for key in ["leftBoundary", "rightBoundary"] {
+                for p in z[key].as_array().unwrap() {
+                    assert!(
+                        p.get("y").is_none(),
+                        "boundary point carries a stray per-anchor y: {p}"
+                    );
+                }
+            }
+        }
+
+        // Exactly the loop zone carries height-level bands.
+        assert_eq!(level_zones, 1, "exactly one zone should have height levels");
+        let loop_zone = zones
+            .iter()
+            .find(|z| z.scoring_config.get("levels").is_some())
+            .unwrap();
+        assert_eq!(loop_zone.name, "Kawazu Nanadaru Loop Bridge");
+        assert_eq!(
+            loop_zone.scoring_config["levels"].as_array().unwrap().len(),
+            3
+        );
+    }
+
+    #[test]
+    fn seed_populates_empty_db_and_is_idempotent() {
+        let conn = in_memory(); // init() only — starts with no zones
+        assert!(list_drift_zones(&conn).unwrap().is_empty());
+
+        let inserted = seed_drift_zones_if_empty(&conn, 1000).unwrap();
+        assert_eq!(inserted, 10);
+        let zones = list_drift_zones(&conn).unwrap();
+        assert_eq!(zones.len(), 10);
+        // End gates are derived on insert, so a seeded zone is immediately usable.
+        let loop_zone = zones
+            .iter()
+            .find(|z| z.name == "Kawazu Nanadaru Loop Bridge")
+            .expect("loop zone seeded");
+        assert_eq!(loop_zone.start_gate.len(), 2);
+        assert_eq!(loop_zone.finish_gate.len(), 2);
+        assert_eq!(loop_zone.scoring_config["levels"].as_array().unwrap().len(), 3);
+
+        // Re-running is a no-op: no duplicates, nothing re-inserted.
+        let again = seed_drift_zones_if_empty(&conn, 2000).unwrap();
+        assert_eq!(again, 0);
+        assert_eq!(list_drift_zones(&conn).unwrap().len(), 10);
+    }
+
+    #[test]
+    fn seed_never_clobbers_existing_zones() {
+        let conn = in_memory();
+        // A user (or an earlier run) already has a zone — seeding must skip
+        // entirely rather than mixing the bundled set in.
+        save_drift_zone(&conn, &zone_input("My Custom Zone"), 500).unwrap();
+        let inserted = seed_drift_zones_if_empty(&conn, 1000).unwrap();
+        assert_eq!(inserted, 0);
+        let zones = list_drift_zones(&conn).unwrap();
+        assert_eq!(zones.len(), 1);
+        assert_eq!(zones[0].name, "My Custom Zone");
     }
 }
