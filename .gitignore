@@ -13,6 +13,7 @@ scripts/*
 !scripts/check-car-ordinals.mjs
 !scripts/measure-map-content.mjs
 !scripts/check-curve.mjs
+!scripts/export_seed_zones.py
 docs/*
 # but track the public docs referenced from the README
 !docs/headless-server.md
