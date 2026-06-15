@@ -24,3 +24,16 @@ export const LAP_PALETTE = [
   '#6fb3ad', // teal
   '#c98ba7', // rose
 ];
+
+/** Sequential graphite ramp for ORDINAL height bands (index 0 = highest =
+ *  lightest). Deliberately neutral so it never collides with the saturated map
+ *  series colors (--map-left/right, --gate-a/b/split, --scoring-ring); height is
+ *  sequential data, so a value ramp — not a categorical hue — is the right key. */
+export const ELEVATION_RAMP = [
+  '#cdd2d8',
+  '#abb1b9',
+  '#888f98',
+  '#666d76',
+  '#4a5058',
+  '#343941',
+];

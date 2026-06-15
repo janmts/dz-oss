@@ -1,6 +1,6 @@
 [package]
 name = "fh6-tel"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 autobins = false
 default-run = "dz-oss"
