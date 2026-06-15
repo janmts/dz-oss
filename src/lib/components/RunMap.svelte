@@ -6,7 +6,7 @@
   import { settings, loadSettings, driftZones, loadDriftZones } from '$lib/stores/sessions';
   import { runViews, hover, traceColorMode } from '$lib/stores/runViewer';
   import { themeColor } from '$lib/theme';
-  import { boundaryCurve, ringCurve, scoringRings, zoneCurveMode } from '$lib/curve';
+  import { boundaryCurve, ringCurve, scoringRings, sectorLabelAnchors, zoneCurveMode } from '$lib/curve';
   import { parseZoneLevels, zoneLevelLabel } from '$lib/zoneLevels';
   import {
     scoreState,
@@ -30,7 +30,9 @@
 
   function stateColors(): Record<ScoreState, string> {
     return {
-      scoring: themeColor('--ok', '#84b577'),
+      // Punchier green now that the boundary is neutral (no green competitor);
+      // unpaid red no longer collides with the now-teal --gate-b.
+      scoring: themeColor('--ok-bright', '#8fe07f'),
       unpaid: themeColor('--bad', '#d56c62'),
       idle: themeColor('--tx-dim', '#8a8b85'),
     };
@@ -85,8 +87,8 @@
     } else {
       highlight = gm.L.circleMarker(ll, {
         radius: 4.5,
-        weight: 1.5,
-        color: themeColor('--bg-card', '#18191d'),
+        weight: 2,
+        color: themeColor('--bg-body', '#0f1012'),
         fillColor: themeColor('--ac-bright', '#ecc274'),
         fillOpacity: 1,
         interactive: false,
@@ -102,31 +104,54 @@
     if (!gm) return;
     const toLL = (p: ZonePoint) => gm!.worldToLatLng(p);
     const mode = zoneCurveMode(zone.scoringConfig);
+    // The trace is the hero here, so the boundary is a quiet neutral cased edge.
+    const edge = themeColor('--zone-edge', '#a4abb3');
     if (zone.leftBoundary.length > 1)
-      gm.addLine(boundaryCurve(zone.leftBoundary, mode).map(toLL), 2.5, { color: themeColor('--map-left', '#84b577'), opacity: 0.85 });
+      gm.addCasedLine(boundaryCurve(zone.leftBoundary, mode).map(toLL), 2, { color: edge });
     if (zone.rightBoundary.length > 1)
-      gm.addLine(boundaryCurve(zone.rightBoundary, mode).map(toLL), 2.5, { color: themeColor('--map-right', '#82a7c8'), opacity: 0.85 });
+      gm.addCasedLine(boundaryCurve(zone.rightBoundary, mode).map(toLL), 2, { color: edge });
     for (const ring of scoringRings(zone.scoringConfig)) {
       if (ring.length > 1)
-        gm.addLine(ringCurve(ring, mode).map(toLL), 2.5, { color: themeColor('--scoring-ring', '#cf72e0'), opacity: 0.85 });
+        gm.addCasedLine(ringCurve(ring, mode).map(toLL), 2, { color: themeColor('--scoring-ring', '#cf72e0'), opacity: 0.85 });
     }
     const a0 = zone.leftBoundary[0], b0 = zone.rightBoundary[0];
     const aN = zone.leftBoundary.at(-1), bN = zone.rightBoundary.at(-1);
-    if (a0 && b0) gm.addLine([toLL(a0), toLL(b0)], 3, { color: themeColor('--gate-a', '#d2a24c'), dashArray: '8 6' });
-    if (aN && bN) gm.addLine([toLL(aN), toLL(bN)], 3, { color: themeColor('--gate-b', '#d56c62'), dashArray: '8 6' });
+    if (a0 && b0)
+      gm.addGate(toLL(a0), toLL(b0), { kind: 'end', base: 2, color: themeColor('--gate-a', '#d2a24c'), label: 'A' });
+    if (aN && bN)
+      gm.addGate(toLL(aN), toLL(bN), { kind: 'end', base: 2, color: themeColor('--gate-b', '#5fb3a6'), label: 'B' });
+    const splitColor = themeColor('--gate-split', '#a995cf');
     for (const g of zone.splitGates)
-      if (g.length === 2) gm.addLine(g.map(toLL), 2, { color: themeColor('--gate-split', '#a995cf'), dashArray: '5 5', opacity: 0.8 });
+      if (g.length === 2) gm.addGate(toLL(g[0]), toLL(g[1]), { kind: 'split', base: 2, color: splitColor });
+    // Sector name labels at each sector's mid-corridor point.
+    const raw = (zone.scoringConfig as { sectorNames?: unknown } | null)?.sectorNames;
+    const names = Array.isArray(raw) ? (raw as string[]) : [];
+    if (names.some((n) => n && n.trim())) {
+      sectorLabelAnchors(zone.leftBoundary, zone.rightBoundary, zone.splitGates).forEach((a, i) => {
+        const name = names[i];
+        if (a && name && name.trim()) gm!.addLabel(toLL(a), name.trim());
+      });
+    }
   }
+
+  // Trace weight. The trace is NOT cased: a drift run crosses itself constantly
+  // and runs nearly parallel to itself through loops, so a dark halo under it
+  // merges into smears between passes and the cores alpha-stack at every
+  // crossing. The neutral boundary already frees the bright green to read on
+  // terrain, so an opaque punchy line is cleaner than a cased one here.
+  const TRACE_BASE = 3.0;
 
   function drawTrace(view: RunView, mode: 'scoring' | 'byRun', col: Record<ScoreState, string>) {
     if (!gm) return;
     const { packets, ticks } = view.data;
     if (mode === 'byRun') {
       const lls = packets.filter(nonZero).map((p) => gm!.worldToLatLng({ x: p.positionX, z: p.positionZ }));
-      if (lls.length > 1) gm.addLine(lls, 2.5, { color: view.color, opacity: 0.9 });
+      if (lls.length > 1) gm.addLine(lls, TRACE_BASE, { color: view.color, opacity: 1 });
       return;
     }
-    // Scoring mode: break the line into colour segments by per-tick state.
+    // Scoring mode: opaque per-state segments. Butt caps (default) so segment
+    // seams abut at the shared vertex instead of stacking round caps into lumps;
+    // round joins keep within-segment bends smooth.
     let seg: ReturnType<GameMap['addLine']> | null = null;
     let segState: ScoreState | null = null;
     let lastLL: ReturnType<GameMap['worldToLatLng']> | null = null;
@@ -136,7 +161,11 @@
       const ll = gm.worldToLatLng({ x: p.positionX, z: p.positionZ });
       const st = scoreState(ticks[i]);
       if (!seg || st !== segState) {
-        seg = gm.addLine(lastLL ? [lastLL, ll] : [ll], 2.6, { color: col[st], opacity: 0.92 });
+        seg = gm.addLine(lastLL ? [lastLL, ll] : [ll], TRACE_BASE, {
+          color: col[st],
+          opacity: 1,
+          lineJoin: 'round',
+        });
         segState = st;
       } else {
         seg.addLatLng(ll);

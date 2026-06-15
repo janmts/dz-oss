@@ -3,7 +3,7 @@
   import { effectiveMapConfig } from '$lib/mapDefaults';
   import { createGameMap, makeCalib, type GameMap } from '$lib/mapView';
   import { themeColor } from '$lib/theme';
-  import { boundaryCurve, ringCurve, scoringRings, zoneCurveMode } from '$lib/curve';
+  import { boundaryCurve, ringCurve, scoringRings, sectorLabelAnchors, zoneCurveMode } from '$lib/curve';
   import type { AppSettings, DriftZoneRow, TelemetryPacket, ZonePoint } from '$lib/types';
 
   let {
@@ -149,53 +149,71 @@
 
     if (zone) {
       const mode = zoneCurveMode(zone.scoringConfig);
+      const toLL = (p: ZonePoint) => gm!.worldToLatLng(p);
+      const edge = themeColor('--zone-edge', '#a4abb3');
+      // Boundaries: both sides render as ONE neutral cased chrome edge (the L/R
+      // green/azure split lives only in the editor now).
       if (zone.leftBoundary.length > 1) {
-        gm.addLine(boundaryCurve(zone.leftBoundary, mode).map(gm.worldToLatLng), 5, {
-          color: themeColor('--map-left', '#84b577'),
-          opacity: 0.95,
-        });
+        gm.addCasedLine(boundaryCurve(zone.leftBoundary, mode).map(toLL), 4, { color: edge });
       }
       if (zone.rightBoundary.length > 1) {
-        gm.addLine(boundaryCurve(zone.rightBoundary, mode).map(gm.worldToLatLng), 5, {
-          color: themeColor('--map-right', '#82a7c8'),
-          opacity: 0.95,
-        });
+        gm.addCasedLine(boundaryCurve(zone.rightBoundary, mode).map(toLL), 4, { color: edge });
       }
+      // Scoring ring — cased orchid (distinct from the boundary edge).
       for (const ring of scoringRings(zone.scoringConfig)) {
         if (ring.length > 1) {
-          gm.addLine(ringCurve(ring, mode).map(gm.worldToLatLng), 3, {
+          gm.addCasedLine(ringCurve(ring, mode).map(toLL), 3, {
             color: themeColor('--scoring-ring', '#cf72e0'),
             opacity: 0.92,
           });
         }
       }
+      // End gates: square-post rungs with A/B pills (replaces the dashed lines).
       const start = derivedStartGate(zone);
       const finish = derivedFinishGate(zone);
       if (start.length === 2) {
-        gm.addLine(start.map(gm.worldToLatLng), 4, {
+        gm.addGate(toLL(start[0]), toLL(start[1]), {
+          kind: 'end',
+          base: 4,
           color: themeColor('--gate-a', '#d2a24c'),
-          dashArray: '10 7',
+          label: 'A',
         });
       }
       if (finish.length === 2) {
-        gm.addLine(finish.map(gm.worldToLatLng), 4, {
-          color: themeColor('--gate-b', '#d56c62'),
-          dashArray: '10 7',
+        gm.addGate(toLL(finish[0]), toLL(finish[1]), {
+          kind: 'end',
+          base: 4,
+          color: themeColor('--gate-b', '#5fb3a6'),
+          label: 'B',
         });
       }
+      // Splits: violet seam-bands with round posts (quieter than A/B).
+      const splitColor = themeColor('--gate-split', '#a995cf');
       zone.splitGates.forEach((gate) => {
         if (gate.length !== 2) return;
-        gm!.addLine(gate.map(gm!.worldToLatLng), 3, {
-          color: themeColor('--gate-split', '#a995cf'),
-          dashArray: '6 6',
-          opacity: 0.9,
-        });
+        gm!.addGate(toLL(gate[0]), toLL(gate[1]), { kind: 'split', base: 3, color: splitColor });
       });
+      // Sector name labels at each sector's mid-corridor point.
+      drawSectorLabels(zone);
     }
 
     // The fit depends on the live point's presence; untrack it so rebuilding
     // the zone never subscribes this code path to the per-tick live position.
     untrack(() => fitMapToGeometry(`${zone?.id ?? 'none'}:${!!livePoint}`));
+  }
+
+  // On-map sector names (labels only this pass — the gate rungs/bands are the
+  // visible dividers; these name the spans). Index aligns with sectorNames order.
+  function drawSectorLabels(z: DriftZoneRow) {
+    if (!gm) return;
+    const raw = (z.scoringConfig as { sectorNames?: unknown } | null)?.sectorNames;
+    const names = Array.isArray(raw) ? (raw as string[]) : [];
+    if (!names.some((n) => n && n.trim())) return;
+    const anchors = sectorLabelAnchors(z.leftBoundary, z.rightBoundary, z.splitGates);
+    anchors.forEach((a, i) => {
+      const name = names[i];
+      if (a && name && name.trim()) gm!.addLabel(gm!.worldToLatLng(a), name.trim());
+    });
   }
 
   function updateLive() {
@@ -221,10 +239,10 @@
     <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Drift zone map">
       <rect x="0" y="0" width={width} height={height} />
       {#if zone.leftBoundary.length > 1}
-        <polyline class="boundary left" points={path(zone.leftBoundary)} />
+        <polyline class="boundary" points={path(zone.leftBoundary)} />
       {/if}
       {#if zone.rightBoundary.length > 1}
-        <polyline class="boundary right" points={path(zone.rightBoundary)} />
+        <polyline class="boundary" points={path(zone.rightBoundary)} />
       {/if}
       <polyline class="gate start" points={gateLine(derivedStartGate(zone))} />
       <polyline class="gate finish" points={gateLine(derivedFinishGate(zone))} />
@@ -282,22 +300,19 @@
   rect {
     fill: var(--bg-body);
   }
+  /* Uncalibrated fallback: no terrain underneath (flat --bg-body), so the neutral
+     edge reads without casing. Kept in lockstep with the calibrated map's tokens
+     + solid (no-dash) gate language. */
   .boundary {
     fill: none;
+    stroke: var(--zone-edge);
     stroke-width: 5;
     stroke-linecap: round;
     stroke-linejoin: round;
   }
-  .boundary.left {
-    stroke: var(--map-left);
-  }
-  .boundary.right {
-    stroke: var(--map-right);
-  }
   .gate {
     fill: none;
     stroke-width: 3;
-    stroke-dasharray: 10 7;
   }
   .gate.start {
     stroke: var(--gate-a);
@@ -307,7 +322,6 @@
   }
   .gate.split {
     stroke: var(--gate-split);
-    stroke-dasharray: 6 6;
   }
   .live-dot {
     fill: var(--live-dot);

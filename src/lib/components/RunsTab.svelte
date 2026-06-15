@@ -23,7 +23,7 @@
       {#if $graphLayout !== 'graph'}
         {#if effectiveMode === 'scoring'}
           <div class="legend">
-            <span class="lg"><i style="background:var(--ok)"></i>scoring</span>
+            <span class="lg"><i style="background:var(--ok-bright)"></i>scoring</span>
             <span class="lg"><i style="background:var(--bad)"></i>off-tarmac / unpaid</span>
             <span class="lg"><i style="background:var(--tx-dim)"></i>idle</span>
           </div>
@@ -34,6 +34,14 @@
             {/each}
           </div>
         {/if}
+
+        <!-- Zone overlay vocabulary (the map draws these regardless of trace mode). -->
+        <div class="legend vocab">
+          <span class="lg"><i style="background:var(--zone-edge)"></i>boundary</span>
+          <span class="lg"><i class="sq" style="background:var(--gate-a)"></i>A</span>
+          <span class="lg"><i class="sq" style="background:var(--gate-b)"></i>B</span>
+          <span class="lg"><i style="background:var(--gate-split)"></i>split</span>
+        </div>
 
         <div class="colour-mode">
           <button
@@ -91,8 +99,11 @@
   .colour-mode { margin-left: auto; }
 
   .legend { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .legend.vocab { margin-top: 4px; }
   .lg { display: inline-flex; align-items: center; gap: 5px; font-size: 0.66rem; color: var(--tx-lo); }
   .lg i { width: 13px; height: 3px; border-radius: 2px; display: inline-block; }
+  /* Square swatch echoes the A/B gate-post glyph (vs the bar = a line). */
+  .lg i.sq { width: 9px; height: 9px; border-radius: var(--r-xs); }
 
   .status { font-size: 0.66rem; color: var(--tx-dim); }
   .status.err { color: var(--bad); }

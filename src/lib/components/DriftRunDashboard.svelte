@@ -441,8 +441,7 @@
     <header class="stage-head">
       <h2>{selectedZone?.name ?? 'Drift Zone'}</h2>
       <div class="legend">
-        <span><i class="left"></i>Left</span>
-        <span><i class="right"></i>Right</span>
+        <span><i class="edge"></i>Boundary</span>
         <span><i class="start"></i>Gate A</span>
         <span><i class="finish"></i>Gate B</span>
         <span><i class="split"></i>Split</span>
@@ -917,8 +916,7 @@
     border-radius: 1px;
     display: inline-block;
   }
-  .legend .left   { background: var(--map-left); }
-  .legend .right  { background: var(--map-right); }
+  .legend .edge   { background: var(--zone-edge); }
   .legend .start  { background: var(--gate-a); }
   .legend .finish { background: var(--gate-b); }
   .legend .split  { background: var(--gate-split); }

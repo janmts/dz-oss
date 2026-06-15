@@ -28,6 +28,7 @@
     parseScoringRegion,
     ringCurve,
     sharedScoringRing,
+    splitPathPos,
     tessellate,
     zoneCurveMode,
     DEFAULT_SEGMENTS,
@@ -291,7 +292,12 @@
     return s.replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!);
   }
 
-  function markerIcon(side: BoundarySide, label: string, selected = false) {
+  function markerIcon(
+    side: BoundarySide,
+    label: string,
+    selected = false,
+    role?: 'gateA' | 'gateB'
+  ) {
     const cls =
       side === 'left'
         ? 'zone-marker-left'
@@ -300,8 +306,12 @@
           : side === 'ring'
             ? 'zone-marker-ring'
             : 'zone-marker-split';
+    // The four boundary endpoints are the A/B gate posts: a SQUARED badge with a
+    // gate-colour ring — the same square the map's addGate end-posts use — while
+    // keeping the side colour as fill so L/R stays legible.
+    const gate = role ? ` zone-marker-gate zone-marker-${role}` : '';
     return gm!.L.divIcon({
-      className: `zone-marker ${cls}${selected ? ' zone-marker-selected' : ''}`,
+      className: `zone-marker ${cls}${gate}${selected ? ' zone-marker-selected' : ''}`,
       html: `<span>${escapeHtml(label)}</span>`,
       iconSize: [24, 24],
       iconAnchor: [12, 12],
@@ -356,7 +366,7 @@
       startGateLine = gm.addLine(
         [draft.leftBoundary[0], draft.rightBoundary[0]].map(worldToLatLng),
         3,
-        { color: themeColor('--gate-a', '#d2a24c'), dashArray: '10 7' }
+        { color: themeColor('--gate-a', '#d2a24c') }
       );
       finishGateLine = gm.addLine(
         [
@@ -364,16 +374,21 @@
           draft.rightBoundary[draft.rightBoundary.length - 1],
         ].map(worldToLatLng),
         3,
-        { color: themeColor('--gate-b', '#d56c62'), dashArray: '10 7' }
+        { color: themeColor('--gate-b', '#5fb3a6') }
       );
     }
 
     for (const side of ['left', 'right'] as BoundarySide[]) {
-      boundary(side).forEach((point, index) => {
+      const pts = boundary(side);
+      pts.forEach((point, index) => {
         const selected = selectedPoint?.side === side && selectedPoint.index === index;
+        // First/last boundary points are the A/B gate posts (derived, never the
+        // stored gate) — label them A/B with the squared gate badge.
+        const role = index === 0 ? 'gateA' : index === pts.length - 1 ? 'gateB' : undefined;
+        const label = role === 'gateA' ? 'A' : role === 'gateB' ? 'B' : `${side[0].toUpperCase()}${index + 1}`;
         const marker = gm!.L.marker(worldToLatLng(point), {
           draggable: true,
-          icon: markerIcon(side, `${side[0].toUpperCase()}${index + 1}`, selected),
+          icon: markerIcon(side, label, selected, role),
         }).addTo(gm!.markers);
         marker.on('click', () => selectPoint(side, index));
         marker.on('dragstart', () => pushUndo());
@@ -421,7 +436,6 @@
       if (gate.length === 2) {
         splitLines[gi] = gm!.addLine(gate.map(worldToLatLng), 3, {
           color: themeColor('--gate-split', '#a995cf'),
-          dashArray: '6 6',
           opacity: 0.9,
         });
       } else {
@@ -596,36 +610,6 @@
 
   // Arc-length of the point on `path` nearest to p — orders splits ALONG the
   // corridor so "split 1" is the first one reached from gate A, not the first authored.
-  function arcLengthOf(p: ZonePoint, path: ZonePoint[]): number {
-    let bestDist = Infinity;
-    let bestArc = 0;
-    let arc = 0;
-    for (let i = 0; i < path.length - 1; i++) {
-      const a = path[i];
-      const b = path[i + 1];
-      const dx = b.x - a.x;
-      const dz = b.z - a.z;
-      const len2 = dx * dx + dz * dz || 1e-9;
-      const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.z - a.z) * dz) / len2));
-      const d = (p.x - (a.x + t * dx)) ** 2 + (p.z - (a.z + t * dz)) ** 2;
-      const segLen = Math.sqrt(len2);
-      if (d < bestDist) {
-        bestDist = d;
-        bestArc = arc + t * segLen;
-      }
-      arc += segLen;
-    }
-    return bestArc;
-  }
-
-  function splitPathPos(gate: ZonePoint[]): number {
-    if (gate.length < 2) return Infinity; // incomplete sorts last
-    const ref = draft.leftBoundary.length >= 2 ? draft.leftBoundary : draft.rightBoundary;
-    if (ref.length < 2) return 0;
-    const mid = { x: (gate[0].x + gate[1].x) / 2, z: (gate[0].z + gate[1].z) / 2 };
-    return arcLengthOf(mid, ref);
-  }
-
   // Slot a freshly-completed split into driving order (A→…→B), carrying its (blank)
   // trailing sector name. Only fresh gates are re-slotted, so there's no named sector
   // to lose; dragging an existing split past another does NOT re-order (rare — delete
@@ -634,10 +618,11 @@
     if (draft.leftBoundary.length < 2 && draft.rightBoundary.length < 2) return;
     const gate = draft.splitGates[from];
     if (!gate || gate.length < 2) return;
-    const pos = splitPathPos(gate);
+    const ref = draft.leftBoundary.length >= 2 ? draft.leftBoundary : draft.rightBoundary;
+    const pos = splitPathPos(gate, ref);
     let target = 0;
     draft.splitGates.forEach((g, i) => {
-      if (i !== from && g.length === 2 && splitPathPos(g) < pos) target++;
+      if (i !== from && g.length === 2 && splitPathPos(g, ref) < pos) target++;
     });
     if (target === from) return;
     const gates = draft.splitGates.slice();
@@ -1725,6 +1710,19 @@
   }
   :global(.zone-marker-split span) {
     background: var(--gate-split);
+  }
+  /* Squared A/B gate post — the same shape language as the map's addGate
+     end-posts: a square badge (not round) with a 2px gate-colour ring outside
+     the casing border, keeping the side colour as fill so L/R stays legible. The
+     selected outline below already adds a ring when active, so don't stack more. */
+  :global(.zone-marker-gate span) {
+    border-radius: var(--r-xs);
+  }
+  :global(.zone-marker-gateA span) {
+    box-shadow: 0 0 0 2px var(--gate-a), 0 1px 5px rgba(0, 0, 0, 0.45);
+  }
+  :global(.zone-marker-gateB span) {
+    box-shadow: 0 0 0 2px var(--gate-b), 0 1px 5px rgba(0, 0, 0, 0.45);
   }
   :global(.zone-marker-live) {
     position: relative;

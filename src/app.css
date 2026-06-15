@@ -44,15 +44,29 @@
   --violet: #a995cf;
 
   /* ── Map / zone semantics ──
-     Geometry overlays sit on busy game terrain, so these run a notch brighter /
-     higher-chroma than the muted status palette — they must read at a glance
-     while sculpting a zone. left=green, right=azure, scoring-ring=orchid (its
-     own token, distinct from the muted --gate-split violet the split lines use). */
+     Geometry overlays sit on busy game terrain. The Drift/Runs maps render both
+     boundaries as ONE neutral chrome edge (--zone-edge) over a near-black casing
+     (--map-casing): neutral in HUE so it never competes with the meaningful
+     colours, but high in luminance contrast so it reads on light AND dark terrain.
+     --map-left/--map-right (green/azure) are KEPT but used ONLY in the editor,
+     where authoring which side is which is load-bearing. Gates speak one shared
+     shape language: A=amber, B=teal (a designed warm→cool start→finish pair),
+     splits=violet band; scoring-ring=orchid (distinct from the --gate-split
+     violet). Every colour means exactly one thing. */
+  --map-casing:   #0b0c0e;  /* near-black under-stroke for cased lines (a touch
+                               darker than --bg-body so the halo separates on
+                               dark terrain too). */
+  --zone-edge:    #93a8c0;  /* steel-blue boundary on Drift/Runs maps — a touch of
+                               cool saturation so it reads as instrument chrome, not
+                               dead grey; the casing guarantees legibility so this is
+                               tunable (neutral #a4abb3 → bluer #84a0c4). */
   --map-left:     #57c95e;
   --map-right:    #4fb0ec;
-  --gate-a:       #d2a24c;
-  --gate-b:       #d56c62;
-  --gate-split:   #a995cf;
+  --gate-a:       #efa838;  /* gates run VIVID (more saturated than the restrained
+                               theme accents) — they're purposeful HUD markers, so
+                               they must pop off the neutral --zone-edge chrome. */
+  --gate-b:       #38c9b9;
+  --gate-split:   #b385ee;
   --scoring-ring: #cf72e0;
   --live-dot:     #ecc274;
 
@@ -126,4 +140,38 @@ body {
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--tx-dim);
+}
+
+/* On-map pill label (Leaflet divIcon): gate A/B tags + sector-name tags. A
+   readable chip over busy terrain — mono, tabular, dark translucent backing.
+   Lifted from the editor's live-marker band badge so the map and editor share
+   one label recipe. */
+.map-label {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.6rem;
+  color: var(--tx-hi);
+  background: color-mix(in srgb, var(--bg-body) 82%, transparent);
+  border: 1px solid var(--bd-strong);
+  border-radius: var(--r-xs);
+  padding: 0.04rem 0.3rem;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* The label wrapper is a zero-size box pinned at the map point; the pill inside
+   positions itself off that origin via a CSS transform (see addLabel), so it
+   centres correctly regardless of text length. */
+.map-label-wrap .map-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+}
+
+/* Square end-gate post (Leaflet divIcon wrapper) — the coloured square + casing
+   ring lives on the inner <span>, so strip any default divIcon chrome. */
+.map-gate-post {
+  background: none;
+  border: none;
 }

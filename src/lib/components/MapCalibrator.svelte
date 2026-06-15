@@ -66,9 +66,11 @@
     if (!gm) return;
     const { L, map, markers } = gm;
     markers.clearLayers();
+    // Calibration anchors A/B carry the app-wide gate colours (A amber, B teal)
+    // — the --map-left/--map-right tokens are now editor authoring colours only.
     for (const [pt, label, color] of [
-      [A, 'A', themeColor('--map-left', '#84b577')],
-      [B, 'B', themeColor('--map-right', '#82a7c8')],
+      [A, 'A', themeColor('--gate-a', '#d2a24c')],
+      [B, 'B', themeColor('--gate-b', '#5fb3a6')],
     ] as const) {
       if (pt.pix) {
         const ll = map.unproject(L.point(pt.pix[0], pt.pix[1]), cfg.maxZoom);
