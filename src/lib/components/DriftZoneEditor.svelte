@@ -4,16 +4,25 @@
   import { packet, displayPacket } from '$lib/stores/telemetry';
   import {
     deleteDriftZone,
+    driftRuns,
     driftZones,
+    loadDriftRuns,
     loadDriftZones,
     saveDriftZone,
     settings,
   } from '$lib/stores/sessions';
   import { effectiveMapConfig } from '$lib/mapDefaults';
   import { createGameMap, makeCalib, type GameMap } from '$lib/mapView';
-  import { themeColor } from '$lib/theme';
+  import { ELEVATION_RAMP, themeColor } from '$lib/theme';
   import { ipc } from '$lib/ipc';
   import type { DriftZoneInput, DriftZoneRow, ZonePoint } from '$lib/types';
+  import {
+    normalizeZoneLevels,
+    parseZoneLevels,
+    suggestZoneLevelsFromElevations,
+    zoneLevelLabel,
+    type ZoneLevelBand,
+  } from '$lib/zoneLevels';
   import {
     boundaryCurve,
     parseScoringRegion,
@@ -90,6 +99,13 @@
   // is a divider — it ends one sector and starts the next — so the name belongs on
   // the gap, which also dodges the "N lines but N+1 names" fencepost.
   let sectorNames = $state<string[]>([]);
+  // Height bands for loop/overlap zones. Stored as opaque scoringConfig.levels;
+  // geometry stays top-down x/z — the bands classify the car's live telemetry
+  // positionY into named levels for the run viewer (the future section scorer's
+  // discriminator), so stacked route passes read apart without per-anchor height.
+  let levelBands = $state<ZoneLevelBand[]>([]);
+  let levelSuggestCount = $state(3);
+  let suggestingLevels = $state(false);
 
   function syncFromConfig() {
     const v = draft.scoringConfig?.boundarySlackM;
@@ -100,12 +116,15 @@
     sectorNames = Array.from({ length: draft.splitGates.length + 1 }, (_, i) =>
       Array.isArray(names) && typeof names[i] === 'string' ? (names[i] as string) : ''
     );
+    levelBands = parseZoneLevels(draft.scoringConfig).map((level) => ({ ...level }));
   }
 
   let selectedPoint = $state<{ side: BoundarySide; index: number } | null>(null);
   let mapHost = $state<HTMLDivElement | null>(null);
   let gm: GameMap | null = null;
   let liveMarker: Marker | null = null;
+  // Last band label rendered onto the live marker — guards icon rebuilds at 64 Hz.
+  let liveMarkerLabel = '';
   // Imperative refs to the boundary/gate polylines so we can update their geometry
   // live during a marker drag without recreating the marker being dragged.
   let leftLine: Polyline | null = null;
@@ -116,6 +135,9 @@
   let splitLines: (Polyline | null)[] = [];
   let unsubscribeShortcut: (() => void) | null = null;
   let lastKnownPoint = $state<ZonePoint | null>(null);
+  // Live world height from telemetry, kept separate from the 2D anchor geometry —
+  // it feeds the level readout / Suggest seeding without putting Y on any anchor.
+  let lastKnownY = $state<number | null>(null);
   let lastKnownAt = $state(0);
   let mapReady = $state(false);
 
@@ -199,6 +221,7 @@
 
   onMount(async () => {
     void loadDriftZones();
+    void loadDriftRuns();
     unsubscribeShortcut = await ipc.subscribeDriftZoneCapture(({ side }) => {
       capturePoint((side ?? activeSide) as BoundarySide, true);
     });
@@ -216,10 +239,14 @@
     const p = $packet ?? $displayPacket;
     if (!p || (p.positionX === 0 && p.positionZ === 0)) return;
     lastKnownPoint = { x: p.positionX, z: p.positionZ };
+    lastKnownY = Number.isFinite(p.positionY) ? p.positionY : null;
     lastKnownAt = Date.now();
   });
 
   let livePoint = $derived(lastKnownPoint);
+  let liveY = $derived(lastKnownY);
+  let cleanLevels = $derived(normalizeZoneLevels(levelBands));
+  let liveLevelName = $derived(zoneLevelLabel(cleanLevels, liveY));
   let liveAgeSecs = $derived(lastKnownAt ? Math.max(0, (Date.now() - lastKnownAt) / 1000) : 0);
   let cfg = $derived($settings ? effectiveMapConfig($settings) : null);
   let calib = $derived(cfg ? makeCalib(cfg) : null);
@@ -260,6 +287,10 @@
     return ringCurve(pts, curveMode).map(worldToLatLng);
   }
 
+  function escapeHtml(s: string): string {
+    return s.replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!);
+  }
+
   function markerIcon(side: BoundarySide, label: string, selected = false) {
     const cls =
       side === 'left'
@@ -271,16 +302,16 @@
             : 'zone-marker-split';
     return gm!.L.divIcon({
       className: `zone-marker ${cls}${selected ? ' zone-marker-selected' : ''}`,
-      html: `<span>${label}</span>`,
+      html: `<span>${escapeHtml(label)}</span>`,
       iconSize: [24, 24],
       iconAnchor: [12, 12],
     });
   }
 
-  function liveIcon() {
+  function liveIcon(bandLabel = '') {
     return gm!.L.divIcon({
       className: 'zone-marker zone-marker-live',
-      html: '<span>●</span>',
+      html: `<span>●</span>${bandLabel ? `<b>${escapeHtml(bandLabel)}</b>` : ''}`,
       iconSize: [22, 22],
       iconAnchor: [11, 11],
     });
@@ -437,14 +468,20 @@
     if (!gm || !mapUsable) return;
     if (livePoint) {
       const ll = worldToLatLng(livePoint);
+      const label = liveLevelName;
       if (liveMarker) {
         liveMarker.setLatLng(ll);
+        // Only rebuild the icon when the band actually changes — setLatLng fires at
+        // the 64 Hz telemetry tick, but the band label changes rarely.
+        if (label !== liveMarkerLabel) liveMarker.setIcon(liveIcon(label));
       } else {
-        liveMarker = gm.L.marker(ll, { icon: liveIcon(), interactive: false }).addTo(gm.markers);
+        liveMarker = gm.L.marker(ll, { icon: liveIcon(label), interactive: false }).addTo(gm.markers);
       }
+      liveMarkerLabel = label;
     } else if (liveMarker) {
       liveMarker.remove();
       liveMarker = null;
+      liveMarkerLabel = '';
     }
   }
 
@@ -500,9 +537,11 @@
     if (mapReady) redrawLeaflet();
   });
 
-  // The live marker moves in place every telemetry tick.
+  // The live marker moves in place every telemetry tick; its band label also
+  // refreshes when the bands themselves change (edited/suggested).
   $effect(() => {
     void livePoint;
+    void liveLevelName;
     if (mapReady) updateLiveMarker();
   });
 
@@ -619,6 +658,82 @@
     while (next.length <= i) next.push('');
     next[i] = value;
     sectorNames = next;
+  }
+
+  function updateLevel(i: number, patch: Partial<ZoneLevelBand>) {
+    levelBands = levelBands.map((level, idx) => (idx === i ? { ...level, ...patch } : level));
+  }
+
+  function updateLevelNumber(i: number, key: 'yMin' | 'yMax', value: number) {
+    if (!Number.isFinite(value)) return;
+    updateLevel(i, { [key]: value });
+  }
+
+  function addLevel() {
+    const levels = normalizeZoneLevels(levelBands);
+    const last = levels[levels.length - 1];
+    const center = liveY ?? last?.yMin ?? 0;
+    levelBands = [
+      ...levelBands,
+      {
+        name: `Level ${levelBands.length + 1}`,
+        yMin: Math.round((center - 5) * 10) / 10,
+        yMax: Math.round((center + 5) * 10) / 10,
+      },
+    ];
+    status = 'Added height level.';
+  }
+
+  function removeLevel(i: number) {
+    levelBands = levelBands.filter((_, idx) => idx !== i);
+    status = 'Removed height level.';
+  }
+
+  // Does this band contain the live telemetry height? Drives the "you are here"
+  // highlight — the honest band cue, since the car's live Y is the only thing that
+  // has a band (the static 2D anchors are shared across every lap).
+  function bandHasLiveY(level: ZoneLevelBand): boolean {
+    if (liveY == null) return false;
+    return liveY >= Math.min(level.yMin, level.yMax) && liveY <= Math.max(level.yMin, level.yMax);
+  }
+
+  function latestRunForSelectedZone() {
+    if (selectedId == null) return null;
+    const rows = $driftRuns
+      .filter((run) => run.zoneId === selectedId && run.valid && run.packetCount > 0)
+      .sort((a, b) => (b.endedAt ?? b.startedAt) - (a.endedAt ?? a.startedAt));
+    return rows[0] ?? null;
+  }
+
+  async function suggestLevelsFromLatestRun() {
+    if (selectedId == null) {
+      status = 'Save or select a zone before suggesting height levels.';
+      return;
+    }
+    suggestingLevels = true;
+    try {
+      await loadDriftRuns();
+      const run = latestRunForSelectedZone();
+      if (!run) {
+        status = 'No valid recorded runs for this zone yet.';
+        return;
+      }
+      const data = await ipc.getDriftRunPackets(run.id);
+      const levels = suggestZoneLevelsFromElevations(
+        data.packets.map((p) => p.positionY),
+        levelSuggestCount
+      );
+      if (!levels.length) {
+        status = `Run #${run.id} has no usable elevation samples.`;
+        return;
+      }
+      levelBands = levels;
+      status = `Suggested ${levels.length} height levels from run #${run.id}.`;
+    } catch (e) {
+      status = e instanceof Error ? e.message : String(e);
+    } finally {
+      suggestingLevels = false;
+    }
   }
 
   function appendBoundaryPoint(side: BoundarySide, point: ZonePoint, source: 'map' | 'telemetry') {
@@ -881,7 +996,7 @@
       }
     }
     selectedSplit = draft.splitGates.length ? Math.min(Math.max(selectedSplit, 0), draft.splitGates.length - 1) : -1;
-    // Persist slack + curve mode + scoring ring + sector names into the bag.
+    // Persist slack + curve mode + scoring ring + sector/level names into the bag.
     const cfg: Record<string, unknown> = {
       ...draft.scoringConfig,
       boundarySlackM: Math.max(0, slackM),
@@ -895,6 +1010,9 @@
     else delete cfg.scoringRegion;
     if (sectorNames.some((n) => n && n.trim())) cfg.sectorNames = sectorNames.map((n) => n ?? '');
     else delete cfg.sectorNames;
+    const cleanLevelBands = normalizeZoneLevels(levelBands);
+    if (cleanLevelBands.length) cfg.levels = cleanLevelBands;
+    else delete cfg.levels;
     delete cfg.splitGateNames; // retired: names live on sectors now, not gates
     draft.scoringConfig = cfg;
     try {
@@ -962,6 +1080,87 @@
           Active
         </label>
       </div>
+      <div class="levels-panel">
+        <div class="levels-head">
+          <span class="meta-head">Height levels</span>
+          <span class="level-count mono">{cleanLevels.length ? `${cleanLevels.length} bands` : '2D'}</span>
+        </div>
+        <p class="levels-hint">
+          Optional height bands for self-overlapping loop zones — geometry stays top-down; bands
+          label a run's elevation in the viewer.
+        </p>
+        <div class="level-tools">
+          <label class="num compact">
+            <span class="cap">Bands</span>
+            <input
+              class="mono"
+              type="number"
+              min="1"
+              max="8"
+              step="1"
+              value={levelSuggestCount}
+              oninput={(e) => {
+                const n = e.currentTarget.valueAsNumber;
+                if (Number.isFinite(n)) levelSuggestCount = Math.max(1, Math.min(8, Math.round(n)));
+              }}
+            />
+          </label>
+          <button
+            class="btn-sm"
+            disabled={suggestingLevels || selectedId == null}
+            title={selectedId == null
+              ? 'Save this zone first, then Suggest derives bands from its latest valid recorded run.'
+              : "Derive height bands from the latest valid recorded run's elevation profile."}
+            onclick={suggestLevelsFromLatestRun}
+          >
+            {suggestingLevels ? 'Suggesting…' : 'Suggest'}
+          </button>
+          <button class="btn-sm" title="Add an empty band around the live height" onclick={addLevel}>Add</button>
+        </div>
+        {#if cleanLevels.length}
+          <div class="level-rows" aria-label="Height level bands">
+            {#each levelBands as level, i}
+              <div
+                class="level-row"
+                class:live={bandHasLiveY(level)}
+                style:--level-color={ELEVATION_RAMP[Math.min(i, ELEVATION_RAMP.length - 1)]}
+              >
+                <span class="level-swatch" aria-hidden="true"></span>
+                <input
+                  value={level.name}
+                  placeholder={`Level ${i + 1}`}
+                  aria-label={`Level ${i + 1} name`}
+                  oninput={(e) => updateLevel(i, { name: e.currentTarget.value })}
+                />
+                <input
+                  class="mono"
+                  type="number"
+                  step="0.1"
+                  value={level.yMin}
+                  title="Minimum world Y (m)"
+                  aria-label={`Level ${i + 1} minimum Y`}
+                  oninput={(e) => updateLevelNumber(i, 'yMin', e.currentTarget.valueAsNumber)}
+                />
+                <input
+                  class="mono"
+                  type="number"
+                  step="0.1"
+                  value={level.yMax}
+                  title="Maximum world Y (m)"
+                  aria-label={`Level ${i + 1} maximum Y`}
+                  oninput={(e) => updateLevelNumber(i, 'yMax', e.currentTarget.valueAsNumber)}
+                />
+                <button
+                  class="btn-sm level-remove"
+                  title="Remove level"
+                  aria-label={`Remove level ${i + 1}`}
+                  onclick={() => removeLevel(i)}>×</button
+                >
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </div>
       {#if selectedId}
         <button class="danger-link" onclick={removeZone}>Delete this zone…</button>
       {/if}
@@ -1004,7 +1203,7 @@
         <button class="subtle" onclick={() => capturePoint()} title="Append the last known telemetry position to the active target">Capture live</button>
         <span class="live mono">
           {livePoint
-            ? `X ${livePoint.x.toFixed(0)} · Z ${livePoint.z.toFixed(0)}${liveAgeSecs > 2 ? ` · ${liveAgeSecs.toFixed(0)}s` : ''}`
+            ? `X ${livePoint.x.toFixed(0)} · Z ${livePoint.z.toFixed(0)}${liveY != null ? ` · Y ${liveY.toFixed(0)}${liveLevelName ? ` ${liveLevelName}` : ''}` : ''}${liveAgeSecs > 2 ? ` · ${liveAgeSecs.toFixed(0)}s` : ''}`
             : 'no telemetry'}
         </span>
       </div>
@@ -1049,6 +1248,7 @@
       <span class="chip">R <b>{draft.rightBoundary.length}</b></span>
       <span class="chip">ring <b>{ringAnchors.length}</b></span>
       <span class="chip">split <b>{draft.splitGates.length}</b></span>
+      <span class="chip">levels <b>{cleanLevels.length}</b></span>
       <span class="chip sel">{selectedLabel()}</span>
     </div>
 
@@ -1177,6 +1377,81 @@
     padding-bottom: 0.42rem;
     accent-color: var(--ac);
   }
+  .levels-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 0.42rem;
+    padding-top: 0.45rem;
+    border-top: 1px solid var(--bd-dim);
+  }
+  .levels-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+  }
+  .level-count {
+    color: var(--tx-dim);
+    font-size: 0.62rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .levels-hint {
+    margin: 0;
+    color: var(--tx-dim);
+    font-size: 0.6rem;
+    line-height: 1.4;
+  }
+  .level-tools {
+    display: flex;
+    align-items: end;
+    gap: 0.35rem;
+  }
+  .num.compact input {
+    width: 3.4rem;
+  }
+  .level-rows {
+    display: grid;
+    gap: 0.28rem;
+  }
+  .level-row {
+    display: grid;
+    grid-template-columns: 0.5rem minmax(2.5rem, 1fr) 4.8rem 4.8rem 1.7rem;
+    gap: 0.25rem;
+    align-items: center;
+    padding: 0.05rem 0.05rem 0.05rem 0;
+    border-radius: var(--r-xs);
+  }
+  /* The band the live telemetry height is currently in — the "you are here" cue. */
+  .level-row.live {
+    background: var(--ac-wash);
+    box-shadow: inset 2px 0 0 var(--ac);
+  }
+  .level-row input {
+    min-width: 0;
+    padding: 0.28rem 0.35rem;
+    font-size: 0.7rem;
+  }
+  .level-swatch {
+    width: 0.42rem;
+    height: 1.45rem;
+    border-radius: 999px;
+    background: var(--level-color);
+    box-shadow: 0 0 0 1px var(--bd-muted);
+  }
+  .level-row.live .level-swatch {
+    box-shadow: 0 0 0 2px var(--ac);
+  }
+  .level-remove {
+    padding-inline: 0;
+    color: var(--tx-dim);
+    font-size: 0.95rem;
+    line-height: 1;
+  }
+  .level-remove:hover:not(:disabled) {
+    border-color: var(--bad);
+    color: var(--bad-tx);
+  }
   input {
     background: var(--bg-card);
     border: 1px solid var(--bd-muted);
@@ -1286,7 +1561,6 @@
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
   }
-
   /* ── Split-gate sub-selector ── */
   .splitbar {
     display: flex;
@@ -1452,9 +1726,32 @@
   :global(.zone-marker-split span) {
     background: var(--gate-split);
   }
+  :global(.zone-marker-live) {
+    position: relative;
+  }
   :global(.zone-marker-live span) {
     background: var(--live-dot);
     color: var(--bg-body);
+  }
+  /* Current height band of the live position — the one marker that has a band
+     (a single marker, so no overlap problem the static-anchor badges had). */
+  :global(.zone-marker-live b) {
+    position: absolute;
+    left: 50%;
+    top: 17px;
+    transform: translateX(-50%);
+    padding: 0.04rem 0.26rem;
+    border: 1px solid color-mix(in srgb, var(--ac) 55%, var(--bd-strong));
+    border-radius: var(--r-xs);
+    background: color-mix(in srgb, var(--ac) 22%, var(--bg-body));
+    color: var(--tx-hi);
+    font-family: var(--font-mono);
+    font-size: 0.58rem;
+    line-height: 1.25;
+    white-space: nowrap;
+    text-align: center;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+    pointer-events: none;
   }
   :global(.zone-marker-selected span) {
     outline: 3px solid var(--ac-bright);
