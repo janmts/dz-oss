@@ -6,6 +6,7 @@ import type {
   Map as LMap,
   Marker,
   PathOptions,
+  Polygon,
   Polyline,
   PolylineOptions,
 } from 'leaflet';
@@ -62,6 +63,38 @@ export interface GameMapOptions {
   clampToContent?: boolean;
 }
 
+/** Casing under-stroke tuning for addCasedLine. */
+export interface CasingOptions {
+  /** Extra weight the casing adds beyond the core (the halo width). Default 2. */
+  extra?: number;
+  /** The casing's OWN weight floor, above the core's WEIGHT_MIN_PX, so the halo
+   *  survives zoom-out instead of collapsing onto the core. Default 2.25. */
+  min?: number;
+}
+
+/** A gate drawn as a rung + fixed-size posts (+ a band for splits) — the shared
+ *  shape language used on every map surface. */
+export interface GateOptions {
+  /** 'end' = start/finish gate (square posts + optional label); 'split' =
+   *  section seam (round posts + a translucent threshold band). */
+  kind: 'end' | 'split';
+  /** Rung + post colour (--gate-a / --gate-b for ends, --gate-split for splits). */
+  color: string;
+  /** Rung weight — the boundary's base weight on this surface (a rung of the
+   *  same ladder, not a heavier slab). */
+  base: number;
+  /** Optional pill (e.g. 'A' / 'B') drawn beside the gate. */
+  label?: string;
+  /** Band fill colour for splits (defaults to `color`). */
+  bandColor?: string;
+}
+
+/** Fill style for addRegion. */
+export interface RegionStyle {
+  fill: string;
+  fillOpacity?: number;
+}
+
 export interface GameMap {
   L: typeof Leaflet;
   map: LMap;
@@ -78,9 +111,31 @@ export interface GameMap {
   latLngToWorld(ll: LatLng): ZonePoint;
   /** Add a zoom-weighted polyline to the overlay. `base` is the stroke weight
    *  shown at the current weight-reference zoom; it thins by 2× per level
-   *  zoomed out below it (dashes scale along). */
-  addLine(latlngs: LatLng[], base: number, style: PolylineOptions): Polyline;
-  /** Remove all addLine() polylines and their weight registrations. */
+   *  zoomed out below it (dashes scale along). `min` overrides the per-line
+   *  weight floor (default WEIGHT_MIN_PX) — used to keep a casing halo alive at
+   *  min zoom. */
+  addLine(latlngs: LatLng[], base: number, style: PolylineOptions, min?: number): Polyline;
+  /** A boundary/trace drawn as a dark casing under-stroke + a coloured core, so
+   *  it reads on light AND dark terrain. Both thin with zoom; the casing keeps
+   *  its own weight floor so the halo never collapses at min zoom. Returns the
+   *  core polyline. */
+  addCasedLine(
+    latlngs: LatLng[],
+    base: number,
+    style: PolylineOptions,
+    casing?: CasingOptions
+  ): Polyline;
+  /** A gate (start/finish or split) in the shared rung + posts shape language.
+   *  Posts are fixed screen-size markers — zoom-stable, no pan recompute. */
+  addGate(a: LatLng, b: LatLng, opts: GateOptions): void;
+  /** A filled region on the overlay (the split threshold band). Scales natively
+   *  with the map (no weight registration); cleared by clearLines(). */
+  addRegion(latlngs: LatLng[], style: RegionStyle): Polygon;
+  /** A fixed-size .map-label pill at a world point (gate A/B tags, sector names).
+   *  `offset` nudges it by screen px from the point (default centred on it). */
+  addLabel(ll: LatLng, text: string, offset?: { dx: number; dy: number }): Marker;
+  /** Remove all overlay geometry (lines, regions), gate posts/labels, and the
+   *  weight registrations — but NOT the persistent live-arrow marker layer. */
   clearLines(): void;
   /** Anchor zoom at which lines show their full base weight, e.g. a fit zoom. */
   setWeightRefZoom(zoom: number): void;
@@ -109,11 +164,17 @@ export interface GameMap {
 const WEIGHT_MIN_PX = 0.75;
 /** How long after wheel/pointer input the camera refuses to auto-follow. */
 const USER_BUSY_MS = 1100;
+/** Half-depth (world metres) of a split's translucent threshold band, measured
+ *  along the corridor either side of the split line. Small + local — a seam
+ *  marker, not a sector slice, so it never self-intersects on the loop zone. */
+const SPLIT_BAND_HALF_M = 3.5;
 
 interface WeightedLine {
   line: Polyline;
   base: number;
   dash: string | null;
+  /** Per-line weight floor (default WEIGHT_MIN_PX; raised for casing strokes). */
+  min: number;
 }
 
 function scaleDash(dash: string, f: number): string {
@@ -121,6 +182,13 @@ function scaleDash(dash: string, f: number): string {
     .split(/[\s,]+/)
     .map((n) => +(Number(n) * f).toFixed(2))
     .join(' ');
+}
+
+/** Minimal HTML escape for divIcon label text (sector names are user input). */
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, (c) =>
+    c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : c === '"' ? '&quot;' : '&#39;'
+  );
 }
 
 export async function createGameMap(
@@ -194,6 +262,10 @@ export async function createGameMap(
 
   const overlay = L.layerGroup().addTo(map);
   const markers = L.layerGroup().addTo(map);
+  // Gate posts + on-map labels. Separate from `markers` (which holds the
+  // persistent live arrow / hover dot) so clearLines() can wipe gate geometry on
+  // every zone redraw without disturbing the live marker.
+  const gateLayer = L.layerGroup().addTo(map);
 
   // --- camera clamps -------------------------------------------------------
   let cameraLocked = false;
@@ -344,16 +416,18 @@ export async function createGameMap(
 
   // --- zoom-proportional line weights ---------------------------------------
   const lines: WeightedLine[] = [];
+  // Gate posts resize with zoom (registered here so clearLines wipes them).
+  const gatePosts: { resize(zoom: number): void }[] = [];
   let weightRefZoom = cfg.defaultZoom;
 
-  function weightAt(base: number, zoom: number): number {
-    return Math.min(base, Math.max(WEIGHT_MIN_PX, base * 2 ** (zoom - weightRefZoom)));
+  function weightAt(base: number, zoom: number, min = WEIGHT_MIN_PX): number {
+    return Math.min(base, Math.max(min, base * 2 ** (zoom - weightRefZoom)));
   }
 
   function applyWeights() {
     const z = map.getZoom();
     for (const wl of lines) {
-      const w = weightAt(wl.base, z);
+      const w = weightAt(wl.base, z, wl.min);
       const style: PathOptions = { weight: w };
       if (wl.dash) style.dashArray = scaleDash(wl.dash, w / wl.base);
       wl.line.setStyle(style);
@@ -361,26 +435,197 @@ export async function createGameMap(
   }
   map.on('zoomend', applyWeights);
 
-  function addLine(latlngs: LatLng[], base: number, style: PolylineOptions): Polyline {
+  // Gate posts track their rung's weight, so they shrink/grow with the lines on
+  // zoom instead of staying a fixed pixel blob.
+  function resizeGatePosts() {
+    const z = map.getZoom();
+    for (const gp of gatePosts) gp.resize(z);
+  }
+  map.on('zoomend', resizeGatePosts);
+
+  function addLine(
+    latlngs: LatLng[],
+    base: number,
+    style: PolylineOptions,
+    min = WEIGHT_MIN_PX
+  ): Polyline {
     const dash = typeof style.dashArray === 'string' ? style.dashArray : null;
-    const w = weightAt(base, map.getZoom());
+    const w = weightAt(base, map.getZoom(), min);
     const line = L.polyline(latlngs, {
       ...style,
       weight: w,
       dashArray: dash ? scaleDash(dash, w / base) : style.dashArray,
     }).addTo(overlay);
-    lines.push({ line, base, dash });
+    lines.push({ line, base, dash, min });
     return line;
+  }
+
+  // A boundary/trace as a dark casing under-stroke + a coloured core. The casing
+  // gets its OWN weight floor so the +extra halo survives zoom-out: weightAt()
+  // otherwise collapses BOTH strokes toward WEIGHT_MIN_PX at low zoom — exactly
+  // where figure/ground matters most. Round caps/joins on both.
+  function addCasedLine(
+    latlngs: LatLng[],
+    base: number,
+    style: PolylineOptions,
+    casing: CasingOptions = {}
+  ): Polyline {
+    const extra = casing.extra ?? 2;
+    const casingMin = casing.min ?? WEIGHT_MIN_PX + 1.5;
+    addLine(
+      latlngs,
+      base + extra,
+      {
+        color: themeColor('--map-casing', '#0b0c0e'),
+        opacity: 1,
+        lineCap: 'round',
+        lineJoin: 'round',
+      },
+      casingMin
+    );
+    return addLine(latlngs, base, { lineCap: 'round', lineJoin: 'round', ...style });
+  }
+
+  // A filled region on the overlay (split threshold band). No weight
+  // registration — fills scale natively with the map; cleared with the overlay.
+  function addRegion(latlngs: LatLng[], style: RegionStyle): Polygon {
+    return L.polygon(latlngs, {
+      stroke: false,
+      fill: true,
+      fillColor: style.fill,
+      fillOpacity: style.fillOpacity ?? 0.2,
+      interactive: false,
+    }).addTo(overlay);
+  }
+
+  // A small quad straddling a split line by SPLIT_BAND_HALF_M along the corridor
+  // (perpendicular to the split). Local to the split — NOT a sector slice — so it
+  // never self-intersects on the loop/spiral zone. Needs calibration.
+  function splitBandQuad(a: LatLng, b: LatLng): LatLng[] | null {
+    if (!calib) return null;
+    const wa = latLngToWorld(a);
+    const wb = latLngToWorld(b);
+    const dx = wb.x - wa.x;
+    const dz = wb.z - wa.z;
+    const len = Math.hypot(dx, dz);
+    if (len < 1e-6) return null;
+    const px = -dz / len; // unit perpendicular = corridor (travel) direction
+    const pz = dx / len;
+    const d = SPLIT_BAND_HALF_M;
+    const off = (p: ZonePoint, s: number) =>
+      worldToLatLng({ x: p.x + px * d * s, z: p.z + pz * d * s });
+    return [off(wa, 1), off(wb, 1), off(wb, -1), off(wa, -1)];
+  }
+
+  // Gate-post size tracks the rung weight so a post stays proportional to its
+  // line at every zoom (a fixed-pixel post is a giant blob on a thinned line
+  // zoomed out and a speck on a fat road zoomed in). Clamped so it never
+  // disappears or balloons.
+  function postSize(base: number, zoom: number): number {
+    return Math.round(Math.min(20, Math.max(7, weightAt(base, zoom) * 2.6)));
+  }
+  function postRadius(base: number, zoom: number): number {
+    return Math.min(7, Math.max(2.5, weightAt(base, zoom) * 1.4));
+  }
+
+  // Square end-gate post: a divIcon (the SAME square glyph the editor's A/B
+  // markers use), coloured fill + a --map-casing ring, sized by postSize() and
+  // rotated to align with the gate line (a fence post on the fence).
+  function gatePostIcon(color: string, casingColor: string, size: number, angleDeg = 0) {
+    // Ring a touch lighter than the line casing so the post doesn't read heavier
+    // than the geometry around it.
+    const ring = Math.max(1, size * 0.15);
+    const box = size + ring * 2;
+    return L.divIcon({
+      className: 'map-gate-post',
+      html:
+        `<span style="display:block;width:${size}px;height:${size}px;background:${color};` +
+        `border:${ring}px solid ${casingColor};border-radius:var(--r-xs);box-sizing:content-box;` +
+        `transform:rotate(${angleDeg.toFixed(1)}deg)"></span>`,
+      iconSize: [box, box],
+      iconAnchor: [box / 2, box / 2],
+    });
+  }
+
+  function addLabel(ll: LatLng, text: string, offset: { dx: number; dy: number } = { dx: 0, dy: 0 }): Marker {
+    // The wrapper is a 0×0 box pinned at the point; the inner pill centres itself
+    // off that origin with a CSS transform — no fragile text-width estimate, so it
+    // stays centred for any length. `offset` adds a screen-px nudge (gate tags
+    // sit beyond a post along the gate line).
+    const tx = `calc(-50% + ${offset.dx.toFixed(1)}px)`;
+    const ty = `calc(-50% + ${offset.dy.toFixed(1)}px)`;
+    const icon = L.divIcon({
+      className: 'map-label-wrap',
+      html: `<span class="map-label" style="transform:translate(${tx}, ${ty})">${escapeHtml(text)}</span>`,
+      iconSize: [0, 0],
+      iconAnchor: [0, 0],
+    });
+    return L.marker(ll, { icon, interactive: false, keyboard: false }).addTo(gateLayer);
+  }
+
+  function addGate(a: LatLng, b: LatLng, opts: GateOptions): void {
+    const casingColor = themeColor('--map-casing', '#0b0c0e');
+    const z = map.getZoom();
+    // Gate line direction in screen space. The CRS is unrotated, so this bearing
+    // is constant across zoom/pan — bake it once into the post rotation and the
+    // tag offset (no recompute needed).
+    const pa = map.latLngToContainerPoint(a);
+    const pb = map.latLngToContainerPoint(b);
+    const angle = (Math.atan2(pb.y - pa.y, pb.x - pa.x) * 180) / Math.PI;
+    if (opts.kind === 'split') {
+      const band = splitBandQuad(a, b);
+      if (band) addRegion(band, { fill: opts.bandColor ?? opts.color, fillOpacity: 0.28 });
+    }
+    // Rung: a same-weight cased line of the boundary ladder.
+    addCasedLine([a, b], opts.base, { color: opts.color, opacity: 1 });
+    // Posts: markers whose size tracks the rung weight (resized on zoomend), so
+    // they scale with the geometry instead of staying a fixed pixel blob.
+    if (opts.kind === 'end') {
+      for (const ll of [a, b]) {
+        const m = L.marker(ll, {
+          icon: gatePostIcon(opts.color, casingColor, postSize(opts.base, z), angle),
+          interactive: false,
+          keyboard: false,
+        }).addTo(gateLayer);
+        gatePosts.push({
+          resize: (zz) => m.setIcon(gatePostIcon(opts.color, casingColor, postSize(opts.base, zz), angle)),
+        });
+      }
+    } else {
+      for (const ll of [a, b]) {
+        const cm = L.circleMarker(ll, {
+          radius: postRadius(opts.base, z),
+          color: casingColor,
+          weight: 1.5,
+          fillColor: opts.color,
+          fillOpacity: 1,
+          interactive: false,
+        }).addTo(gateLayer);
+        gatePosts.push({ resize: (zz) => cm.setRadius(postRadius(opts.base, zz)) });
+      }
+    }
+    // A/B pill sits just beyond post `a`, along the gate line away from `b` —
+    // outside the corridor and consistent whatever shape the zone is.
+    if (opts.label) {
+      const dx = pa.x - pb.x;
+      const dy = pa.y - pb.y;
+      const len = Math.hypot(dx, dy) || 1;
+      const reach = 22;
+      addLabel(a, opts.label, { dx: (dx / len) * reach, dy: (dy / len) * reach });
+    }
   }
 
   function clearLines() {
     overlay.clearLayers();
+    gateLayer.clearLayers();
     lines.length = 0;
+    gatePosts.length = 0;
   }
 
   function setWeightRefZoom(zoom: number) {
     weightRefZoom = zoom;
     applyWeights();
+    resizeGatePosts();
   }
 
   // --- live player arrow -----------------------------------------------------
@@ -496,6 +741,10 @@ export async function createGameMap(
     worldToLatLng,
     latLngToWorld,
     addLine,
+    addCasedLine,
+    addGate,
+    addRegion,
+    addLabel,
     clearLines,
     setWeightRefZoom,
     setLiveArrow,

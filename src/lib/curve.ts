@@ -151,6 +151,89 @@ export function ringCurve(points: ZonePoint[], mode: ZoneCurveMode): ZonePoint[]
   return [...curve, curve[0]];
 }
 
+// --- arc-length helpers (split ordering + sector-label placement) -----------
+// Lifted here from DriftZoneEditor so every map surface can order splits along
+// the corridor and find each sector's span the same way.
+
+/** Arc length along `path` of the point on it closest to `p` (the projection's
+ *  distance from the path start). Used to order splits and locate sector spans. */
+export function arcLengthOf(p: ZonePoint, path: ZonePoint[]): number {
+  let bestDist = Infinity;
+  let bestArc = 0;
+  let arc = 0;
+  for (let i = 0; i < path.length - 1; i++) {
+    const a = path[i];
+    const b = path[i + 1];
+    const dx = b.x - a.x;
+    const dz = b.z - a.z;
+    const len2 = dx * dx + dz * dz || 1e-9;
+    const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.z - a.z) * dz) / len2));
+    const d = (p.x - (a.x + t * dx)) ** 2 + (p.z - (a.z + t * dz)) ** 2;
+    const segLen = Math.sqrt(len2);
+    if (d < bestDist) {
+      bestDist = d;
+      bestArc = arc + t * segLen;
+    }
+    arc += segLen;
+  }
+  return bestArc;
+}
+
+/** Position of a split gate (its midpoint) along a reference boundary, as an arc
+ *  length. Infinity for an incomplete (<2-point) gate so it sorts last; 0 when
+ *  the reference is degenerate. */
+export function splitPathPos(gate: ZonePoint[], ref: ZonePoint[]): number {
+  if (gate.length < 2) return Infinity;
+  if (ref.length < 2) return 0;
+  const mid = { x: (gate[0].x + gate[1].x) / 2, z: (gate[0].z + gate[1].z) / 2 };
+  return arcLengthOf(mid, ref);
+}
+
+/** A label anchor (≈centroid) for each sector span, for placing on-map sector
+ *  names. Sectors are the gaps between consecutive (complete) splits ordered
+ *  along the reference boundary; there are completeSplits + 1 of them. Each
+ *  anchor averages the left+right boundary points whose projection onto the
+ *  reference falls in that sector's arc span — a point inside the corridor,
+ *  centred along and across the sector (null where a span has no points). Index
+ *  i aligns with `sectorNames[i]` (both run in path order A→…→B). */
+export function sectorLabelAnchors(
+  left: ZonePoint[],
+  right: ZonePoint[],
+  splitGates: ZonePoint[][]
+): (ZonePoint | null)[] {
+  const ref = left.length >= 2 ? left : right;
+  if (ref.length < 2) return [null];
+  let total = 0;
+  for (let i = 0; i < ref.length - 1; i++) {
+    total += Math.hypot(ref[i + 1].x - ref[i].x, ref[i + 1].z - ref[i].z);
+  }
+  const splitArcs = splitGates
+    .map((g) => splitPathPos(g, ref))
+    .filter((a) => Number.isFinite(a))
+    .sort((a, b) => a - b);
+  const bounds = [0, ...splitArcs, total];
+  const pts = [...left, ...right];
+  // Precompute each boundary point's arc position once.
+  const positioned = pts.map((p) => ({ p, arc: arcLengthOf(p, ref) }));
+  const anchors: (ZonePoint | null)[] = [];
+  for (let s = 0; s < bounds.length - 1; s++) {
+    const lo = bounds[s];
+    const hi = bounds[s + 1];
+    let sx = 0;
+    let sz = 0;
+    let n = 0;
+    for (const { p, arc } of positioned) {
+      if (arc >= lo && arc <= hi) {
+        sx += p.x;
+        sz += p.z;
+        n++;
+      }
+    }
+    anchors.push(n ? { x: sx / n, z: sz / n } : null);
+  }
+  return anchors;
+}
+
 /** Centripetal knot delta between two control points: dist^0.5, written as a
  *  double sqrt for bit-exact parity with Rust. */
 function knotDelta(a: ZonePoint, b: ZonePoint): number {
