@@ -191,6 +191,9 @@ export interface DriftRunStatus {
 
 export interface ZonePoint {
   x: number;
+  /** Optional world height captured with the point. Geometry stays top-down x/z;
+   *  y is metadata for loop/overlap authoring and future level-aware consumers. */
+  y?: number;
   z: number;
 }
 

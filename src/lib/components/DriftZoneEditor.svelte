@@ -4,7 +4,9 @@
   import { packet, displayPacket } from '$lib/stores/telemetry';
   import {
     deleteDriftZone,
+    driftRuns,
     driftZones,
+    loadDriftRuns,
     loadDriftZones,
     saveDriftZone,
     settings,
@@ -14,6 +16,17 @@
   import { themeColor } from '$lib/theme';
   import { ipc } from '$lib/ipc';
   import type { DriftZoneInput, DriftZoneRow, ZonePoint } from '$lib/types';
+  import {
+    formatLevelRange,
+    LEVEL_SWATCHES,
+    normalizeZoneLevels,
+    parseZoneLevels,
+    pointY,
+    suggestZoneLevelsFromElevations,
+    zoneLevelBadge,
+    zoneLevelLabel,
+    type ZoneLevelBand,
+  } from '$lib/zoneLevels';
   import {
     boundaryCurve,
     parseScoringRegion,
@@ -90,6 +103,12 @@
   // is a divider — it ends one sector and starts the next — so the name belongs on
   // the gap, which also dodges the "N lines but N+1 names" fencepost.
   let sectorNames = $state<string[]>([]);
+  // Height bands for loop/overlap zones. Stored as opaque scoringConfig.levels;
+  // geometry remains x/z, while optional point.y + these bands make stacked
+  // route passes readable and give future section scoring a clean discriminator.
+  let levelBands = $state<ZoneLevelBand[]>([]);
+  let levelSuggestCount = $state(3);
+  let suggestingLevels = $state(false);
 
   function syncFromConfig() {
     const v = draft.scoringConfig?.boundarySlackM;
@@ -100,6 +119,7 @@
     sectorNames = Array.from({ length: draft.splitGates.length + 1 }, (_, i) =>
       Array.isArray(names) && typeof names[i] === 'string' ? (names[i] as string) : ''
     );
+    levelBands = parseZoneLevels(draft.scoringConfig).map((level) => ({ ...level }));
   }
 
   let selectedPoint = $state<{ side: BoundarySide; index: number } | null>(null);
@@ -199,6 +219,7 @@
 
   onMount(async () => {
     void loadDriftZones();
+    void loadDriftRuns();
     unsubscribeShortcut = await ipc.subscribeDriftZoneCapture(({ side }) => {
       capturePoint((side ?? activeSide) as BoundarySide, true);
     });
@@ -215,11 +236,33 @@
   $effect(() => {
     const p = $packet ?? $displayPacket;
     if (!p || (p.positionX === 0 && p.positionZ === 0)) return;
-    lastKnownPoint = { x: p.positionX, z: p.positionZ };
+    lastKnownPoint = { x: p.positionX, y: p.positionY, z: p.positionZ };
     lastKnownAt = Date.now();
   });
 
   let livePoint = $derived(lastKnownPoint);
+  let liveY = $derived(pointY(livePoint));
+  let cleanLevels = $derived(normalizeZoneLevels(levelBands));
+  let liveLevelName = $derived(zoneLevelLabel(cleanLevels, liveY));
+  let liveLevelBadge = $derived(zoneLevelBadge(cleanLevels, liveY));
+  let selectedPointValue = $derived(
+    selectedPoint ? (boundary(selectedPoint.side)[selectedPoint.index] ?? null) : null
+  );
+  let selectedPointName = $derived(
+    selectedPoint ? pointLabel(selectedPoint.side, selectedPoint.index) : 'No point'
+  );
+  let selectedPointY = $derived(pointY(selectedPointValue));
+  let selectedPointLevelName = $derived(zoneLevelLabel(cleanLevels, selectedPointY));
+  let selectedPointLevelBadge = $derived(zoneLevelBadge(cleanLevels, selectedPointY));
+  let selectedPointLevelText = $derived(
+    selectedPointY == null
+      ? 'No Y'
+      : selectedPointLevelName
+        ? `${selectedPointLevelName} ${selectedPointLevelBadge}`
+        : cleanLevels.length
+          ? 'Outside levels'
+          : 'No levels'
+  );
   let liveAgeSecs = $derived(lastKnownAt ? Math.max(0, (Date.now() - lastKnownAt) / 1000) : 0);
   let cfg = $derived($settings ? effectiveMapConfig($settings) : null);
   let calib = $derived(cfg ? makeCalib(cfg) : null);
@@ -243,6 +286,24 @@
     return gm!.latLngToWorld(latlng);
   }
 
+  function withOriginalY(next: ZonePoint, original: ZonePoint | undefined): ZonePoint {
+    const y = pointY(original);
+    return y == null ? next : { ...next, y };
+  }
+
+  function pointLevelBadge(point: ZonePoint): string {
+    const y = pointY(point);
+    if (y == null) return '';
+    return zoneLevelBadge(cleanLevels, y) || 'Y';
+  }
+
+  function pointHeightLabel(point: ZonePoint): string {
+    const y = pointY(point);
+    if (y == null) return '';
+    const level = zoneLevelLabel(cleanLevels, y);
+    return level ? `Y ${y.toFixed(1)} m - ${level}` : `Y ${y.toFixed(1)} m`;
+  }
+
   // Latlngs for a boundary's rendered LINE: the centripetal curve through the
   // side's anchors when smoothed (straight chords otherwise), with `dragIndex`
   // optionally overridden by an in-progress drag. Markers stay on the raw
@@ -260,7 +321,11 @@
     return ringCurve(pts, curveMode).map(worldToLatLng);
   }
 
-  function markerIcon(side: BoundarySide, label: string, selected = false) {
+  function escapeHtml(s: string): string {
+    return s.replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!);
+  }
+
+  function markerIcon(side: BoundarySide, label: string, selected = false, levelBadge = '') {
     const cls =
       side === 'left'
         ? 'zone-marker-left'
@@ -271,7 +336,7 @@
             : 'zone-marker-split';
     return gm!.L.divIcon({
       className: `zone-marker ${cls}${selected ? ' zone-marker-selected' : ''}`,
-      html: `<span>${label}</span>`,
+      html: `<span>${escapeHtml(label)}</span>${levelBadge ? `<b>${escapeHtml(levelBadge)}</b>` : ''}`,
       iconSize: [24, 24],
       iconAnchor: [12, 12],
     });
@@ -342,14 +407,15 @@
         const selected = selectedPoint?.side === side && selectedPoint.index === index;
         const marker = gm!.L.marker(worldToLatLng(point), {
           draggable: true,
-          icon: markerIcon(side, `${side[0].toUpperCase()}${index + 1}`, selected),
+          icon: markerIcon(side, `${side[0].toUpperCase()}${index + 1}`, selected, pointLevelBadge(point)),
+          title: pointHeightLabel(point),
         }).addTo(gm!.markers);
         marker.on('click', () => selectPoint(side, index));
         marker.on('dragstart', () => pushUndo());
         marker.on('drag', () => updateLinesDuringDrag(side, index, marker.getLatLng()));
         marker.on('dragend', () => {
           const points = [...boundary(side)];
-          points[index] = latLngToWorld(marker.getLatLng());
+          points[index] = withOriginalY(latLngToWorld(marker.getLatLng()), points[index]);
           setBoundary(side, points);
           selectPoint(side, index);
         });
@@ -369,14 +435,15 @@
       const selected = selectedPoint?.side === 'ring' && selectedPoint.index === index;
       const marker = gm!.L.marker(worldToLatLng(point), {
         draggable: true,
-        icon: markerIcon('ring', `S${index + 1}`, selected),
+        icon: markerIcon('ring', `S${index + 1}`, selected, pointLevelBadge(point)),
+        title: pointHeightLabel(point),
       }).addTo(gm!.markers);
       marker.on('click', () => selectPoint('ring', index));
       marker.on('dragstart', () => pushUndo());
       marker.on('drag', () => updateLinesDuringDrag('ring', index, marker.getLatLng()));
       marker.on('dragend', () => {
         const points = [...boundary('ring')];
-        points[index] = latLngToWorld(marker.getLatLng());
+        points[index] = withOriginalY(latLngToWorld(marker.getLatLng()), points[index]);
         setBoundary('ring', points);
         selectPoint('ring', index);
       });
@@ -401,7 +468,8 @@
           selectedPoint?.side === 'split' && selectedSplit === gi && selectedPoint.index === pi;
         const marker = gm!.L.marker(worldToLatLng(point), {
           draggable: true,
-          icon: markerIcon('split', `${gi + 1}${pi === 0 ? 'a' : 'b'}`, selected),
+          icon: markerIcon('split', `${gi + 1}${pi === 0 ? 'a' : 'b'}`, selected, pointLevelBadge(point)),
+          title: pointHeightLabel(point),
         }).addTo(gm!.markers);
         marker.on('click', () => {
           selectedSplit = gi;
@@ -416,7 +484,7 @@
         marker.on('drag', () => updateSplitLineDuringDrag(gi, pi, marker.getLatLng()));
         marker.on('dragend', () => {
           const g = [...draft.splitGates[gi]];
-          g[pi] = latLngToWorld(marker.getLatLng());
+          g[pi] = withOriginalY(latLngToWorld(marker.getLatLng()), g[pi]);
           draft.splitGates = draft.splitGates.map((x, i) => (i === gi ? g : x));
           selectedSplit = gi;
           selectPoint('split', pi);
@@ -497,6 +565,7 @@
     void selectedPoint;
     void curveMode;
     void ringAnchors;
+    void cleanLevels;
     if (mapReady) redrawLeaflet();
   });
 
@@ -621,6 +690,95 @@
     sectorNames = next;
   }
 
+  function updateLevel(i: number, patch: Partial<ZoneLevelBand>) {
+    levelBands = levelBands.map((level, idx) => (idx === i ? { ...level, ...patch } : level));
+  }
+
+  function updateLevelNumber(i: number, key: 'yMin' | 'yMax', value: number) {
+    if (!Number.isFinite(value)) return;
+    updateLevel(i, { [key]: value });
+  }
+
+  function addLevel() {
+    const levels = normalizeZoneLevels(levelBands);
+    const last = levels[levels.length - 1];
+    const center = liveY ?? last?.yMin ?? 0;
+    levelBands = [
+      ...levelBands,
+      {
+        name: `Level ${levelBands.length + 1}`,
+        yMin: Math.round((center - 5) * 10) / 10,
+        yMax: Math.round((center + 5) * 10) / 10,
+      },
+    ];
+    status = 'Added height level.';
+  }
+
+  function removeLevel(i: number) {
+    levelBands = levelBands.filter((_, idx) => idx !== i);
+    status = 'Removed height level.';
+  }
+
+  function setSelectedPointY(value: number | null) {
+    if (!selectedPoint) return;
+    const sel = selectedPoint;
+    const points = boundary(sel.side);
+    const current = points[sel.index];
+    if (!current) return;
+    const next = points.slice();
+    pushUndo();
+    if (value == null) {
+      next[sel.index] = { x: current.x, z: current.z };
+      status = `Cleared Y for ${pointLabel(sel.side, sel.index)}.`;
+    } else {
+      const y = Math.round(value * 10) / 10;
+      next[sel.index] = { ...current, y };
+      const level = zoneLevelLabel(cleanLevels, y);
+      status = `Set ${pointLabel(sel.side, sel.index)} Y to ${y.toFixed(1)} m${level ? ` (${level})` : ''}.`;
+    }
+    setBoundary(sel.side, next);
+    selectedPoint = { ...sel };
+  }
+
+  function latestRunForSelectedZone() {
+    if (selectedId == null) return null;
+    const rows = $driftRuns
+      .filter((run) => run.zoneId === selectedId && run.valid && run.packetCount > 0)
+      .sort((a, b) => (b.endedAt ?? b.startedAt) - (a.endedAt ?? a.startedAt));
+    return rows[0] ?? null;
+  }
+
+  async function suggestLevelsFromLatestRun() {
+    if (selectedId == null) {
+      status = 'Save or select a zone before suggesting height levels.';
+      return;
+    }
+    suggestingLevels = true;
+    try {
+      await loadDriftRuns();
+      const run = latestRunForSelectedZone();
+      if (!run) {
+        status = 'No valid recorded runs for this zone yet.';
+        return;
+      }
+      const data = await ipc.getDriftRunPackets(run.id);
+      const levels = suggestZoneLevelsFromElevations(
+        data.packets.map((p) => p.positionY),
+        levelSuggestCount
+      );
+      if (!levels.length) {
+        status = `Run #${run.id} has no usable elevation samples.`;
+        return;
+      }
+      levelBands = levels;
+      status = `Suggested ${levels.length} height levels from run #${run.id}.`;
+    } catch (e) {
+      status = e instanceof Error ? e.message : String(e);
+    } finally {
+      suggestingLevels = false;
+    }
+  }
+
   function appendBoundaryPoint(side: BoundarySide, point: ZonePoint, source: 'map' | 'telemetry') {
     if (side === 'split') {
       // No split selected yet → start a fresh divider with this point (and a new
@@ -658,10 +816,11 @@
     setBoundary(side, [...boundary(side), { ...point }]);
     activeSide = side;
     selectedPoint = { side, index: nextIndex };
+    const height = source === 'telemetry' ? pointHeightLabel(point) : '';
     status =
       source === 'map'
         ? `Added ${side} point ${nextIndex + 1} from map click.`
-        : `Captured ${side} point ${nextIndex + 1} from last known telemetry.`;
+        : `Captured ${side} point ${nextIndex + 1}${height ? ` (${height})` : ''}.`;
   }
 
   function onLeafletMapClick(e: LeafletMouseEvent) {
@@ -674,16 +833,6 @@
     if (side === 'right') return `R${index + 1}`;
     if (side === 'ring') return `S${index + 1}`;
     return `split ${selectedSplit + 1}${index === 0 ? 'a' : 'b'}`;
-  }
-
-  function selectedLabel(): string {
-    if (activeSide === 'split') {
-      if (selectedSplit < 0) return 'No split';
-      return selectedPoint?.side === 'split'
-        ? pointLabel('split', selectedPoint.index)
-        : `split ${selectedSplit + 1}`;
-    }
-    return selectedPoint ? pointLabel(selectedPoint.side, selectedPoint.index) : 'No point selected';
   }
 
   function capturePoint(side: BoundarySide = activeSide, fromShortcut = false) {
@@ -702,13 +851,17 @@
   function curvePointBetween(pts: ZonePoint[], i: number, j: number, closed: boolean): ZonePoint {
     const a = pts[i];
     const b = pts[j];
+    const ay = pointY(a);
+    const by = pointY(b);
+    const y = ay != null && by != null ? (ay + by) / 2 : ay ?? by ?? null;
     if (curveMode === 'linear' || pts.length < 3) {
-      return { x: (a.x + b.x) / 2, z: (a.z + b.z) / 2 };
+      const p = { x: (a.x + b.x) / 2, z: (a.z + b.z) / 2 };
+      return y == null ? p : { ...p, y };
     }
     const curve = tessellate(pts, { closed });
     const idx = i * DEFAULT_SEGMENTS + Math.floor(DEFAULT_SEGMENTS / 2);
     const k = closed ? idx % curve.length : Math.min(idx, curve.length - 1);
-    return { x: curve[k].x, z: curve[k].z };
+    return y == null ? { x: curve[k].x, z: curve[k].z } : { x: curve[k].x, y, z: curve[k].z };
   }
 
   // Insert a new anchor on the curve next to the selection (no live telemetry):
@@ -881,7 +1034,7 @@
       }
     }
     selectedSplit = draft.splitGates.length ? Math.min(Math.max(selectedSplit, 0), draft.splitGates.length - 1) : -1;
-    // Persist slack + curve mode + scoring ring + sector names into the bag.
+    // Persist slack + curve mode + scoring ring + sector/level names into the bag.
     const cfg: Record<string, unknown> = {
       ...draft.scoringConfig,
       boundarySlackM: Math.max(0, slackM),
@@ -895,6 +1048,9 @@
     else delete cfg.scoringRegion;
     if (sectorNames.some((n) => n && n.trim())) cfg.sectorNames = sectorNames.map((n) => n ?? '');
     else delete cfg.sectorNames;
+    const cleanLevelBands = normalizeZoneLevels(levelBands);
+    if (cleanLevelBands.length) cfg.levels = cleanLevelBands;
+    else delete cfg.levels;
     delete cfg.splitGateNames; // retired: names live on sectors now, not gates
     draft.scoringConfig = cfg;
     try {
@@ -962,6 +1118,72 @@
           Active
         </label>
       </div>
+      <div class="levels-panel">
+        <div class="levels-head">
+          <span class="meta-head">Height levels</span>
+          <span class="level-count mono">{cleanLevels.length ? `${cleanLevels.length} bands` : '2D'}</span>
+        </div>
+        <div class="level-tools">
+          <label class="num compact">
+            <span class="cap">Bands</span>
+            <input
+              class="mono"
+              type="number"
+              min="1"
+              max="8"
+              step="1"
+              value={levelSuggestCount}
+              oninput={(e) => {
+                const n = e.currentTarget.valueAsNumber;
+                if (Number.isFinite(n)) levelSuggestCount = Math.max(1, Math.min(8, Math.round(n)));
+              }}
+            />
+          </label>
+          <button class="btn-sm" disabled={suggestingLevels || selectedId == null} onclick={suggestLevelsFromLatestRun}>
+            {suggestingLevels ? 'Suggesting...' : 'Suggest'}
+          </button>
+          <button class="btn-sm" onclick={addLevel}>Add</button>
+        </div>
+        {#if cleanLevels.length}
+          <div class="level-stack" aria-label="Configured height levels">
+            {#each cleanLevels as level, i}
+              <div class="level-band" style:--level-color={LEVEL_SWATCHES[i % LEVEL_SWATCHES.length]}>
+                <span>{level.name}</span>
+                <small class="mono">{formatLevelRange(level)}</small>
+              </div>
+            {/each}
+          </div>
+          <div class="level-rows">
+            {#each levelBands as level, i}
+              <div class="level-row" style:--level-color={LEVEL_SWATCHES[i % LEVEL_SWATCHES.length]}>
+                <span class="level-swatch"></span>
+                <input
+                  value={level.name}
+                  placeholder={`Level ${i + 1}`}
+                  oninput={(e) => updateLevel(i, { name: e.currentTarget.value })}
+                />
+                <input
+                  class="mono"
+                  type="number"
+                  step="0.1"
+                  value={level.yMin}
+                  title="Minimum world Y"
+                  oninput={(e) => updateLevelNumber(i, 'yMin', e.currentTarget.valueAsNumber)}
+                />
+                <input
+                  class="mono"
+                  type="number"
+                  step="0.1"
+                  value={level.yMax}
+                  title="Maximum world Y"
+                  oninput={(e) => updateLevelNumber(i, 'yMax', e.currentTarget.valueAsNumber)}
+                />
+                <button class="btn-sm level-remove" title="Remove level" aria-label="Remove level" onclick={() => removeLevel(i)}>x</button>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </div>
       {#if selectedId}
         <button class="danger-link" onclick={removeZone}>Delete this zone…</button>
       {/if}
@@ -1004,7 +1226,7 @@
         <button class="subtle" onclick={() => capturePoint()} title="Append the last known telemetry position to the active target">Capture live</button>
         <span class="live mono">
           {livePoint
-            ? `X ${livePoint.x.toFixed(0)} · Z ${livePoint.z.toFixed(0)}${liveAgeSecs > 2 ? ` · ${liveAgeSecs.toFixed(0)}s` : ''}`
+            ? `X ${livePoint.x.toFixed(0)} · Z ${livePoint.z.toFixed(0)}${liveY != null ? ` · Y ${liveY.toFixed(0)}${liveLevelName ? ` ${liveLevelName}` : ''}${liveLevelBadge ? ` ${liveLevelBadge}` : ''}` : ''}${liveAgeSecs > 2 ? ` · ${liveAgeSecs.toFixed(0)}s` : ''}`
             : 'no telemetry'}
         </span>
       </div>
@@ -1049,7 +1271,38 @@
       <span class="chip">R <b>{draft.rightBoundary.length}</b></span>
       <span class="chip">ring <b>{ringAnchors.length}</b></span>
       <span class="chip">split <b>{draft.splitGates.length}</b></span>
-      <span class="chip sel">{selectedLabel()}</span>
+      <span class="chip">levels <b>{cleanLevels.length}</b></span>
+      <div class="chip point-chip" class:empty={!selectedPointValue}>
+        <span class="point-chip-name">
+          <span>Point</span>
+          <b>{selectedPointValue ? selectedPointName : 'none'}</b>
+        </span>
+        {#if selectedPoint && selectedPointValue}
+          <span class="point-coord mono"><i>X</i>{selectedPointValue.x.toFixed(1)}</span>
+          <span class="point-coord mono"><i>Z</i>{selectedPointValue.z.toFixed(1)}</span>
+          <label class="point-y-inline">
+            <span>Y</span>
+            <input
+              class="mono"
+              type="number"
+              step="0.1"
+              placeholder="unset"
+              value={selectedPointY ?? ''}
+              onchange={(e) => {
+                const n = e.currentTarget.valueAsNumber;
+                setSelectedPointY(Number.isFinite(n) ? n : null);
+              }}
+            />
+          </label>
+          <span class="point-level mono" class:warn={selectedPointY != null && !selectedPointLevelName && cleanLevels.length > 0}>
+            {selectedPointLevelText}
+          </span>
+          <button class="mini-action" disabled={liveY == null} onclick={() => setSelectedPointY(liveY)}>Live</button>
+          <button class="mini-action" disabled={selectedPointY == null} onclick={() => setSelectedPointY(null)}>Clear</button>
+        {:else}
+          <span class="point-level mono">{cleanLevels.length ? 'pick point' : 'no levels'}</span>
+        {/if}
+      </div>
     </div>
 
     <div class="map-wrap">
@@ -1177,6 +1430,90 @@
     padding-bottom: 0.42rem;
     accent-color: var(--ac);
   }
+  .levels-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 0.42rem;
+    padding-top: 0.45rem;
+    border-top: 1px solid var(--bd-dim);
+  }
+  .levels-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+  }
+  .level-count {
+    color: var(--tx-dim);
+    font-size: 0.62rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .level-tools {
+    display: flex;
+    align-items: end;
+    gap: 0.35rem;
+  }
+  .num.compact input {
+    width: 3.4rem;
+  }
+  .level-stack {
+    display: grid;
+    gap: 0.2rem;
+    padding: 0.28rem;
+    border: 1px solid var(--bd-dim);
+    border-radius: var(--r-sm);
+    background:
+      linear-gradient(90deg, color-mix(in srgb, var(--ac) 8%, transparent), transparent),
+      var(--bg-card);
+  }
+  .level-band {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.35rem;
+    align-items: center;
+    padding: 0.22rem 0.4rem;
+    border-left: 3px solid var(--level-color);
+    background: color-mix(in srgb, var(--level-color) 10%, transparent);
+    color: var(--tx-mid);
+    font-size: 0.68rem;
+  }
+  .level-band span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .level-band small {
+    color: var(--tx-dim);
+    font-size: 0.58rem;
+  }
+  .level-rows {
+    display: grid;
+    gap: 0.28rem;
+  }
+  .level-row {
+    display: grid;
+    grid-template-columns: 0.55rem minmax(3rem, 1fr) 4.1rem 4.1rem 1.8rem;
+    gap: 0.25rem;
+    align-items: center;
+  }
+  .level-row input {
+    min-width: 0;
+    padding: 0.28rem 0.35rem;
+    font-size: 0.66rem;
+  }
+  .level-swatch {
+    width: 0.42rem;
+    height: 1.45rem;
+    border-radius: 999px;
+    background: var(--level-color);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--level-color) 45%, var(--bg-panel));
+  }
+  .level-remove {
+    padding-inline: 0;
+    color: var(--tx-dim);
+  }
   input {
     background: var(--bg-card);
     border: 1px solid var(--bd-muted);
@@ -1286,7 +1623,6 @@
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
   }
-
   /* ── Split-gate sub-selector ── */
   .splitbar {
     display: flex;
@@ -1357,6 +1693,7 @@
     gap: 0.35rem;
     flex-wrap: wrap;
     flex: none;
+    min-height: 2rem;
   }
   .chip {
     display: inline-flex;
@@ -1377,11 +1714,84 @@
     color: var(--tx-mid);
     font-weight: 600;
   }
-  .chip.sel {
+  .point-chip {
     margin-left: auto;
+    min-height: 1.9rem;
+    gap: 0.42rem;
+    padding: 0.14rem 0.2rem 0.14rem 0.42rem;
     text-transform: none;
     letter-spacing: 0;
     color: var(--tx-lo);
+    background:
+      linear-gradient(90deg, color-mix(in srgb, var(--tx-mid) 5%, transparent), transparent 55%),
+      var(--bg-card);
+  }
+  .point-chip.empty {
+    padding-right: 0.42rem;
+  }
+  .point-chip-name {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.26rem;
+    white-space: nowrap;
+  }
+  .point-chip-name span {
+    color: var(--tx-dim);
+    font-size: 0.58rem;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+  }
+  .point-chip-name b {
+    color: var(--tx-hi);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+  }
+  .point-coord,
+  .point-level {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.2rem;
+    padding: 0.1rem 0.26rem;
+    border: 1px solid var(--bd-dim);
+    border-radius: var(--r-xs);
+    background: color-mix(in srgb, var(--bg-elevated) 70%, transparent);
+    color: var(--tx-mid);
+    font-size: 0.62rem;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .point-coord i {
+    color: var(--tx-dim);
+    font-size: 0.54rem;
+    font-style: normal;
+  }
+  .point-level.warn {
+    border-color: color-mix(in srgb, var(--warn) 45%, var(--bd-dim));
+    color: var(--warn);
+  }
+  .point-y-inline {
+    display: inline-flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 0.22rem;
+    color: var(--tx-dim);
+    font-size: 0.58rem;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+  }
+  .point-y-inline input {
+    width: 4.8rem;
+    padding: 0.16rem 0.3rem;
+    font-size: 0.62rem;
+    letter-spacing: 0;
+    text-transform: none;
+  }
+  .mini-action {
+    padding: 0.14rem 0.34rem;
+    border-radius: var(--r-xs);
+    font-size: 0.6rem;
+    color: var(--tx-dim);
+    background: color-mix(in srgb, var(--bg-elevated) 75%, transparent);
   }
 
   /* ── Map (the hero) ── */
@@ -1427,6 +1837,7 @@
   :global(.zone-marker) {
     background: none;
     border: none;
+    position: relative;
   }
   :global(.zone-marker span) {
     display: grid;
@@ -1439,6 +1850,24 @@
     font-size: 0.55rem;
     font-weight: 800;
     box-shadow: 0 1px 5px rgba(0, 0, 0, 0.45);
+  }
+  :global(.zone-marker b) {
+    position: absolute;
+    left: 50%;
+    top: 20px;
+    transform: translateX(-50%);
+    min-width: 1.35rem;
+    padding: 0.02rem 0.18rem;
+    border: 1px solid var(--bd-strong);
+    border-radius: var(--r-xs);
+    background: color-mix(in srgb, var(--bg-body) 88%, transparent);
+    color: var(--tx-hi);
+    font-family: var(--font-mono);
+    font-size: 0.48rem;
+    line-height: 1.2;
+    text-align: center;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.38);
+    pointer-events: none;
   }
   :global(.zone-marker-left span) {
     background: var(--map-left);

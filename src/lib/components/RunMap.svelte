@@ -7,6 +7,7 @@
   import { runViews, hover, traceColorMode } from '$lib/stores/runViewer';
   import { themeColor } from '$lib/theme';
   import { boundaryCurve, ringCurve, scoringRings, zoneCurveMode } from '$lib/curve';
+  import { parseZoneLevels, zoneLevelLabel } from '$lib/zoneLevels';
   import {
     scoreState,
     visibleTickIndices,
@@ -220,6 +221,8 @@
     const p = view.data.packets[h.index];
     const t = view.data.ticks[h.index];
     if (!p || !t) return null;
+    const zone = zoneFor(view.data.zoneId);
+    const level = zone ? zoneLevelLabel(parseZoneLevels(zone.scoringConfig), p.positionY) : '';
     const on = (r: number) => r <= 0.05;
     return {
       color: view.color,
@@ -231,6 +234,8 @@
       idx: h.index,
       angle: driftAngleDeg(p),
       speed: p.speedMs,
+      elev: p.positionY,
+      level,
       rearSlip: Math.max(Math.abs(p.tireCombinedSlipRl), Math.abs(p.tireCombinedSlipRr)),
       throttle: Math.round((p.throttle / 255) * 100),
       brake: Math.round((p.brake / 255) * 100),
@@ -262,6 +267,7 @@
         <span class="k">speed</span><span class="v mono">{card.speed.toFixed(1)} m/s</span>
         <span class="k">r.slip</span><span class="v mono">{card.rearSlip.toFixed(1)}</span>
         <span class="k">thr/brk</span><span class="v mono">{card.throttle}/{card.brake}%</span>
+        <span class="k">elev</span><span class="v mono">{card.elev.toFixed(0)} m{card.level ? ` · ${card.level}` : ''}</span>
       </div>
       <div class="tc-wheels">
         <span class="k">tarmac</span>

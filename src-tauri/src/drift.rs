@@ -771,12 +771,12 @@ mod tests {
             updated_at: 0,
             active: true,
             left_boundary: vec![
-                db::ZonePoint { x: 0.0, z: 0.0 },
-                db::ZonePoint { x: 0.0, z: 10.0 },
+                db::ZonePoint { x: 0.0, y: None, z: 0.0 },
+                db::ZonePoint { x: 0.0, y: None, z: 10.0 },
             ],
             right_boundary: vec![
-                db::ZonePoint { x: 5.0, z: 0.0 },
-                db::ZonePoint { x: 5.0, z: 10.0 },
+                db::ZonePoint { x: 5.0, y: None, z: 0.0 },
+                db::ZonePoint { x: 5.0, y: None, z: 10.0 },
             ],
             start_gate: Vec::new(),
             finish_gate: Vec::new(),
@@ -949,14 +949,14 @@ mod tests {
         // 3-point boundaries per side so tessellation actually engages (<3 = no-op).
         let mut row = square_zone();
         row.left_boundary = vec![
-            db::ZonePoint { x: 0.0, z: 0.0 },
-            db::ZonePoint { x: 0.0, z: 5.0 },
-            db::ZonePoint { x: 0.0, z: 10.0 },
+            db::ZonePoint { x: 0.0, y: None, z: 0.0 },
+            db::ZonePoint { x: 0.0, y: None, z: 5.0 },
+            db::ZonePoint { x: 0.0, y: None, z: 10.0 },
         ];
         row.right_boundary = vec![
-            db::ZonePoint { x: 6.0, z: 0.0 },
-            db::ZonePoint { x: 5.0, z: 5.0 },
-            db::ZonePoint { x: 6.0, z: 10.0 },
+            db::ZonePoint { x: 6.0, y: None, z: 0.0 },
+            db::ZonePoint { x: 5.0, y: None, z: 5.0 },
+            db::ZonePoint { x: 6.0, y: None, z: 10.0 },
         ];
 
         // Linear (no curve flag): the polygon is just the 6 raw points.

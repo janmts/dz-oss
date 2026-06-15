@@ -292,8 +292,16 @@ mod tests {
             name: "Mountain Pass".into(),
             description: None,
             active: true,
-            left_boundary: vec![db::ZonePoint { x: 1.0, z: 2.0 }],
-            right_boundary: vec![db::ZonePoint { x: 3.0, z: 4.0 }],
+            left_boundary: vec![db::ZonePoint {
+                x: 1.0,
+                y: None,
+                z: 2.0,
+            }],
+            right_boundary: vec![db::ZonePoint {
+                x: 3.0,
+                y: None,
+                z: 4.0,
+            }],
             start_gate: Vec::new(),
             finish_gate: Vec::new(),
             split_gates: Vec::new(),

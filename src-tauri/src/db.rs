@@ -329,6 +329,8 @@ pub fn clear_all_sessions(conn: &Connection) -> Result<()> {
 #[serde(rename_all = "camelCase")]
 pub struct ZonePoint {
     pub x: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub y: Option<f64>,
     pub z: f64,
 }
 
@@ -1053,13 +1055,43 @@ mod tests {
             name: name.into(),
             description: Some("test zone".into()),
             active: true,
-            left_boundary: vec![ZonePoint { x: 0.0, z: 0.0 }, ZonePoint { x: 0.0, z: 10.0 }],
-            right_boundary: vec![ZonePoint { x: 5.0, z: 0.0 }, ZonePoint { x: 5.0, z: 10.0 }],
+            left_boundary: vec![
+                ZonePoint {
+                    x: 0.0,
+                    y: Some(240.0),
+                    z: 0.0,
+                },
+                ZonePoint {
+                    x: 0.0,
+                    y: None,
+                    z: 10.0,
+                },
+            ],
+            right_boundary: vec![
+                ZonePoint {
+                    x: 5.0,
+                    y: None,
+                    z: 0.0,
+                },
+                ZonePoint {
+                    x: 5.0,
+                    y: None,
+                    z: 10.0,
+                },
+            ],
             start_gate: Vec::new(),
             finish_gate: Vec::new(),
             split_gates: vec![vec![
-                ZonePoint { x: 0.0, z: 5.0 },
-                ZonePoint { x: 5.0, z: 5.0 },
+                ZonePoint {
+                    x: 0.0,
+                    y: None,
+                    z: 5.0,
+                },
+                ZonePoint {
+                    x: 5.0,
+                    y: None,
+                    z: 5.0,
+                },
             ]],
             scoring_config: serde_json::json!({ "version": 1 }),
         }
@@ -1075,6 +1107,7 @@ mod tests {
         assert_eq!(zone.id, id);
         assert_eq!(zone.name, "Switchbacks");
         assert_eq!(zone.left_boundary.len(), 2);
+        assert_eq!(zone.left_boundary[0].y, Some(240.0));
         assert_eq!(zone.right_boundary.len(), 2);
         assert_eq!(zone.start_gate.len(), 2);
         assert_eq!(zone.finish_gate.len(), 2);
@@ -1089,7 +1122,11 @@ mod tests {
         let mut update = zone_input("Updated");
         update.id = Some(id);
         update.active = false;
-        update.left_boundary.push(ZonePoint { x: 1.0, z: 20.0 });
+        update.left_boundary.push(ZonePoint {
+            x: 1.0,
+            y: None,
+            z: 20.0,
+        });
         save_drift_zone(&conn, &update, 2000).unwrap();
 
         let zone = get_drift_zone(&conn, id).unwrap();

@@ -97,6 +97,10 @@ export interface ChannelDef {
 export const CHANNELS: ChannelDef[] = [
   { key: 'angle', label: 'Drift angle', unit: '°', defaultOn: true, get: (p) => driftAngleDeg(p) },
   { key: 'speed', label: 'Speed', unit: 'm/s', defaultOn: true, get: (p) => p.speedMs },
+  // World height. Monotonic on a spiral zone (e.g. z10 Kawazu Loop Bridge), so it
+  // reads as the descending laps separated by ~15 m steps — the at-a-glance
+  // disambiguator for a route that overlaps itself in the top-down map.
+  { key: 'elevation', label: 'Elevation', unit: 'm', get: (p) => p.positionY },
   { key: 'points', label: 'Cumulative points', cumulative: true, defaultOn: true, get: (_p, t) => t.points },
   { key: 'pointsRate', label: 'Points / s', get: (_p, t) => t.points * TELEMETRY_HZ },
   {
