@@ -114,19 +114,25 @@ pub fn drift_run_packets(state: &AppState, run_id: i64) -> Result<DriftRunPacket
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("drift run {run_id} not found"))?;
     let season = crate::season::season_at_utc_ms(started_at);
-    let params = match zone_id {
-        Some(z) => db::get_drift_zone(&conn, z)
-            .map(|row| crate::scoring::ScoringParams::from_config(&row.scoring_config))
-            .unwrap_or_default(),
-        None => crate::scoring::ScoringParams::default(),
-    }
-    .for_season(season);
+    // Load the zone once: it supplies both the season-adjusted scoring params and
+    // the split geometry the per-sector rollup buckets against.
+    let zone_row = zone_id.and_then(|z| db::get_drift_zone(&conn, z).ok());
+    let params = zone_row
+        .as_ref()
+        .map(|row| crate::scoring::ScoringParams::from_config(&row.scoring_config))
+        .unwrap_or_default()
+        .for_season(season);
     let packets: Vec<crate::parser::TelemetryPacket> = db::get_drift_run_packets(&conn, run_id)
         .map_err(|e| e.to_string())?
         .iter()
         .filter_map(|b| crate::parser::parse(b).ok())
         .collect();
-    let (score, ticks) = crate::scoring::score_run_with_ticks(&packets, &params);
+    let (mut score, mut ticks) = crate::scoring::score_run_with_ticks(&packets, &params);
+    // Bucket the per-tick points into sectors (split-gate crossings from entry) so
+    // the run viewer can show "where did I score". No-op for zones with no splits.
+    if let Some(row) = zone_row.as_ref() {
+        crate::drift::rescore_sectors(row, &packets, &mut ticks, &mut score);
+    }
     Ok(DriftRunPackets {
         run_id,
         zone_id,

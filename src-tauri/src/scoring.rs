@@ -231,6 +231,24 @@ impl ScoringParams {
     }
 }
 
+/// One sector's slice of a run — the points banked between two split gates (or
+/// between an end gate and the nearest split). Index-aligned to the zone's
+/// `sectorNames` in A→B order (N splits ⇒ N+1 sectors), so it reads the same
+/// whichever gate the run entered through. Drives the run viewer's "where did I
+/// score" per-sector readout. Summing `points` across sectors reproduces the run
+/// score. Only the run-viewer re-scoring path fills these (the live scorer has
+/// no zone geometry); a run with no split geometry leaves the vector empty.
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SectorScore {
+    /// Scaled points banked while in this sector.
+    pub points: f64,
+    /// Packets recorded in this sector (drifting or not).
+    pub sample_count: usize,
+    /// Seconds spent drifting in this sector.
+    pub drift_time_s: f64,
+}
+
 /// Per-run scoring result plus the breakdown used for display and tuning.
 #[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -259,6 +277,10 @@ pub struct RunScore {
     /// Scaled points withheld by the low-speed flip-pause term (0 for
     /// normal-speed runs).
     pub flip_pause_pts: f64,
+    /// Per-sector point rollup in A→B order (see [`SectorScore`]). Empty unless a
+    /// run was scored against zone split geometry (the run-viewer path); the live
+    /// scorer and geometry-less re-scores leave it empty.
+    pub sectors: Vec<SectorScore>,
 }
 
 /// Per-packet scoring diagnostics emitted alongside the run score, one entry per
@@ -277,6 +299,12 @@ pub struct TickScore {
     /// Scaled points banked at this tick (main credit less the flip-pause, plus
     /// any transit credit re-paid here). Summing these reproduces the run score.
     pub points: f64,
+    /// Sector this tick falls in: splits crossed since the entry gate, monotonic
+    /// (furthest-reached, so weaving across a boundary can't bounce it). A→B
+    /// canonical, so `sectorNames[sector]` names it regardless of entry
+    /// direction. 0 when the zone has no splits or no geometry was available
+    /// (the live scorer leaves it 0; the run-viewer path fills it).
+    pub sector: u32,
 }
 
 /// Signed chassis sideslip (drift angle) in **degrees** — positive when sliding
@@ -413,7 +441,7 @@ fn speed_factor(speed_ms: f64, p: &ScoringParams) -> f64 {
 /// Seconds between two packet timestamps (ms). Duplicate stamps (Δ=0) telescope
 /// to a 0 contribution; out-of-range gaps (pause/rewind) fall back to one 60 Hz
 /// frame so a stall can't fabricate a huge multiplier or time.
-fn frame_dt(prev_ms: u32, cur_ms: u32) -> f64 {
+pub(crate) fn frame_dt(prev_ms: u32, cur_ms: u32) -> f64 {
     let d = cur_ms as i64 - prev_ms as i64;
     if (0..100).contains(&d) {
         d as f64 / 1000.0
@@ -567,6 +595,7 @@ fn score_run_inner(
                 is_scoring: scoring_tick,
                 tarmac_wheels,
                 points: tick_pts_raw * p.scale,
+                sector: 0,
             });
         }
     }
@@ -592,6 +621,7 @@ fn score_run_inner(
         direction_flips,
         transit_pts: transit_raw * p.scale,
         flip_pause_pts: pause_raw * p.scale,
+        sectors: Vec::new(),
     }
 }
 
