@@ -2,6 +2,7 @@
   import RunSelector from './RunSelector.svelte';
   import RunMap from './RunMap.svelte';
   import RunGraph from './RunGraph.svelte';
+  import RunSectors from './RunSectors.svelte';
   import { graphLayout, traceColorMode, runViews, loadError, loadingRunIds } from '$lib/stores/runViewer';
 
   let multi = $derived($runViews.length > 1);
@@ -9,12 +10,7 @@
 </script>
 
 <div class="runs">
-  <aside class="rail">
-    <RunSelector />
-  </aside>
-
-  <section class="main">
-    <div class="toolbar">
+  <div class="toolbar">
       <div class="seg">
         <button class:on={$graphLayout === 'map+graph'} onclick={() => graphLayout.set('map+graph')}>Map + graph</button>
         <button class:on={$graphLayout === 'graph'} onclick={() => graphLayout.set('graph')}>Graph only</button>
@@ -61,19 +57,31 @@
       {#if $loadError}<span class="status err">{$loadError}</span>{/if}
     </div>
 
-    <div class="stage" class:graph-only={$graphLayout === 'graph'}>
+  <div class="body">
+    <aside class="left">
+      <div class="rail"><RunSelector /></div>
+      <div class="sector-section"><RunSectors /></div>
+    </aside>
+
+    <section class="stage" class:graph-only={$graphLayout === 'graph'}>
       {#if $graphLayout !== 'graph'}
         <div class="map-region"><RunMap /></div>
       {/if}
       <div class="graph-region"><RunGraph /></div>
-    </div>
-  </section>
+    </section>
+  </div>
 </div>
 
 <style>
-  .runs { display: grid; grid-template-columns: 200px minmax(0, 1fr); height: 100%; min-height: 0; }
-  .rail { border-right: 1px solid var(--bd-dim); background: var(--bg-panel); min-height: 0; overflow: hidden; }
-  .main { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+  /* Full-width toolbar on top; below it a left column (run list + per-sector
+     section) beside the stage. The left column mirrors the stage's map:graph
+     flex ratio so the run list ends roughly at the map's bottom edge, leaving
+     the section to sit beside the graph. */
+  .runs { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+  .body { flex: 1; min-height: 0; display: grid; grid-template-columns: 240px minmax(0, 1fr); }
+  .left { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--bd-dim); background: var(--bg-panel); }
+  .rail { flex: 1.5 1 0; min-height: 0; overflow: hidden; }
+  .sector-section { flex: 1 1 0; min-height: 0; overflow: hidden; border-top: 1px solid var(--bd-dim); }
 
   .toolbar {
     display: flex;
@@ -108,7 +116,7 @@
   .status { font-size: 0.66rem; color: var(--tx-dim); }
   .status.err { color: var(--bad); }
 
-  .stage { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 8px; gap: 8px; }
+  .stage { min-width: 0; min-height: 0; display: flex; flex-direction: column; padding: 8px; gap: 8px; }
   .map-region { flex: 1.5; min-height: 0; }
   .graph-region { flex: 1; min-height: 0; display: flex; flex-direction: column; }
   .stage.graph-only .graph-region { flex: 1; }

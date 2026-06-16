@@ -3,7 +3,7 @@
 // store holds RunView[], and everything here works on one run's DriftRunPackets
 // so N runs compose for free.
 
-import type { TelemetryPacket, TickScore, DriftRunPackets, DriftRunRow } from '$lib/types';
+import type { TelemetryPacket, TickScore, DriftRunPackets, DriftRunRow, DriftZoneRow } from '$lib/types';
 
 /** A loaded run plus its presentation state. The viewer holds RunView[] so
  *  multi-run comparison is the default shape, never a bolt-on; colour is the
@@ -151,4 +151,80 @@ export function timeAxis(data: DriftRunPackets): number[] {
   const out = new Array<number>(n);
   for (let i = 0; i < n; i++) out[i] = (data.packets[i].timestampMs - t0) / 1000;
   return out;
+}
+
+// ── Sectors (split-gate crossings) ───────────────────────────────────────────
+
+/** The authored sector names for a zone (the gaps between splits, A→B order).
+ *  Lives in `scoringConfig.sectorNames`; empty when unauthored. */
+export function zoneSectorNames(zone: DriftZoneRow | null | undefined): string[] {
+  const raw = (zone?.scoringConfig as Record<string, unknown> | undefined)?.sectorNames;
+  return Array.isArray(raw) ? raw.map((s) => String(s)) : [];
+}
+
+/** Display name for sector `i`, falling back to "Sector N" when unauthored. */
+export function sectorName(zone: DriftZoneRow | null | undefined, i: number): string {
+  return zoneSectorNames(zone)[i]?.trim() || `Sector ${i + 1}`;
+}
+
+/** A contiguous run of ticks sharing one sector index. `start`/`end` are tick
+ *  indices (end inclusive). With the monotonic scorer these come out in travel
+ *  order, so the boundary between two spans is exactly one split crossing — the
+ *  x-position for a vertical divider, and the bounds to centre a sector title. */
+export interface SectorSpan {
+  sector: number;
+  start: number;
+  end: number;
+}
+
+/** Split a run's ticks into contiguous sector spans (see [`SectorSpan`]). One
+ *  span when the zone has no splits. */
+export function sectorSpans(data: DriftRunPackets): SectorSpan[] {
+  const ticks = data.ticks;
+  if (ticks.length === 0) return [];
+  const spans: SectorSpan[] = [];
+  let cur = ticks[0].sector ?? 0;
+  let start = 0;
+  for (let i = 1; i < ticks.length; i++) {
+    const s = ticks[i].sector ?? 0;
+    if (s !== cur) {
+      spans.push({ sector: cur, start, end: i - 1 });
+      cur = s;
+      start = i;
+    }
+  }
+  spans.push({ sector: cur, start, end: ticks.length - 1 });
+  return spans;
+}
+
+/** True when the run carries per-sector scoring (zone had splits and was scored
+ *  on the run-viewer path). Below this, the sector UI hides itself. */
+export function hasSectors(data: DriftRunPackets): boolean {
+  return (data.score.sectors?.length ?? 0) > 1;
+}
+
+/** One row of the per-sector "where did I score" readout: the sector's points,
+ *  its share of the run total, and time-on-sector, paired with its name. */
+export interface SectorRow {
+  index: number;
+  name: string;
+  points: number;
+  sampleCount: number;
+  driftTimeS: number;
+  /** Share of the run's banked points (0–100). */
+  pct: number;
+}
+
+/** Per-sector rows for one run, named from the zone (A→B order). */
+export function sectorRows(data: DriftRunPackets, zone: DriftZoneRow | null | undefined): SectorRow[] {
+  const sectors = data.score.sectors ?? [];
+  const total = sectors.reduce((a, s) => a + s.points, 0);
+  return sectors.map((s, i) => ({
+    index: i,
+    name: sectorName(zone, i),
+    points: s.points,
+    sampleCount: s.sampleCount,
+    driftTimeS: s.driftTimeS,
+    pct: total > 0 ? (s.points / total) * 100 : 0,
+  }));
 }

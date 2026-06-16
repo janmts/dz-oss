@@ -11,14 +11,52 @@
     removeLane,
     toggleLaneChannel,
     setLaneHeight,
+    setLaneRuns,
     MAX_LANES,
     type LaneConfig,
   } from '$lib/stores/runViewer';
-  import { CHANNELS, CHANNELS_BY_KEY, channelSeries, TELEMETRY_HZ } from '$lib/runViewer';
+  import {
+    CHANNELS,
+    CHANNELS_BY_KEY,
+    channelSeries,
+    TELEMETRY_HZ,
+    sectorSpans,
+    sectorName,
+  } from '$lib/runViewer';
+  import { driftZones } from '$lib/stores/sessions';
+  import type { RunView } from '$lib/runViewer';
   import CheckboxDropdown from './CheckboxDropdown.svelte';
 
   const SYNC_KEY = 'runs-viewer';
   const DASHES: number[][] = [[], [6, 3], [2, 3], [8, 3, 2, 3]];
+
+  // The run whose split crossings anchor the dividers + titles. Comparison runs
+  // cross splits at different times, so one reference (the primary/first run)
+  // keeps the lines readable; the per-sector numbers live in the sidebar section.
+  let refView = $derived<RunView | undefined>($runViews[0]);
+  function zoneForRun(v: RunView | undefined) {
+    return v ? ($driftZones.find((z) => z.id === v.row.zoneId) ?? null) : null;
+  }
+  // x-axis values (sample-index seconds) of the reference run's split crossings.
+  let boundaryXs = $derived(
+    refView ? sectorSpans(refView.data).slice(1).map((s) => s.start / TELEMETRY_HZ) : [],
+  );
+  // Sector name labels, positioned in CSS px over the top lane's plot area.
+  let sectorTitles = $state<{ name: string; left: number }[]>([]);
+
+  // Runs shown in a lane: its pinned set, or every selected run when unpinned.
+  function laneViews(lane: LaneConfig): RunView[] {
+    if (lane.runIds && lane.runIds.length) {
+      const set = new Set(lane.runIds);
+      return $runViews.filter((v) => set.has(v.runId));
+    }
+    return $runViews;
+  }
+  let runOpts = $derived($runViews.map((v) => ({ value: String(v.runId), label: `#${v.runId}` })));
+  function toggleLaneRun(lane: LaneConfig, runId: number) {
+    const cur = lane.runIds ?? [];
+    setLaneRuns(lane.id, cur.includes(runId) ? cur.filter((r) => r !== runId) : [...cur, runId]);
+  }
 
   let host = $state<HTMLDivElement | null>(null);
   const plots = new Map<number, uPlot>();
@@ -101,8 +139,75 @@
     };
   }
 
+  // Vertical split-crossing dividers, drawn on every lane so they line up across
+  // the stack. Canvas-space (post-series) so they sit on top of the traces.
+  function sectorDividers(): uPlot.Plugin {
+    return {
+      hooks: {
+        draw(u) {
+          if (boundaryXs.length === 0) return;
+          const pr = uPlot.pxRatio || 1;
+          const ctx = u.ctx;
+          ctx.save();
+          ctx.strokeStyle = themeColor('--gate-split', '#b385ee');
+          ctx.lineWidth = 1.4 * pr;
+          ctx.setLineDash([5 * pr, 4 * pr]);
+          const top = u.bbox.top;
+          const bot = u.bbox.top + u.bbox.height;
+          for (const bx of boundaryXs) {
+            const x = Math.round(u.valToPos(bx, 'x', true)) + 0.5;
+            ctx.beginPath();
+            ctx.moveTo(x, top);
+            ctx.lineTo(x, bot);
+            ctx.stroke();
+          }
+          ctx.restore();
+        },
+      },
+    };
+  }
+
+  // Place each sector's name centred over its span on the top lane's plot area.
+  // DOM (not canvas) so it can sit in the title row above the stack; positions
+  // are derived from the top plot's geometry and recomputed on build/resize.
+  function recomputeSectorTitles() {
+    const ref = refView;
+    const firstLane = $lanes[0];
+    const plot = firstLane ? plots.get(firstLane.id) : undefined;
+    if (!ref || !plot || !host) {
+      sectorTitles = [];
+      return;
+    }
+    const spans = sectorSpans(ref.data);
+    if (spans.length <= 1) {
+      sectorTitles = [];
+      return;
+    }
+    const zone = zoneForRun(ref);
+    const overLeft = plot.over.getBoundingClientRect().left - host.getBoundingClientRect().left;
+    sectorTitles = spans.map((sp) => {
+      const centerX = (sp.start + sp.end) / 2 / TELEMETRY_HZ;
+      return { name: sectorName(zone, sp.sector), left: overLeft + plot.valToPos(centerX, 'x') };
+    });
+  }
+  // Defer past the plot's layout/paint. rAF is the natural fit, but a timeout
+  // fallback also fires in environments where rAF is throttled (headless/no
+  // compositor); recompute is idempotent, so running both is harmless.
+  let titleRaf = 0;
+  let titleTo: ReturnType<typeof setTimeout> | undefined;
+  function scheduleTitles() {
+    cancelAnimationFrame(titleRaf);
+    clearTimeout(titleTo);
+    titleRaf = requestAnimationFrame(recomputeSectorTitles);
+    titleTo = setTimeout(recomputeSectorTitles, 60);
+  }
+  onDestroy(() => {
+    cancelAnimationFrame(titleRaf);
+    clearTimeout(titleTo);
+  });
+
   function buildLane(lane: LaneConfig, mount: HTMLDivElement) {
-    const views = $runViews;
+    const views = laneViews(lane);
     const chDefs = lane.channelKeys.map((k) => CHANNELS_BY_KEY.get(k)).filter(Boolean) as typeof CHANNELS;
     if (views.length === 0 || chDefs.length === 0) return;
 
@@ -136,6 +241,7 @@
       plugins: [
         tooltip(chDefs.map((d) => d.label), views.map((v) => ({ label: `#${v.runId}`, color: v.color }))),
         cursorBridge(),
+        sectorDividers(),
       ],
       series,
       axes: [
@@ -155,7 +261,7 @@
   // Structural rebuild key: rebuild plots when lanes' channels or the run set
   // change — NOT on height (handled separately via setSize).
   let structureKey = $derived(
-    JSON.stringify($lanes.map((l) => ({ id: l.id, ch: l.channelKeys }))) +
+    JSON.stringify($lanes.map((l) => ({ id: l.id, ch: l.channelKeys, r: l.runIds ?? [] }))) +
       '|' +
       $runViews.map((v) => v.runId).join(','),
   );
@@ -171,6 +277,13 @@
       const lane = $lanes.find((l) => l.id === id);
       if (lane) buildLane(lane, m);
     }
+    scheduleTitles();
+  });
+
+  // Reposition titles when the reference run's split crossings change.
+  $effect(() => {
+    void boundaryXs;
+    scheduleTitles();
   });
 
   // Apply height changes without a full rebuild.
@@ -180,6 +293,7 @@
       const m = host?.querySelector<HTMLDivElement>(`.lane-chart[data-lane="${lane.id}"]`);
       if (p && m) p.setSize({ width: m.clientWidth || 600, height: lane.height });
     }
+    scheduleTitles();
   });
 
   // Map → graph cursor follow.
@@ -208,6 +322,7 @@
         const m = h.querySelector<HTMLDivElement>(`.lane-chart[data-lane="${lane.id}"]`);
         if (p && m) p.setSize({ width: m.clientWidth || 600, height: lane.height });
       }
+      scheduleTitles();
     });
     ro.observe(h);
     return () => ro.disconnect();
@@ -231,6 +346,13 @@
 </script>
 
 <div class="graph" bind:this={host}>
+  {#if sectorTitles.length}
+    <div class="sector-titles" aria-hidden="true">
+      {#each sectorTitles as t (t.name + t.left)}
+        <span class="sector-title" style:left="{t.left}px">{t.name}</span>
+      {/each}
+    </div>
+  {/if}
   {#each $lanes as lane (lane.id)}
     <div class="lane">
       <div class="lane-head">
@@ -240,6 +362,13 @@
           options={channelOpts}
           selected={lane.channelKeys}
           onToggle={(k) => toggleLaneChannel(lane.id, k)}
+        />
+        <CheckboxDropdown
+          label={lane.runIds?.length ? `${lane.runIds.length} run${lane.runIds.length === 1 ? '' : 's'}` : 'all runs'}
+          options={runOpts}
+          selected={(lane.runIds ?? []).map(String)}
+          onToggle={(k) => toggleLaneRun(lane, Number(k))}
+          searchable={false}
         />
         <span class="lane-h mono">{lane.height}px</span>
         {#if $lanes.length > 1}
@@ -273,6 +402,21 @@
 
 <style>
   .graph { display: flex; flex-direction: column; gap: 6px; min-height: 0; overflow-y: auto; padding: 2px; }
+  /* One shared title row above the lane stack; labels are absolutely positioned
+     over the top lane's plot columns, centred between split dividers. */
+  .sector-titles { position: relative; height: 16px; flex: none; }
+  .sector-title {
+    position: absolute;
+    top: 0;
+    transform: translateX(-50%);
+    white-space: nowrap;
+    font-size: 0.64rem;
+    color: var(--tx-mid);
+    pointer-events: none;
+    max-width: 18ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .lane { border: 1px solid var(--bd-dim); border-radius: var(--r-sm); background: var(--bg-card); overflow: hidden; }
   .lane-head {
     display: flex;

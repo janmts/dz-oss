@@ -47,6 +47,9 @@ export interface LaneConfig {
   id: number;
   channelKeys: string[];
   height: number;
+  /** Run ids shown in this lane. Empty/undefined = every selected run (the
+   *  default). Lets you pin one run per lane — the "assign runs per lane" flow. */
+  runIds?: number[];
 }
 
 export const MAX_LANES = 4;
@@ -78,6 +81,17 @@ export function toggleLaneChannel(id: number, key: string) {
 }
 export function setLaneHeight(id: number, height: number) {
   lanes.update((ls) => ls.map((l) => (l.id === id ? { ...l, height: Math.max(48, Math.round(height)) } : l)));
+}
+/** Pin a lane to a set of run ids (empty = all selected runs). */
+export function setLaneRuns(id: number, runIds: number[]) {
+  lanes.update((ls) => ls.map((l) => (l.id === id ? { ...l, runIds } : l)));
+}
+/** Drop a run from every lane's pin list — called when a run is deselected so a
+ *  lane never points at a run that's no longer loaded. */
+function pruneLaneRun(runId: number) {
+  lanes.update((ls) =>
+    ls.map((l) => (l.runIds?.includes(runId) ? { ...l, runIds: l.runIds.filter((r) => r !== runId) } : l)),
+  );
 }
 
 // ── Selection / loading ─────────────────────────────────────────────────────
@@ -113,6 +127,7 @@ export function toggleRun(row: DriftRunRow) {
   const ids = get(selectedRunIds);
   if (ids.includes(row.id)) {
     selectedRunIds.set(ids.filter((x) => x !== row.id));
+    pruneLaneRun(row.id);
   } else {
     selectedRunIds.set([...ids, row.id]);
     if (ids.length >= 1) traceColorMode.set('byRun'); // 2nd+ run → colour by run

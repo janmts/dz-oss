@@ -758,6 +758,153 @@ fn gate_distance_sq(point: Point, gate: [Point; 2]) -> f64 {
     (point.x - mid.x).powi(2) + (point.z - mid.z).powi(2)
 }
 
+/// The geometry a recorded run is bucketed into sectors against: the mid-run
+/// split lines plus the two end gates, derived from a zone row the same way the
+/// live scorer derives its gates (first/last boundary point pairs). Splits are
+/// straight 2-point rungs (not tessellated) in the stored order, which the editor
+/// keeps in A→B driving order, so they line up with `scoringConfig.sectorNames`.
+pub struct SectorGeometry {
+    pub splits: Vec<[Point; 2]>,
+    pub gate_a: [Point; 2],
+    pub gate_b: [Point; 2],
+}
+
+/// Build [`SectorGeometry`] from a zone row, or `None` if it can't form end gates
+/// (fewer than two boundary points per side). Malformed splits (fewer than two
+/// points) are dropped.
+pub fn sector_geometry(row: &db::DriftZoneRow) -> Option<SectorGeometry> {
+    if row.left_boundary.len() < 2 || row.right_boundary.len() < 2 {
+        return None;
+    }
+    let gate_a = [
+        Point::from(row.left_boundary.first()?),
+        Point::from(row.right_boundary.first()?),
+    ];
+    let gate_b = [
+        Point::from(row.left_boundary.last()?),
+        Point::from(row.right_boundary.last()?),
+    ];
+    let splits = row
+        .split_gates
+        .iter()
+        .filter(|g| g.len() >= 2)
+        .map(|g| [Point::from(&g[0]), Point::from(&g[1])])
+        .collect();
+    Some(SectorGeometry {
+        splits,
+        gate_a,
+        gate_b,
+    })
+}
+
+/// Assign each packet a sector index by counting split-gate crossings from the
+/// entry gate, **monotonic / furthest-reached**: the run only ever advances to
+/// the next split in travel order and never falls back, so weaving across a
+/// boundary can't bounce the count (the roadmap's preferred rule over a net
+/// crossing count). Returns one index per packet (index-aligned), in
+/// **A→B-canonical** order — sector `i` is the gap named by `sectorNames[i]`
+/// regardless of which gate the run entered. Empty `splits` ⇒ all zeros.
+///
+/// Entry direction is read from the first positioned packet: runs are recorded
+/// from the entry crossing, so the opening position sits at one end gate; the
+/// nearer gate is the entry, which fixes whether the canonical index counts up
+/// from gate A or down from gate B.
+pub fn assign_sectors(
+    packets: &[parser::TelemetryPacket],
+    splits: &[[Point; 2]],
+    gate_a: [Point; 2],
+    gate_b: [Point; 2],
+) -> Vec<u32> {
+    let n = splits.len();
+    if n == 0 || packets.is_empty() {
+        return vec![0; packets.len()];
+    }
+    let entry_is_a = match packets.iter().find_map(packet_point) {
+        Some(p) => gate_distance_sq(p, gate_a) <= gate_distance_sq(p, gate_b),
+        None => true,
+    };
+    let mut out = Vec::with_capacity(packets.len());
+    let mut prev: Option<Point> = None;
+    if entry_is_a {
+        // Forward (entry = gate A): cross splits 0,1,…; sector counts up from 0.
+        let mut sector = 0u32;
+        let mut next = 0usize;
+        for pkt in packets {
+            let cur = packet_point(pkt);
+            if let (Some(pp), Some(c)) = (prev, cur) {
+                while next < n && segment_intersects(pp, c, splits[next][0], splits[next][1]) {
+                    next += 1;
+                    sector += 1;
+                }
+            }
+            out.push(sector);
+            if cur.is_some() {
+                prev = cur;
+            }
+        }
+    } else {
+        // Reverse (entry = gate B): cross splits N-1,…,0; sector counts down from N.
+        let mut sector = n as u32;
+        let mut next = n as isize - 1;
+        for pkt in packets {
+            let cur = packet_point(pkt);
+            if let (Some(pp), Some(c)) = (prev, cur) {
+                while next >= 0
+                    && segment_intersects(pp, c, splits[next as usize][0], splits[next as usize][1])
+                {
+                    next -= 1;
+                    sector -= 1;
+                }
+            }
+            out.push(sector);
+            if cur.is_some() {
+                prev = cur;
+            }
+        }
+    }
+    out
+}
+
+/// Fill in the per-sector breakdown for a re-scored run: tag each [`TickScore`]
+/// with its sector and roll the per-tick points / drift time up into
+/// `score.sectors` (A→B order, length = splits + 1). No-op when the zone has no
+/// split geometry, leaving every tick in sector 0 and `score.sectors` empty.
+/// `packets`, `ticks` and the derived sectors are all index-aligned.
+pub fn rescore_sectors(
+    row: &db::DriftZoneRow,
+    packets: &[parser::TelemetryPacket],
+    ticks: &mut [scoring::TickScore],
+    score: &mut scoring::RunScore,
+) {
+    let Some(geom) = sector_geometry(row) else {
+        return;
+    };
+    if geom.splits.is_empty() {
+        return;
+    }
+    let sectors = assign_sectors(packets, &geom.splits, geom.gate_a, geom.gate_b);
+    let n = geom.splits.len() + 1;
+    let mut roll = vec![scoring::SectorScore::default(); n];
+    let mut prev_ms: Option<u32> = None;
+    for ((pkt, tick), &s) in packets.iter().zip(ticks.iter()).zip(sectors.iter()) {
+        let dt = match prev_ms {
+            Some(prev) => scoring::frame_dt(prev, pkt.timestamp_ms),
+            None => 1.0 / 60.0,
+        };
+        prev_ms = Some(pkt.timestamp_ms);
+        let bucket = &mut roll[(s as usize).min(n - 1)];
+        bucket.points += tick.points;
+        bucket.sample_count += 1;
+        if tick.is_drifting {
+            bucket.drift_time_s += dt;
+        }
+    }
+    for (tick, &s) in ticks.iter_mut().zip(sectors.iter()) {
+        tick.sector = s;
+    }
+    score.sectors = roll;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -882,6 +1029,95 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         db::init(&conn).unwrap();
         conn
+    }
+
+    // A split line spanning the square corridor (x 0→5) at height `z`.
+    fn split_z(z: f64) -> [Point; 2] {
+        [Point { x: 0.0, z }, Point { x: 5.0, z }]
+    }
+    // square_zone()'s derived end gates: A at z=0, B at z=10.
+    const GATE_A: [Point; 2] = [Point { x: 0.0, z: 0.0 }, Point { x: 5.0, z: 0.0 }];
+    const GATE_B: [Point; 2] = [Point { x: 0.0, z: 10.0 }, Point { x: 5.0, z: 10.0 }];
+
+    #[test]
+    fn sectors_count_up_from_gate_a() {
+        let splits = vec![split_z(3.33), split_z(6.66)];
+        let pkts: Vec<_> = [0.5, 2.0, 3.0, 4.0, 5.0, 7.0, 9.0]
+            .iter()
+            .map(|&z| packet(2.5, z))
+            .collect();
+        // Enters by gate A (near z=0): sector counts up as each split is crossed.
+        assert_eq!(
+            assign_sectors(&pkts, &splits, GATE_A, GATE_B),
+            vec![0, 0, 0, 1, 1, 2, 2]
+        );
+    }
+
+    #[test]
+    fn sectors_count_down_from_gate_b() {
+        let splits = vec![split_z(3.33), split_z(6.66)];
+        let pkts: Vec<_> = [9.5, 7.0, 6.0, 4.0, 3.0, 1.0]
+            .iter()
+            .map(|&z| packet(2.5, z))
+            .collect();
+        // Reverse entry (near z=10): canonical index counts down from N, so the
+        // same physical sector still maps to the same sectorNames slot.
+        assert_eq!(
+            assign_sectors(&pkts, &splits, GATE_A, GATE_B),
+            vec![2, 2, 1, 1, 0, 0]
+        );
+    }
+
+    #[test]
+    fn sectors_are_monotonic_through_wobble() {
+        let splits = vec![split_z(3.33)];
+        let pkts: Vec<_> = [3.0, 4.0, 3.0, 4.0]
+            .iter()
+            .map(|&z| packet(2.5, z))
+            .collect();
+        // Cross once → sector 1; weaving back across the line never falls back.
+        assert_eq!(assign_sectors(&pkts, &splits, GATE_A, GATE_B), vec![0, 1, 1, 1]);
+    }
+
+    #[test]
+    fn no_splits_leaves_everything_in_sector_zero() {
+        let pkts: Vec<_> = [1.0, 2.0, 3.0].iter().map(|&z| packet(2.5, z)).collect();
+        assert_eq!(assign_sectors(&pkts, &[], GATE_A, GATE_B), vec![0, 0, 0]);
+    }
+
+    #[test]
+    fn rescore_sectors_buckets_points_and_sums_to_run_score() {
+        let mut row = square_zone();
+        row.split_gates = vec![
+            vec![
+                db::ZonePoint { x: 0.0, z: 3.33 },
+                db::ZonePoint { x: 5.0, z: 3.33 },
+            ],
+            vec![
+                db::ZonePoint { x: 0.0, z: 6.66 },
+                db::ZonePoint { x: 5.0, z: 6.66 },
+            ],
+        ];
+        // A scoring run driving A→B through both splits.
+        let pkts: Vec<_> = (0..12)
+            .map(|i| drifting_packet(2.5, 0.8 * i as f32 + 0.5, 100 + i as u32 * 16))
+            .collect();
+        let params = scoring::ScoringParams::default();
+        let (mut score, mut ticks) = scoring::score_run_with_ticks(&pkts, &params);
+        rescore_sectors(&row, &pkts, &mut ticks, &mut score);
+
+        assert_eq!(score.sectors.len(), 3, "N splits ⇒ N+1 sectors");
+        assert_eq!(ticks.len(), pkts.len());
+        // Forward entry ⇒ per-tick sector is non-decreasing.
+        assert!(ticks.windows(2).all(|w| w[0].sector <= w[1].sector));
+        // Per-sector points reconstruct the run total (no points lost or double-counted).
+        let summed: f64 = score.sectors.iter().map(|s| s.points).sum();
+        assert!(
+            (summed - score.score).abs() < 1e-3,
+            "sector sum {summed} vs run score {}",
+            score.score
+        );
+        assert!(score.score > 0.0, "the run should bank points");
     }
 
     #[test]

@@ -95,6 +95,18 @@ export interface SessionLap {
   lapTime: number;
 }
 
+/** One sector's slice of a run (mirrors scoring::SectorScore). Index-aligned to
+ *  the zone's `sectorNames` in A→B order (N splits ⇒ N+1 sectors). Summing
+ *  `points` across sectors reproduces the run score. */
+export interface SectorScore {
+  /** Scaled points banked while in this sector. */
+  points: number;
+  /** Packets recorded in this sector (drifting or not). */
+  sampleCount: number;
+  /** Seconds spent drifting in this sector. */
+  driftTimeS: number;
+}
+
 /** Per-run scoring breakdown (mirrors scoring::RunScore in the backend). */
 export interface DriftScoreBreakdown {
   score: number;
@@ -115,6 +127,10 @@ export interface DriftScoreBreakdown {
   /** Points withheld by the low-speed flip-pause term (0 for normal-speed
    *  runs). Absent pre-v0.4.0 — Recompute backfills. */
   flipPausePts?: number;
+  /** Per-sector point rollup in A→B order. Only the run-viewer re-scoring path
+   *  fills this (it needs the zone split geometry); empty/absent for zones with
+   *  no splits and for breakdowns stored by the live scorer. */
+  sectors?: SectorScore[];
 }
 
 export interface DriftRunRow {
@@ -154,6 +170,10 @@ export interface TickScore {
   tarmacWheels: number;
   /** Scaled points banked at this tick; summing all ticks reproduces the score. */
   points: number;
+  /** Sector this tick falls in: splits crossed since the entry gate, monotonic
+   *  (furthest-reached) and A→B-canonical, so `sectorNames[sector]` names it
+   *  regardless of entry direction. 0 when the zone has no splits. */
+  sector: number;
 }
 
 /** One drift run's full telemetry + scoring diagnostics for the run viewer,
