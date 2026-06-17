@@ -8,7 +8,8 @@
 game's own drift-zone scoring live from the UDP feed — plus a full gauge cluster, a
 recorded-run analyser, and automatic session recording. Desktop app (Tauri + Svelte)
 for Windows; an optional headless server hosts the same dashboard cross-platform.
-[Build and run from source](#running-from-source).
+[**Download the latest installer**](https://github.com/janmts/dz-oss/releases/latest), or
+[build from source](#running-from-source).
 
 ![The DZ-OSS Drift workbench — live signed drift-angle gauge, the zone map with the driven line, and computed-vs-actual scoring](docs/img/drift.png)
 
@@ -61,6 +62,19 @@ and side-by-side comparison of several runs at once.
 - **Headless web server** *(optional, cross-platform)* — serve the same dashboard over
   HTTP to any browser on your network, hosted from Windows, Linux, or macOS. See
   [docs/headless-server.md](docs/headless-server.md).
+
+## Install
+
+**Windows** — download and run the installer:
+
+1. Open the [**Releases**](https://github.com/janmts/dz-oss/releases/latest) page.
+2. Download **`DZ-OSS_<version>_x64-setup.exe`** and run it. WebView2 is required — it's
+   pre-installed on Windows 10/11.
+3. Launch DZ-OSS, then set up the game below.
+
+**Linux / macOS, or the headless web server?** Forza Horizon 6 is Windows/Xbox-only, so the
+desktop app ships for Windows — on other platforms [build from source](#running-from-source)
+or run the [headless server](docs/headless-server.md).
 
 ## Forza Horizon 6 Setup
 
