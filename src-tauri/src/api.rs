@@ -67,19 +67,25 @@ pub fn recompute_drift_scores(state: &AppState) -> Result<usize, String> {
     let mut count = 0;
     for (run_id, zone_id, started_at) in refs {
         let season = crate::season::season_at_utc_ms(started_at);
-        let params = match zone_id {
-            Some(z) => db::get_drift_zone(&conn, z)
-                .map(|row| crate::scoring::ScoringParams::from_config(&row.scoring_config))
-                .unwrap_or_default(),
-            None => crate::scoring::ScoringParams::default(),
-        }
-        .for_season(season);
+        let zone_row = zone_id.and_then(|z| db::get_drift_zone(&conn, z).ok());
+        let params = zone_row
+            .as_ref()
+            .map(|row| crate::scoring::ScoringParams::from_config(&row.scoring_config))
+            .unwrap_or_default()
+            .for_season(season);
+        let gates = zone_row
+            .as_ref()
+            .and_then(crate::drift::sector_geometry)
+            .map(|g| (g.gate_a, g.gate_b));
         let blobs = db::get_drift_run_packets(&conn, run_id).map_err(|e| e.to_string())?;
         let pkts: Vec<_> = blobs
             .iter()
             .filter_map(|b| crate::parser::parse(b).ok())
             .collect();
-        let result = crate::scoring::score_run(&pkts, &params);
+        // Correct the score for any rewinds (drop the replayed stretch) + flag it.
+        let rewinds = crate::drift::detect_rewinds(&pkts);
+        let mut result = crate::drift::score_run_corrected(&pkts, &rewinds, gates, &params);
+        result.rewinds = rewinds;
         let breakdown = serde_json::to_string(&result).ok();
         db::update_drift_run_score(&conn, run_id, Some(result.score as f32), breakdown.as_deref())
             .map_err(|e| e.to_string())?;
@@ -88,8 +94,24 @@ pub fn recompute_drift_scores(state: &AppState) -> Result<usize, String> {
     Ok(count)
 }
 
-/// One drift run's full per-packet telemetry plus authoritative per-tick scoring
-/// diagnostics, for the run viewer. `packets` and `ticks` are index-aligned.
+/// A marker for one in-game rewind, placed where it landed on the cleaned trace
+/// (the spot the run rewound TO). The viewer strips the replayed packets so the run
+/// reads as a single clean piece; this dot is the only trace of the rewind.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RewindMarker {
+    pub position_x: f32,
+    pub position_z: f32,
+    /// How far back the rewind jumped (m) — shown in the tooltip.
+    pub jump_m: f64,
+    /// False when the rewind left the zone (rewound out a gate → re-triggered).
+    pub on_path: bool,
+}
+
+/// One drift run's per-packet telemetry plus authoritative per-tick scoring
+/// diagnostics, for the run viewer. `packets` and `ticks` are index-aligned. For a
+/// rewound run these are the CLEANED (replayed stretch removed) one-piece run; the
+/// dropped stretch survives only as a [`RewindMarker`].
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DriftRunPackets {
@@ -101,6 +123,8 @@ pub struct DriftRunPackets {
     pub packets: Vec<crate::parser::TelemetryPacket>,
     pub ticks: Vec<crate::scoring::TickScore>,
     pub score: crate::scoring::RunScore,
+    /// One marker per detected rewind (empty for a clean run).
+    pub rewind_markers: Vec<RewindMarker>,
 }
 
 /// Load one run's stored packets and score them with per-tick emission, so the
@@ -122,14 +146,55 @@ pub fn drift_run_packets(state: &AppState, run_id: i64) -> Result<DriftRunPacket
         .map(|row| crate::scoring::ScoringParams::from_config(&row.scoring_config))
         .unwrap_or_default()
         .for_season(season);
-    let packets: Vec<crate::parser::TelemetryPacket> = db::get_drift_run_packets(&conn, run_id)
+    let mut packets: Vec<crate::parser::TelemetryPacket> = db::get_drift_run_packets(&conn, run_id)
         .map_err(|e| e.to_string())?
         .iter()
         .filter_map(|b| crate::parser::parse(b).ok())
         .collect();
     let (mut score, mut ticks) = crate::scoring::score_run_with_ticks(&packets, &params);
-    // Bucket the per-tick points into sectors (split-gate crossings from entry) so
-    // the run viewer can show "where did I score". No-op for zones with no splits.
+    let rewinds = crate::drift::detect_rewinds(&packets);
+    let gates = zone_row
+        .as_ref()
+        .and_then(crate::drift::sector_geometry)
+        .map(|g| (g.gate_a, g.gate_b));
+    // A rewound run is shown as one CLEAN piece: strip the replayed/abandoned packets
+    // (and their ticks) so the trace + graphs don't double back, leaving just a marker
+    // where each rewind landed. The score is the corrected (kept-only) score.
+    let mut rewind_markers = Vec::new();
+    if !rewinds.is_empty() {
+        let mask = crate::drift::rewind_abandoned_mask(&packets, &rewinds, gates);
+        // Capture each rewind's landing spot (first kept packet at/after the resume)
+        // before stripping, so the marker sits exactly on the cleaned trace.
+        for rw in &rewinds {
+            let mut landing = rw.resume_index;
+            while landing < packets.len() && mask[landing] {
+                landing += 1;
+            }
+            if let Some(p) = packets.get(landing) {
+                rewind_markers.push(RewindMarker {
+                    position_x: p.position_x,
+                    position_z: p.position_z,
+                    jump_m: rw.jump_m,
+                    on_path: rw.on_path,
+                });
+            }
+        }
+        // Keep only the packets/ticks the game kept.
+        let mut kept_p = Vec::with_capacity(packets.len());
+        let mut kept_t = Vec::with_capacity(ticks.len());
+        for (i, (p, t)) in packets.iter().zip(ticks.iter()).enumerate() {
+            if !mask[i] {
+                kept_p.push(p.clone());
+                kept_t.push(t.clone());
+            }
+        }
+        packets = kept_p;
+        ticks = kept_t;
+        score = crate::scoring::score_run(&packets, &params);
+    }
+    score.rewinds = rewinds;
+    // Bucket the per-tick points into sectors (split-gate crossings from entry) so the
+    // run viewer can show "where did I score". No-op for zones w/o splits.
     if let Some(row) = zone_row.as_ref() {
         crate::drift::rescore_sectors(row, &packets, &mut ticks, &mut score);
     }
@@ -140,6 +205,7 @@ pub fn drift_run_packets(state: &AppState, run_id: i64) -> Result<DriftRunPacket
         packets,
         ticks,
         score,
+        rewind_markers,
     })
 }
 

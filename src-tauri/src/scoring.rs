@@ -249,6 +249,38 @@ pub struct SectorScore {
     pub drift_time_s: f64,
 }
 
+/// A detected in-game rewind inside a recorded run. A rewind behaves like an
+/// in-game pause: UDP transmission stops (a telemetry gap), then resumes at the
+/// rewound position — so the signature is a large BACKWARD position jump across a
+/// gap. The abandoned attempt — packets `(target_index, gap_index]` — is replayed
+/// after the rewind, so the geometry-less integral double-counts it and over-scores
+/// vs the game (which discarded it). Detection only for now; runs with any rewind
+/// are flagged for exclusion from the score fit until correction is enabled.
+/// Filled in by [`crate::drift::detect_rewinds`] off the position track.
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RewindEvent {
+    /// Index of the last packet before the rewind gap (rewound FROM).
+    pub gap_index: usize,
+    /// Index of the first packet after the gap (the resume / rewound-TO position).
+    pub resume_index: usize,
+    /// Telemetry gap across the rewind (ms); transmission stops during the rewind.
+    pub gap_ms: u32,
+    /// Planar (x,z) jump across the gap (m) — large and backward for a rewind.
+    pub jump_m: f64,
+    /// Recorded packet nearest (3D) the resume position — the rewind TARGET. The
+    /// abandoned attempt is `(target_index, gap_index]`.
+    pub target_index: usize,
+    /// 3D distance (m) from the resume to that nearest earlier packet.
+    pub resume_path_dist_m: f64,
+    /// True when the resume landed back ON the recorded path (within slack): an
+    /// in-zone rewind the game continued — correctable by dropping
+    /// `(target_index, gap_index]`. False when it left the zone (e.g. rewound out
+    /// the start gate): the game failed/re-triggered the zone, needing the re-entry
+    /// branch (a later phase).
+    pub on_path: bool,
+}
+
 /// Per-run scoring result plus the breakdown used for display and tuning.
 #[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -281,6 +313,12 @@ pub struct RunScore {
     /// run was scored against zone split geometry (the run-viewer path); the live
     /// scorer and geometry-less re-scores leave it empty.
     pub sectors: Vec<SectorScore>,
+    /// In-game rewinds detected in this run (empty = none; see [`RewindEvent`]).
+    /// A non-empty list means the score double-counts the replayed stretch(es), so
+    /// the run is flagged for exclusion from the fit until correction is enabled.
+    /// Filled from the position track by [`crate::drift::detect_rewinds`] at close,
+    /// on recompute, and on the run-viewer path.
+    pub rewinds: Vec<RewindEvent>,
 }
 
 /// Per-packet scoring diagnostics emitted alongside the run score, one entry per
@@ -622,6 +660,7 @@ fn score_run_inner(
         transit_pts: transit_raw * p.scale,
         flip_pause_pts: pause_raw * p.scale,
         sectors: Vec::new(),
+        rewinds: Vec::new(),
     }
 }
 

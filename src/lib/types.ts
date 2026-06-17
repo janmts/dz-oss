@@ -107,6 +107,28 @@ export interface SectorScore {
   driftTimeS: number;
 }
 
+/** One detected in-game rewind (mirrors scoring::RewindEvent). A rewind reads as a
+ *  telemetry gap (UDP stops) with a large backward position jump on resume; the
+ *  abandoned attempt `(targetIndex, gapIndex]` is replayed, so the score
+ *  double-counts it. Runs with any rewind are flagged for exclusion from the fit. */
+export interface RewindEvent {
+  /** Last packet index before the rewind gap (rewound FROM). */
+  gapIndex: number;
+  /** First packet index after the gap (the resume / rewound-TO position). */
+  resumeIndex: number;
+  /** Telemetry gap across the rewind (ms). */
+  gapMs: number;
+  /** Planar (x,z) jump across the gap (m) — large and backward for a rewind. */
+  jumpM: number;
+  /** Recorded packet nearest (3D) the resume — the rewind target. */
+  targetIndex: number;
+  /** 3D distance (m) from the resume to that nearest earlier packet. */
+  resumePathDistM: number;
+  /** True when the resume landed back on the recorded path (in-zone rewind); false
+   *  when it left the zone (e.g. rewound out the start gate → fail/re-trigger). */
+  onPath: boolean;
+}
+
 /** Per-run scoring breakdown (mirrors scoring::RunScore in the backend). */
 export interface DriftScoreBreakdown {
   score: number;
@@ -131,6 +153,11 @@ export interface DriftScoreBreakdown {
    *  fills this (it needs the zone split geometry); empty/absent for zones with
    *  no splits and for breakdowns stored by the live scorer. */
   sectors?: SectorScore[];
+  /** In-game rewinds detected in this run (empty/absent = none). A non-empty list
+   *  means the score double-counts the replayed stretch(es); the run is flagged for
+   *  exclusion from the fit. Absent on breakdowns stored before the field existed —
+   *  Recompute backfills it. */
+  rewinds?: RewindEvent[];
 }
 
 export interface DriftRunRow {
@@ -176,8 +203,22 @@ export interface TickScore {
   sector: number;
 }
 
-/** One drift run's full telemetry + scoring diagnostics for the run viewer,
- *  returned by `getDriftRunPackets`. `packets` and `ticks` are index-aligned. */
+/** A marker for one in-game rewind (mirrors api::RewindMarker), placed where it
+ *  landed on the cleaned trace. The viewer strips the replayed packets so a rewound
+ *  run reads as one clean piece; this dot is the only trace of the rewind. */
+export interface RewindMarker {
+  positionX: number;
+  positionZ: number;
+  /** How far back the rewind jumped (m) — shown in the tooltip. */
+  jumpM: number;
+  /** False when the rewind left the zone (rewound out a gate → re-triggered). */
+  onPath: boolean;
+}
+
+/** One drift run's telemetry + scoring diagnostics for the run viewer, returned by
+ *  `getDriftRunPackets`. `packets` and `ticks` are index-aligned. For a rewound run
+ *  these are the CLEANED one-piece run (replayed stretch removed); the dropped
+ *  stretch survives only as a `rewindMarkers` entry. */
 export interface DriftRunPackets {
   runId: number;
   zoneId: number | null;
@@ -185,6 +226,8 @@ export interface DriftRunPackets {
   packets: TelemetryPacket[];
   ticks: TickScore[];
   score: DriftScoreBreakdown;
+  /** One marker per detected rewind (empty for a clean run). */
+  rewindMarkers: RewindMarker[];
 }
 
 export interface DriftRunStatus {

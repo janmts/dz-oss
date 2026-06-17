@@ -204,6 +204,24 @@
     }
   }
 
+  // Mark each in-game rewind with a single ring + tooltip at the spot it landed.
+  // The replayed/abandoned packets are stripped server-side so the trace reads as one
+  // clean piece — this dot is the only trace of the rewind (no doubled-back line).
+  function drawRewinds(view: RunView) {
+    if (!gm) return;
+    const warn = themeColor('--warn', '#d2a24c');
+    for (const m of view.data.rewindMarkers ?? []) {
+      if (m.positionX === 0 && m.positionZ === 0) continue;
+      const ll = gm.worldToLatLng({ x: m.positionX, z: m.positionZ });
+      gm.L.circleMarker(ll, { radius: 6, weight: 2, color: warn, fillColor: warn, fillOpacity: 0.35 })
+        .bindTooltip(`Rewound ${Math.round(m.jumpM)} m${m.onPath ? '' : ' · left zone'}`, {
+          direction: 'top',
+          offset: [0, -6],
+        })
+        .addTo(gm.markers);
+    }
+  }
+
   function redraw() {
     if (!gm || !gm.calib) return;
     gm.clearLines();
@@ -239,6 +257,7 @@
     gm.setWeightRefZoom(fitZoom || gm.map.getZoom());
 
     for (const v of views) addMarkers(v);
+    for (const v of views) drawRewinds(v);
   }
 
   // Per-tick hover card data.
