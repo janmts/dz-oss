@@ -1,7 +1,7 @@
 # Known Bugs & Limitations
 
 DZ-OSS is pre-1.0 and under active development. The headline feature — the drift
-score — is a *reconstruction* of Forza Horizon 6's hidden drift-zone scoring, built
+score — *aims to reproduce* Forza Horizon 6's hidden drift-zone scoring, inferred
 from the telemetry feed and logged in-game scores rather than the game's own formula.
 It tracks recorded runs to within roughly 1–2% on most runs (see
 [How the Drift Scoring Works](scoring.md)), but it is an estimate, and the items below

@@ -4,8 +4,8 @@
 ![Platform](https://img.shields.io/badge/platform-Windows-0078d4)
 
 **DZ-OSS** (*Drift Zone Original Scoring System*) is a real-time telemetry app for
-**Forza Horizon 6**, built around a **drift-scoring workbench** that reconstructs the
-game's own drift-zone scoring from the UDP feed — plus a full gauge cluster, a
+**Forza Horizon 6**, built around a **drift-scoring workbench** that aims to reproduce the
+game's own drift-zone scoring live from the UDP feed — plus a full gauge cluster, a
 recorded-run analyser, and automatic session recording. Desktop app (Tauri + Svelte)
 for Windows; an optional headless server hosts the same dashboard cross-platform.
 [Build and run from source](#running-from-source).
@@ -19,7 +19,7 @@ the moment you install it you can drive a zone, have the app detect the run, est
 its score live from the telemetry, and keep a per-zone history to check against the
 game's actual number.
 
-Curious how the score is reconstructed from the feed? See
+Curious how the score is estimated from the feed? See
 [**How the Drift Scoring Works**](docs/scoring.md) — the model, the evidence behind it,
 and its known limits.
 
@@ -95,9 +95,8 @@ DZ-OSS on Linux or macOS, build the headless server instead — see
 
 ## Status & Known Limitations
 
-DZ-OSS is pre-release and under active development. The drift score is a
-*reconstruction* of the game's hidden scoring — accurate to a few percent, but an
-estimate, not the game's own number. The main current limits: the hidden
+DZ-OSS is pre-release and under active development. The drift score *aims to reproduce* the game's hidden scoring — accurate to a few
+percent, but an estimate, not the game's own number. The main current limits: the hidden
 scoreable-zone boundary isn't mapped yet (so off-road overshoots can over-score),
 summer/autumn off-road credit is unverified, there's no live ticking score during a run,
 only one app can use the telemetry port at a time, and the desktop app is Windows-only.

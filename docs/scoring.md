@@ -4,14 +4,14 @@ Forza Horizon 6's drift zones hand you a score at the end of a run, but the game
 never tells you *how* it got there. There's no published formula — just a number
 that ticks up while you're sideways and freezes when you're not.
 
-DZ-OSS reconstructs that formula. It watches the same thing the game watches —
-the car's motion, 64 times a second — and rebuilds the drift score from scratch,
+DZ-OSS aims to reproduce that formula. It watches the same thing the game watches —
+the car's motion, 64 times a second — and works the drift score out from scratch,
 so the app can estimate a run's score the instant it ends and tell you *where*
 the points came from.
 
 This document explains the model: what every term does, why it's shaped that
-way, and how we know it's right. It is a reconstruction, not the game's source
-code, so it's framed throughout as "this is what the evidence says the game
+way, and how we know it's right. It's an approximation inferred from the outside,
+not the game's source code, so it's framed throughout as "this is what the evidence says the game
 does." Where the model has known gaps, this doc says so.
 
 The whole estimator lives in [`src-tauri/src/scoring.rs`](../src-tauri/src/scoring.rs);
@@ -219,7 +219,7 @@ it's the most surprising one.
 ### The surface gate: at least two wheels on tarmac
 
 Slide through the grass and the game gives you nothing — even though you're
-clearly sideways. DZ-OSS reproduces this from the packet's **per-wheel surface
+clearly sideways. DZ-OSS mirrors this from the packet's **per-wheel surface
 rumble** channel, which reads ~0 on a smooth surface and jumps well above it on
 grass / dirt / gravel:
 
@@ -425,7 +425,7 @@ key overrides just that one.
 
 ## Caveats
 
-This is a **reconstruction from observed behaviour**, not the game's actual
+This is a **model inferred from observed behaviour**, not the game's actual
 scoring code. It's accurate to ~1.4% on the runs measured so far, but:
 
 - Summer and autumn off-tarmac behaviour is **assumed**, not yet measured.
