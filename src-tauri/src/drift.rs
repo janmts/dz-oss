@@ -211,7 +211,7 @@ impl DriftRunManager {
                 } else {
                     run.packet_count += 1;
                 }
-                let (score, breakdown) = score_from_packets(conn, run.id, &run.zone.params);
+                let (score, breakdown) = score_from_packets(conn, run.id, &run.zone);
                 let status = DriftRunStatus::closed(run, now_ms, true, None);
                 if let Err(e) = db::close_drift_run(conn, run.id, now_ms, true, None, score) {
                     eprintln!("[drift] close error: {e}");
@@ -270,7 +270,7 @@ impl DriftRunManager {
             let starve_s = (now_ms - run.last_score_ms).max(0) as f64 / 1000.0;
             if starve_timeout_s > 0.0 && starve_s > starve_timeout_s {
                 let reason = format!("no drift score for {starve_timeout_s:.0}s");
-                let (score, breakdown) = score_from_packets(conn, run.id, &run.zone.params);
+                let (score, breakdown) = score_from_packets(conn, run.id, &run.zone);
                 let status = DriftRunStatus::closed(run, now_ms, false, Some(reason.clone()));
                 if let Err(e) =
                     db::close_drift_run(conn, run.id, now_ms, false, Some(&reason), score)
@@ -656,7 +656,7 @@ fn emit_span(out: &mut Vec<Point>, p0: Point, p1: Point, p2: Point, p3: Point, s
 fn score_from_packets(
     conn: &Connection,
     run_id: i64,
-    params: &scoring::ScoringParams,
+    zone: &RunnableZone,
 ) -> (Option<f32>, Option<String>) {
     let blobs = match db::get_drift_run_packets(conn, run_id) {
         Ok(b) => b,
@@ -667,7 +667,13 @@ fn score_from_packets(
     };
     let pkts: Vec<parser::TelemetryPacket> =
         blobs.iter().filter_map(|b| parser::parse(b).ok()).collect();
-    let result = scoring::score_run(&pkts, params);
+    // Detect rewinds and score the corrected (replayed stretch removed) run, so the
+    // stored score matches the in-game score. The run stays flagged via `rewinds`
+    // and is excluded from the fit regardless.
+    let rewinds = detect_rewinds(&pkts);
+    let mut result =
+        score_run_corrected(&pkts, &rewinds, Some((zone.gate_a, zone.gate_b)), &zone.params);
+    result.rewinds = rewinds;
     (Some(result.score as f32), serde_json::to_string(&result).ok())
 }
 
@@ -905,6 +911,178 @@ pub fn rescore_sectors(
     score.sectors = roll;
 }
 
+/// A rewind stops UDP transmission, so it lands in the stored packets as a gap (ms)
+/// far larger than the ~16 ms 64 Hz tick. Pauses gap too — the JUMP tells them apart.
+const REWIND_GAP_MS: i64 = 400;
+/// Planar jump (m) across that gap above which it's a rewind, not a pause. Pauses
+/// resume in place (largest non-rewind jump DB-wide is 11.9 m); real rewinds jump
+/// back 40+ m (staged runs #668/#670/#671 measured 42.8 / 109.5 / 128.6 m). 25 m
+/// sits in the wide empty margin between, so detection has no false positives.
+const REWIND_JUMP_M: f64 = 25.0;
+/// Resume-to-nearest-recorded-point distance (3D, m) within which the rewind landed
+/// back ON the path (in-zone — the game continued). Beyond it the rewind left the
+/// zone (e.g. out the start gate), which the game treats as a fail/re-trigger.
+/// Staged in-zone rewinds resumed at 0.0 m; the out-of-zone one at 61.1 m.
+const REWIND_ON_PATH_M: f64 = 15.0;
+
+/// World position `(x, y, z)` of a packet, or `None` for the blanked `(0,0)`
+/// sentinel the live recorder drops. Mirrors [`packet_point`] but keeps height for
+/// the rewind target search — full 3D so a resume on one level of an overlapping
+/// (loop/spiral) zone can't match a same-`(x,z)` point on another level.
+fn packet_point3(pkt: &parser::TelemetryPacket) -> Option<(f64, f64, f64)> {
+    if pkt.position_x == 0.0 && pkt.position_z == 0.0 {
+        return None;
+    }
+    Some((
+        pkt.position_x as f64,
+        pkt.position_y as f64,
+        pkt.position_z as f64,
+    ))
+}
+
+/// Detect in-game rewinds in a recorded run (see [`scoring::RewindEvent`]). A rewind
+/// shows up as a telemetry gap (transmission stops) with a large BACKWARD position
+/// jump on resume; the resume's nearest earlier recorded point is the rewind target.
+/// Geometry-free (position track only — shares no state with the zone gates), so it
+/// runs identically at close, on recompute, and on the run-viewer path. Cheap: the
+/// O(n) nearest-point search runs only for the (typically ≤2) gaps that clear the
+/// jump threshold, never for ordinary pauses.
+pub fn detect_rewinds(packets: &[parser::TelemetryPacket]) -> Vec<scoring::RewindEvent> {
+    let mut out = Vec::new();
+    if packets.len() < 2 {
+        return out;
+    }
+    let pts: Vec<Option<(f64, f64, f64)>> = packets.iter().map(packet_point3).collect();
+    for i in 0..packets.len() - 1 {
+        let dt = packets[i + 1].timestamp_ms as i64 - packets[i].timestamp_ms as i64;
+        if dt < REWIND_GAP_MS {
+            continue;
+        }
+        let (Some(from), Some(resume)) = (pts[i], pts[i + 1]) else {
+            continue;
+        };
+        let jump = ((resume.0 - from.0).powi(2) + (resume.2 - from.2).powi(2)).sqrt();
+        if jump < REWIND_JUMP_M {
+            continue;
+        }
+        // Nearest earlier recorded point (full 3D) to the resume — the rewind target.
+        let mut best = f64::INFINITY;
+        let mut target = i;
+        for (j, p) in pts.iter().enumerate().take(i + 1) {
+            if let Some(p) = p {
+                let d = ((p.0 - resume.0).powi(2)
+                    + (p.1 - resume.1).powi(2)
+                    + (p.2 - resume.2).powi(2))
+                .sqrt();
+                if d < best {
+                    best = d;
+                    target = j;
+                }
+            }
+        }
+        out.push(scoring::RewindEvent {
+            gap_index: i,
+            resume_index: i + 1,
+            gap_ms: dt as u32,
+            jump_m: jump,
+            target_index: target,
+            resume_path_dist_m: best,
+            on_path: best <= REWIND_ON_PATH_M,
+        });
+    }
+    out
+}
+
+/// Mark `[start, end]` (inclusive) of `mask` as abandoned. A no-op if `start > end`.
+fn mark_range(mask: &mut [bool], start: usize, end_inclusive: usize) {
+    for m in mask.iter_mut().take(end_inclusive + 1).skip(start) {
+        *m = true;
+    }
+}
+
+/// First packet index after `resume` whose arrival crosses an end gate — the zone
+/// re-trigger after a rewind left the zone. `None` if the run never re-enters.
+fn reentry_index(
+    packets: &[parser::TelemetryPacket],
+    resume: usize,
+    gate_a: [Point; 2],
+    gate_b: [Point; 2],
+) -> Option<usize> {
+    let mut prev = packet_point(packets.get(resume)?);
+    for j in (resume + 1)..packets.len() {
+        let cur = packet_point(&packets[j]);
+        if let (Some(p), Some(c)) = (prev, cur) {
+            if segment_intersects(p, c, gate_a[0], gate_a[1])
+                || segment_intersects(p, c, gate_b[0], gate_b[1])
+            {
+                return Some(j);
+            }
+        }
+        if cur.is_some() {
+            prev = cur;
+        }
+    }
+    None
+}
+
+/// Per-packet "abandoned" mask for a rewound run — the replayed stretch the game
+/// discarded but the raw integral double-counts (`true` = drop from the corrected
+/// score). An IN-ZONE rewind drops the replayed forward attempt `(target, gap]`; a
+/// LEFT-ZONE rewind (rewound out of the zone → the game failed + re-triggered)
+/// drops everything up to the re-entry gate crossing after the resume. The
+/// left-zone case needs the end gates; without them (or if no re-entry is found) it
+/// falls back to the in-zone rule. Multiple rewinds union.
+pub fn rewind_abandoned_mask(
+    packets: &[parser::TelemetryPacket],
+    rewinds: &[scoring::RewindEvent],
+    gates: Option<([Point; 2], [Point; 2])>,
+) -> Vec<bool> {
+    let mut mask = vec![false; packets.len()];
+    if packets.is_empty() {
+        return mask;
+    }
+    let last = packets.len() - 1;
+    for rw in rewinds {
+        let forward = (rw.target_index + 1, rw.gap_index.min(last));
+        let (start, end) = if rw.on_path {
+            forward
+        } else if let Some((ga, gb)) = gates {
+            match reentry_index(packets, rw.resume_index, ga, gb) {
+                Some(j) => (0, j.saturating_sub(1)),
+                None => forward,
+            }
+        } else {
+            forward
+        };
+        mark_range(&mut mask, start, end);
+    }
+    mask
+}
+
+/// Score a run with any rewinds corrected: integrate only over the packets the game
+/// kept (abandoned stretches removed). Identical to [`scoring::score_run`] when
+/// `rewinds` is empty. The score paths detect rewinds and pass them here so the
+/// stored/displayed score matches the in-game score; the run stays flagged and is
+/// excluded from the fit regardless (correction is display-only).
+pub fn score_run_corrected(
+    packets: &[parser::TelemetryPacket],
+    rewinds: &[scoring::RewindEvent],
+    gates: Option<([Point; 2], [Point; 2])>,
+    params: &scoring::ScoringParams,
+) -> scoring::RunScore {
+    if rewinds.is_empty() {
+        return scoring::score_run(packets, params);
+    }
+    let mask = rewind_abandoned_mask(packets, rewinds, gates);
+    let kept: Vec<parser::TelemetryPacket> = packets
+        .iter()
+        .zip(&mask)
+        .filter(|(_, abandoned)| !**abandoned)
+        .map(|(p, _)| p.clone())
+        .collect();
+    scoring::score_run(&kept, params)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1023,6 +1201,146 @@ mod tests {
         p.tire_combined_slip_rl = 3.0;
         p.tire_combined_slip_rr = 3.0;
         p
+    }
+
+    /// A positioned packet at world (x, y, z) with an explicit game timestamp (ms),
+    /// for driving the rewind detector (which reads only position + timestamp).
+    fn pos_packet(x: f32, y: f32, z: f32, ms: u32) -> parser::TelemetryPacket {
+        let mut p = packet(x, z);
+        p.position_y = y;
+        p.timestamp_ms = ms;
+        p
+    }
+
+    // Forward drive: 11 packets 0→100 m along z at the 64 Hz tick (~16 ms apart).
+    fn forward_drive() -> Vec<parser::TelemetryPacket> {
+        (0..=10)
+            .map(|i| pos_packet(0.0, 0.0, i as f32 * 10.0, i as u32 * 16))
+            .collect()
+    }
+
+    #[test]
+    fn detect_rewinds_flags_backward_jump_across_gap() {
+        // After the drive, a 4 s gap (transmission stops) resumes back on the z=30 m
+        // point (index 3) — the in-zone rewind signature.
+        let mut pkts = forward_drive();
+        pkts.push(pos_packet(0.0, 0.0, 30.0, 10 * 16 + 4000));
+        let r = detect_rewinds(&pkts);
+        assert_eq!(r.len(), 1);
+        let e = &r[0];
+        assert_eq!(e.gap_index, 10);
+        assert_eq!(e.resume_index, 11);
+        assert_eq!(e.target_index, 3, "resume matches the z=30 m point");
+        assert_eq!(e.gap_ms, 4000);
+        assert!((e.jump_m - 70.0).abs() < 1e-6, "100→30 m backward jump");
+        assert!(e.on_path, "resume on an earlier point => in-zone rewind");
+        assert!(e.resume_path_dist_m < 1e-6);
+    }
+
+    #[test]
+    fn detect_rewinds_ignores_pause_in_place() {
+        // A gap of the same length, but the car resumes where it stopped (a pause /
+        // alt-tab): no backward jump, so it's not a rewind.
+        let mut pkts = forward_drive();
+        pkts.push(pos_packet(0.0, 0.0, 100.0, 10 * 16 + 4000));
+        assert!(detect_rewinds(&pkts).is_empty());
+    }
+
+    #[test]
+    fn detect_rewinds_ignores_clean_run() {
+        // Continuous 64 Hz streaming at ~32 m/s — no gap, so nothing to flag.
+        let pkts: Vec<_> = (0..200)
+            .map(|i| pos_packet(0.0, 0.0, i as f32 * 0.5, i as u32 * 16))
+            .collect();
+        assert!(detect_rewinds(&pkts).is_empty());
+    }
+
+    #[test]
+    fn detect_rewinds_classifies_offpath_resume() {
+        // Rewind out of the recorded path (like #671 out the start gate): the resume
+        // is far from every earlier point, so it's flagged but marked off-path.
+        let mut pkts = forward_drive();
+        pkts.push(pos_packet(500.0, 0.0, 500.0, 10 * 16 + 4000));
+        let r = detect_rewinds(&pkts);
+        assert_eq!(r.len(), 1);
+        assert!(!r[0].on_path, "resume far from the path => left the zone");
+        assert!(r[0].resume_path_dist_m > REWIND_ON_PATH_M);
+    }
+
+    #[test]
+    fn rewind_mask_inzone_marks_target_to_gap() {
+        let pkts = vec![packet(1.0, 1.0); 12];
+        let rw = scoring::RewindEvent {
+            gap_index: 8,
+            resume_index: 9,
+            gap_ms: 4000,
+            jump_m: 50.0,
+            target_index: 3,
+            resume_path_dist_m: 0.0,
+            on_path: true,
+        };
+        let mask = rewind_abandoned_mask(&pkts, &[rw], None);
+        for (i, &m) in mask.iter().enumerate() {
+            assert_eq!(m, (4..=8).contains(&i), "idx {i}");
+        }
+    }
+
+    #[test]
+    fn rewind_correction_drops_inzone_replayed_stretch() {
+        let params = scoring::ScoringParams::default();
+        // Forward drift: z = 5,15,…,95 (10 scoring pkts, idx 0..9), ~64 Hz.
+        let mut pkts: Vec<_> = (0..10)
+            .map(|i| drifting_packet(2.5, 5.0 + i as f32 * 10.0, i as u32 * 16))
+            .collect();
+        // Rewind: 4 s gap, resume back on the z=35 m point (idx 3); then re-drive.
+        pkts.push(drifting_packet(2.5, 35.0, 9 * 16 + 4000));
+        for k in 1..=4 {
+            pkts.push(drifting_packet(2.5, 35.0 + k as f32 * 10.0, 9 * 16 + 4000 + k as u32 * 16));
+        }
+        let rewinds = detect_rewinds(&pkts);
+        assert_eq!(rewinds.len(), 1);
+        assert!(rewinds[0].on_path && rewinds[0].target_index == 3 && rewinds[0].gap_index == 9);
+
+        let raw = scoring::score_run(&pkts, &params).score;
+        let corrected = score_run_corrected(&pkts, &rewinds, Some((GATE_A, GATE_B)), &params).score;
+        assert!(corrected < raw, "corrected {corrected} should be < raw {raw}");
+        // Equals scoring only the kept packets (drop the replayed (target,gap] = 4..=9).
+        let kept: Vec<_> = pkts
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !(4..=9).contains(i))
+            .map(|(_, p)| p.clone())
+            .collect();
+        let expect = scoring::score_run(&kept, &params).score;
+        assert!((corrected - expect).abs() < 1e-6, "corrected {corrected} vs kept {expect}");
+    }
+
+    #[test]
+    fn rewind_correction_leftzone_drops_failed_attempt() {
+        let params = scoring::ScoringParams::default();
+        // First attempt inside the zone (scoring): z = 5,15,…,95 at x=2.5 (idx 0..9).
+        let mut pkts: Vec<_> = (0..10)
+            .map(|i| drifting_packet(2.5, 5.0 + i as f32 * 10.0, i as u32 * 16))
+            .collect();
+        // Rewind OUT the start gate (z=0 line) to z=-50 (idx 10), 5 s gap.
+        pkts.push(drifting_packet(2.5, -50.0, 9 * 16 + 5000));
+        // Drive back, re-crossing gate A between z=-10 and z=+10 → re-trigger, then drift.
+        let base = 9 * 16 + 5000;
+        for (k, z) in [-30.0_f32, -10.0, 10.0, 20.0, 30.0].iter().enumerate() {
+            pkts.push(drifting_packet(2.5, *z, base + (k as u32 + 1) * 16));
+        }
+        let rewinds = detect_rewinds(&pkts);
+        assert_eq!(rewinds.len(), 1);
+        assert!(!rewinds[0].on_path, "rewound out of the zone");
+
+        // Re-entry crosses gate A at idx 13; everything before it is the failed attempt.
+        let mask = rewind_abandoned_mask(&pkts, &rewinds, Some((GATE_A, GATE_B)));
+        assert!(mask[..13].iter().all(|&m| m), "first attempt + drive-back abandoned");
+        assert!(mask[13..].iter().all(|&m| !m), "the re-drive is kept");
+
+        let raw = scoring::score_run(&pkts, &params).score;
+        let corrected = score_run_corrected(&pkts, &rewinds, Some((GATE_A, GATE_B)), &params).score;
+        assert!(corrected < raw && corrected > 0.0, "corrected {corrected} raw {raw}");
     }
 
     fn in_memory() -> Connection {

@@ -88,6 +88,15 @@
           <span class="rid mono">#{r.id}</span>
           <span class="rzone">{r.zoneId != null ? zoneName.get(r.zoneId) ?? '—' : '—'}</span>
           <span class="rseason" data-season={r.season}>{r.season[0].toUpperCase()}</span>
+          {#if r.scoreBreakdown?.rewinds?.length}
+            <span
+              class="rrewind"
+              title="{r.scoreBreakdown.rewinds.length} in-game rewind{r.scoreBreakdown.rewinds
+                .length === 1
+                ? ''
+                : 's'} detected — the score over-counts the replayed stretch; excluded from the fit"
+            >⟲</span>
+          {/if}
           {#if r.valid}
             <span class="rscore mono">{score(r)}</span>
           {:else}
@@ -182,6 +191,7 @@
   .rseason[data-season='spring'] { color: var(--ok); }
   .rseason[data-season='summer'] { color: var(--warn); }
   .rseason[data-season='autumn'] { color: var(--bad); }
+  .rrewind { font-size: 0.72rem; color: var(--warn); flex: none; line-height: 1; cursor: help; }
   .rscore { font-size: 0.7rem; color: var(--tx-mid); flex: none; }
   .rinvalid { font-size: 0.62rem; color: var(--bad); flex: none; }
   .empty { font-size: 0.72rem; color: var(--tx-dim); padding: 1rem 0.5rem; text-align: center; }
