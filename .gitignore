@@ -14,9 +14,12 @@ scripts/*
 !scripts/measure-map-content.mjs
 !scripts/check-curve.mjs
 !scripts/export_seed_zones.py
+!scripts/gen_scoring_diagrams.py
 docs/*
 # but track the public docs referenced from the README
 !docs/headless-server.md
+!docs/scoring.md
+!docs/known-issues.md
 !docs/img/
 .superpowers
 # Prebuilt headless-server binary artifacts (produced ad hoc by a local server build)

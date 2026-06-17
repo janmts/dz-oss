@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 360" width="860" height="360" role="img" aria-label="FH6 drift scoring pipeline">
+<title>FH6 drift scoring pipeline</title>
+<desc>Each telemetry packet flows through four stages: the packet, the per-moment rate (base rate times angle factor times speed factor), integration over time, and a final scale to in-game magnitude. A moment scores only while the car is drifting with at least two wheels on tarmac (winter only).</desc>
+<rect x="0.5" y="0.5" width="859" height="359" fill="#16171b" stroke="#222428" stroke-width="1" rx="8"/>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 1 L 9 5 L 0 9 z" fill="#d2a24c"/></marker></defs>
+<rect x="20" y="26" width="3" height="20" rx="1.5" fill="#d2a24c"/>
+<text x="32" y="36" font-family="'Inter Variable','Segoe UI',system-ui,sans-serif" font-size="17" fill="#f2f2f0" text-anchor="start" font-weight="650">Anatomy of a scored moment</text>
+<text x="32" y="56" font-family="'Inter Variable','Segoe UI',system-ui,sans-serif" font-size="12" fill="#8a8b85" text-anchor="start" font-weight="500">What happens to every telemetry packet, 64 times a second</text>
+<rect x="28" y="100" width="178.5" height="96" fill="#1e2024" stroke="#34373d" stroke-width="1" rx="4"/>
+<rect x="28" y="100" width="3.5" height="96" rx="1.5" fill="#44484f"/>
+<text x="44" y="124" font-family="'Inter Variable','Segoe UI',system-ui,sans-serif" font-size="11.5" fill="#f2f2f0" text-anchor="start" font-weight="650" letter-spacing="0.3">TELEMETRY PACKET</text>
+<text x="44" y="139" font-family="'Inter Variable','Segoe UI',system-ui,sans-serif" font-size="9.5" fill="#8a8b85" text-anchor="start" font-weight="500">every 1/64 s</text>
+<text x="44" y="158" font-family="'Inter Variable','Segoe UI',system-ui,sans-serif" font-size="10" fill="#aaaaa5" text-anchor="start" font-weight="500">position · velocity</text>
+<text x="44" y="171.5" font-family="'Inter Variable','Segoe UI',system-ui,sans-serif" font-size="10" fill="#aaaaa5" text-anchor="start" font-weight="500">slip · surface</text>
+<path d="M 212.5,148 L 230.5,148" stroke="#d2a24c" stroke-width="1.6" marker-end="url(#arrow)"/>
+<rect x="236.5" y="100" width="178.5" height="96" fill="#1e2024" stroke="#34373d" stroke-width="1" rx="4"/>
+<rect x="236.5" y="100" width="3.5" height="96" rx="1.5" fill="#84b577"/>
+<text x="252.5" y="124" font-family="'Inter Variable','Segoe UI',system-ui,sans-serif" font-size="11.5" fill="#f2f2f0" text-anchor="start" font-weight="650" letter-spacing="0.3">PER-MOMENT RATE</text>
+<text x="252.5" y="139" font-family="'Inter Variable','Segoe UI',system-ui,sans-serif" font-size="9.5" fill="#8a8b85" text-anchor="start" font-weight="500">points / second</text>
+<text x="252.5" y="158" font-family="'JetBrains Mono','JetBrains Mono Variable','Cascadia Mono',Consolas,monospace" font-size="10.5" fill="#84b577" text-anchor="start" font-weight="600">base_rate</text>
+<text x="252.5" y="171.5" font-family="'JetBrains Mono','JetBrains Mono Variable','Cascadia Mono',Consolas,monospace" font-size="10.5" fill="#aaaaa5" text-anchor="start" font-weight="500">× angle_factor</text>
+<text x="252.5" y="185" font-family="'JetBrains Mono','JetBrains Mono Variable','Cascadia Mono',Consolas,monospace" font-size="10.5" fill="#aaaaa5" text-anchor="start" font-weight="500">× speed_factor</text>
+<path d="M 421,148 L 439,148" stroke="#d2a24c" stroke-width="1.6" marker-end="url(#arrow)"/>
+<rect x="445" y="100" width="178.5" height="96" fill="#1e2024" stroke="#34373d" stroke-width="1" rx="4"/>
+<rect x="445" y="100" width="3.5" height="96" rx="1.5" fill="#44484f"/>
+<text x="461" y="124" font-family="'Inter Variable','Segoe UI',system-ui,sans-serif" font-size="11.5" fill="#f2f2f0" text-anchor="start" font-weight="650" letter-spacing="0.3">INTEGRATE</text>
+<text x="461" y="139" font-family="'Inter Variable','Segoe UI',system-ui,sans-serif" font-size="9.5" fill="#8a8b85" text-anchor="start" font-weight="500">over the run</text>
+<text x="461" y="158" font-family="'JetBrains Mono','JetBrains Mono Variable','Cascadia Mono',Consolas,monospace" font-size="10.5" fill="#d7d7d3" text-anchor="start" font-weight="600">× dt</text>
+<text x="461" y="171.5" font-family="'JetBrains Mono','JetBrains Mono Variable','Cascadia Mono',Consolas,monospace" font-size="10.5" fill="#aaaaa5" text-anchor="start" font-weight="500">sum every</text>
+<text x="461" y="185" font-family="'JetBrains Mono','JetBrains Mono Variable','Cascadia Mono',Consolas,monospace" font-size="10.5" fill="#aaaaa5" text-anchor="start" font-weight="500">scoring moment</text>
+<path d="M 629.5,148 L 647.5,148" stroke="#d2a24c" stroke-width="1.6" marker-end="url(#arrow)"/>
+<rect x="653.5" y="100" width="178.5" height="96" fill="#1e2024" stroke="#34373d" stroke-width="1" rx="4"/>
+<rect x="653.5" y="100" width="3.5" height="96" rx="1.5" fill="#d2a24c"/>
+<text x="669.5" y="124" font-family="'Inter Variable','Segoe UI',system-ui,sans-serif" font-size="11.5" fill="#f2f2f0" text-anchor="start" font-weight="650" letter-spacing="0.3">SCALE → SCORE</text>
+<text x="669.5" y="139" font-family="'Inter Variable','Segoe UI',system-ui,sans-serif" font-size="9.5" fill="#8a8b85" text-anchor="start" font-weight="500">one calibration</text>
+<text x="669.5" y="158" font-family="'JetBrains Mono','JetBrains Mono Variable','Cascadia Mono',Consolas,monospace" font-size="10.5" fill="#ecc274" text-anchor="start" font-weight="600">raw × 10.716</text>
+<text x="669.5" y="171.5" font-family="'JetBrains Mono','JetBrains Mono Variable','Cascadia Mono',Consolas,monospace" font-size="10.5" fill="#aaaaa5" text-anchor="start" font-weight="500">= in-game</text>
+<text x="669.5" y="185" font-family="'JetBrains Mono','JetBrains Mono Variable','Cascadia Mono',Consolas,monospace" font-size="10.5" fill="#aaaaa5" text-anchor="start" font-weight="500">magnitude</text>
+<rect x="28" y="212" width="804" height="40" rx="4" fill="#0f1012" stroke="#222428" stroke-width="1"/>
+<text x="44" y="231" font-family="'Inter Variable','Segoe UI',system-ui,sans-serif" font-size="11" fill="#d7d7d3" text-anchor="start" font-weight="600">A moment scores only while drifting:</text>
+<text x="44" y="246" font-family="'JetBrains Mono','JetBrains Mono Variable','Cascadia Mono',Consolas,monospace" font-size="10.5" fill="#84b577" text-anchor="start" font-weight="550">speed ≥ 1.5 m/s   ·   angle 10°–120°   ·   rear slip ≥ 1.0   ·   ≥ 2 wheels on tarmac †</text>
+<text x="816" y="246" font-family="'Inter Variable','Segoe UI',system-ui,sans-serif" font-size="9.5" fill="#8a8b85" text-anchor="end" font-weight="550">† winter only</text>
+<text x="44" y="282" font-family="'Inter Variable','Segoe UI',system-ui,sans-serif" font-size="10" fill="#8a8b85" text-anchor="start" font-weight="650" letter-spacing="1.2">Example</text>
+<text x="108" y="282" font-family="'JetBrains Mono','JetBrains Mono Variable','Cascadia Mono',Consolas,monospace" font-size="11" fill="#aaaaa5" text-anchor="start" font-weight="500">30° at 25 m/s on tarmac →  1000 × 0.94 × 0.42 ≈ 392 pts/s  →  × dt  →  × 10.716</text>
+</svg>
