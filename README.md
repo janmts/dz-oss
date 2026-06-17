@@ -8,14 +8,14 @@
 game's own drift-zone scoring live from the UDP feed — plus a full gauge cluster, a
 recorded-run analyser, and automatic session recording. Desktop app (Tauri + Svelte)
 for Windows; an optional headless server hosts the same dashboard cross-platform.
-[**Download the latest installer**](https://github.com/janmts/dz-oss/releases/latest), or
+[**Download the latest precompiled binary**](https://github.com/janmts/dz-oss/releases/latest), or
 [build from source](#running-from-source).
 
 ![The DZ-OSS Drift workbench — live signed drift-angle gauge, the zone map with the driven line, and computed-vs-actual scoring](docs/img/drift.png)
 
 ## Drift Workbench
 
-The headline feature. DZ-OSS ships with the festival's drift zones already mapped, so
+The headline feature. DZ-OSS ships with the festival's tarmac drift zones already mapped, so
 the moment you install it you can drive a zone, have the app detect the run, estimate
 its score live from the telemetry, and keep a per-zone history to check against the
 game's actual number.
@@ -28,7 +28,6 @@ and its known limits.
   touches zones you've made yourself). Map your own in the **Zones** editor: smooth
   curved or straight boundaries, two end gates, and optional split sectors and height
   bands for multi-level loop courses.
-- **Bidirectional runs** — enter through either gate, finish through the other.
 - **Live scoring** — a signed drift-angle needle, speed, and a flip counter while you
   slide, then a score the moment the run ends. Scoring is **season-aware** (FH6 credits
   off-road drift differently across the weekly festival seasons) and runs on every
@@ -104,8 +103,7 @@ npm run tauri build    # production installer (output under src-tauri/target/rel
 ```
 
 The desktop app targets Windows, since Forza Horizon 6 is Windows/Xbox only. To run
-DZ-OSS on Linux or macOS, build the headless server instead — see
-[docs/headless-server.md](docs/headless-server.md).
+DZ-OSS on Linux or macOS, build it from source as seen above.
 
 ## Status & Known Limitations
 
