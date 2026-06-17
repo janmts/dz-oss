@@ -64,9 +64,9 @@ project.
 - **The desktop app is Windows-only.** Forza Horizon 6 is Windows/Xbox only, so the
   telemetry originates there. Linux and macOS users can run the cross-platform
   [headless server](headless-server.md) instead.
-- **No prebuilt installer yet.** Until the first tagged release, build from source — see
-  the [README](../README.md#running-from-source) and the
-  [headless-server guide](headless-server.md).
+- **Prebuilt installers are Windows-only.** Download the `.exe` from the
+  [Releases](https://github.com/janmts/dz-oss/releases/latest) page. There are no prebuilt
+  Linux/macOS or headless-server binaries — [build those from source](../README.md#running-from-source).
 
 ---
 
