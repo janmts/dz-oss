@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 392" width="760" height="392" role="img" aria-label="FH6 drift-zone speed factor curve">
+<title>FH6 drift-zone speed factor curve</title>
+<desc>Speed factor vs speed: zero below 1.5 m/s, then a straight line rising to 1.0 at the 60 m/s (about 134 mph) cap, flat beyond.</desc>
+<rect x="0.5" y="0.5" width="759" height="391" fill="#16171b" stroke="#222428" stroke-width="1" rx="8"/>
+<rect x="20" y="26" width="3" height="20" rx="1.5" fill="#d2a24c"/>
+<text x="32" y="36" font-family="'Inter Variable','Segoe UI',system-ui,sans-serif" font-size="17" fill="#f2f2f0" text-anchor="start" font-weight="650">The speed curve</text>
+<text x="32" y="56" font-family="'Inter Variable','Segoe UI',system-ui,sans-serif" font-size="12" fill="#8a8b85" text-anchor="start" font-weight="500">A straight line · speed_factor(speed) = min(speed, 60) / 60</text>
+<rect x="66" y="92" width="660" height="220" fill="#0f1012" stroke="#222428" stroke-width="1" rx="3"/>
+<line x1="66" y1="312" x2="726" y2="312" stroke="#2a2c31" stroke-width="1" stroke-linecap="butt" opacity="0.7"/>
+<text x="56" y="315.5" font-family="'JetBrains Mono','JetBrains Mono Variable','Cascadia Mono',Consolas,monospace" font-size="10.5" fill="#61625e" text-anchor="end" font-weight="550">0.00</text>
+<line x1="66" y1="262" x2="726" y2="262" stroke="#2a2c31" stroke-width="1" stroke-linecap="butt" opacity="0.7"/>
+<text x="56" y="265.5" font-family="'JetBrains Mono','JetBrains Mono Variable','Cascadia Mono',Consolas,monospace" font-size="10.5" fill="#61625e" text-anchor="end" font-weight="550">0.25</text>
+<line x1="66" y1="212" x2="726" y2="212" stroke="#2a2c31" stroke-width="1" stroke-linecap="butt" opacity="0.7"/>
+<text x="56" y="215.5" font-family="'JetBrains Mono','JetBrains Mono Variable','Cascadia Mono',Consolas,monospace" font-size="10.5" fill="#61625e" text-anchor="end" font-weight="550">0.50</text>
+<line x1="66" y1="162" x2="726" y2="162" stroke="#2a2c31" stroke-width="1" stroke-linecap="butt" opacity="0.7"/>
+<text x="56" y="165.5" font-family="'JetBrains Mono','JetBrains Mono Variable','Cascadia Mono',Consolas,monospace" font-size="10.5" fill="#61625e" text-anchor="end" font-weight="550">0.75</text>
+<line x1="66" y1="112" x2="726" y2="112" stroke="#2a2c31" stroke-width="1" stroke-linecap="butt" opacity="0.7"/>
+<text x="56" y="115.5" font-family="'JetBrains Mono','JetBrains Mono Variable','Cascadia Mono',Consolas,monospace" font-size="10.5" fill="#61625e" text-anchor="end" font-weight="550">1.00</text>
+<text x="66" y="330" font-family="'JetBrains Mono','JetBrains Mono Variable','Cascadia Mono',Consolas,monospace" font-size="10.5" fill="#61625e" text-anchor="middle" font-weight="550">0</text>
+<text x="66" y="343" font-family="'JetBrains Mono','JetBrains Mono Variable','Cascadia Mono',Consolas,monospace" font-size="9" fill="#61625e" text-anchor="middle" font-weight="550" opacity="0.75">0</text>
+<line x1="148.5" y1="92" x2="148.5" y2="312" stroke="#2a2c31" stroke-width="1" stroke-linecap="butt" opacity="0.55"/>
+<text x="148.5" y="330" font-family="'JetBrains Mono','JetBrains Mono Variable','Cascadia Mono',Consolas,monospace" font-size="10.5" fill="#61625e" text-anchor="middle" font-weight="550">10</text>
+<text x="148.5" y="343" font-family="'JetBrains Mono','JetBrains Mono Variable','Cascadia Mono',Consolas,monospace" font-size="9" fill="#61625e" text-anchor="middle" font-weight="550" opacity="0.75">22</text>
+<line x1="231" y1="92" x2="231" y2="312" stroke="#2a2c31" stroke-width="1" stroke-linecap="butt" opacity="0.55"/>
+<text x="231" y="330" font-family="'JetBrains Mono','JetBrains Mono Variable','Cascadia Mono',Consolas,monospace" font-size="10.5" fill="#61625e" text-anchor="middle" font-weight="550">20</text>
+<text x="231" y="343" font-family="'JetBrains Mono','JetBrains Mono Variable','Cascadia Mono',Consolas,monospace" font-size="9" fill="#61625e" text-anchor="middle" font-weight="550" opacity="0.75">45</text>
+<line x1="313.5" y1="92" x2="313.5" y2="312" stroke="#2a2c31" stroke-width="1" stroke-linecap="butt" opacity="0.55"/>
+<text x="313.5" y="330" font-family="'JetBrains Mono','JetBrains Mono Variable','Cascadia Mono',Consolas,monospace" font-size="10.5" fill="#61625e" text-anchor="middle" font-weight="550">30</text>
+<text x="313.5" y="343" font-family="'JetBrains Mono','JetBrains Mono Variable','Cascadia Mono',Consolas,monospace" font-size="9" fill="#61625e" text-anchor="middle" font-weight="550" opacity="0.75">67</text>
+<line x1="396" y1="92" x2="396" y2="312" stroke="#2a2c31" stroke-width="1" stroke-linecap="butt" opacity="0.55"/>
+<text x="396" y="330" font-family="'JetBrains Mono','JetBrains Mono Variable','Cascadia Mono',Consolas,monospace" font-size="10.5" fill="#61625e" text-anchor="middle" font-weight="550">40</text>
+<text x="396" y="343" font-family="'JetBrains Mono','JetBrains Mono Variable','Cascadia Mono',Consolas,monospace" font-size="9" fill="#61625e" text-anchor="middle" font-weight="550" opacity="0.75">89</text>
+<line x1="478.5" y1="92" x2="478.5" y2="312" stroke="#2a2c31" stroke-width="1" stroke-linecap="butt" opacity="0.55"/>
+<text x="478.5" y="330" font-family="'JetBrains Mono','JetBrains Mono Variable','Cascadia Mono',Consolas,monospace" font-size="10.5" fill="#61625e" text-anchor="middle" font-weight="550">50</text>
+<text x="478.5" y="343" font-family="'JetBrains Mono','JetBrains Mono Variable','Cascadia Mono',Consolas,monospace" font-size="9" fill="#61625e" text-anchor="middle" font-weight="550" opacity="0.75">112</text>
+<line x1="561" y1="92" x2="561" y2="312" stroke="#2a2c31" stroke-width="1" stroke-linecap="butt" opacity="0.55"/>
+<text x="561" y="330" font-family="'JetBrains Mono','JetBrains Mono Variable','Cascadia Mono',Consolas,monospace" font-size="10.5" fill="#61625e" text-anchor="middle" font-weight="550">60</text>
+<text x="561" y="343" font-family="'JetBrains Mono','JetBrains Mono Variable','Cascadia Mono',Consolas,monospace" font-size="9" fill="#61625e" text-anchor="middle" font-weight="550" opacity="0.75">134</text>
+<line x1="643.5" y1="92" x2="643.5" y2="312" stroke="#2a2c31" stroke-width="1" stroke-linecap="butt" opacity="0.55"/>
+<text x="643.5" y="330" font-family="'JetBrains Mono','JetBrains Mono Variable','Cascadia Mono',Consolas,monospace" font-size="10.5" fill="#61625e" text-anchor="middle" font-weight="550">70</text>
+<text x="643.5" y="343" font-family="'JetBrains Mono','JetBrains Mono Variable','Cascadia Mono',Consolas,monospace" font-size="9" fill="#61625e" text-anchor="middle" font-weight="550" opacity="0.75">157</text>
+<line x1="726" y1="92" x2="726" y2="312" stroke="#2a2c31" stroke-width="1" stroke-linecap="butt" opacity="0.55"/>
+<text x="726" y="330" font-family="'JetBrains Mono','JetBrains Mono Variable','Cascadia Mono',Consolas,monospace" font-size="10.5" fill="#61625e" text-anchor="middle" font-weight="550">80</text>
+<text x="726" y="343" font-family="'JetBrains Mono','JetBrains Mono Variable','Cascadia Mono',Consolas,monospace" font-size="9" fill="#61625e" text-anchor="middle" font-weight="550" opacity="0.75">179</text>
+<line x1="561" y1="92" x2="561" y2="312" stroke="#d2a24c" stroke-width="1" stroke-linecap="butt" stroke-dasharray="3 4" opacity="0.7"/>
+<path d="M 78.38,312 L 78.38,307 L 561,112 L 726,112 L 726,312 L 78.38,312 Z" fill="#84b577" opacity="0.1"/>
+<polyline points="66,312 78.38,312 78.38,307 561,112 726,112" fill="none" stroke="#84b577" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="561" cy="112" r="3.6" fill="#d2a24c" stroke="#0f1012" stroke-width="1.5"/>
+<circle cx="78.38" cy="312" r="3.2" fill="#d56c62" stroke="#0f1012" stroke-width="1.5"/>
+<text x="88.38" y="290" font-family="'Inter Variable','Segoe UI',system-ui,sans-serif" font-size="10.5" fill="#d56c62" text-anchor="start" font-weight="600">1.5 m/s floor</text>
+<text x="88.38" y="303" font-family="'Inter Variable','Segoe UI',system-ui,sans-serif" font-size="9.5" fill="#61625e" text-anchor="start" font-weight="550">(nothing scores below)</text>
+<text x="553" y="100" font-family="'Inter Variable','Segoe UI',system-ui,sans-serif" font-size="11" fill="#ecc274" text-anchor="end" font-weight="600">saturates at 60 m/s</text>
+<text x="553" y="114" font-family="'Inter Variable','Segoe UI',system-ui,sans-serif" font-size="9.5" fill="#8a8b85" text-anchor="end" font-weight="550">(~134 mph) — more speed, no more credit</text>
+<text x="297" y="208.67" font-family="'Inter Variable','Segoe UI',system-ui,sans-serif" font-size="10.5" fill="#aaaaa5" text-anchor="middle" font-weight="550">linear: twice the speed, twice the rate</text>
+<text x="396" y="361" font-family="'Inter Variable','Segoe UI',system-ui,sans-serif" font-size="10" fill="#8a8b85" text-anchor="middle" font-weight="600" letter-spacing="1.2">SPEED  —  M/S (TOP)  ·  MPH (BELOW)</text>
+<text x="22" y="202" font-family="'Inter Variable','Segoe UI',system-ui,sans-serif" font-size="10" fill="#8a8b85" text-anchor="middle" font-weight="600" letter-spacing="1.4" transform="rotate(-90 22 202)">SPEED FACTOR</text>
+</svg>

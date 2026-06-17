@@ -8,7 +8,7 @@ There are no prebuilt downloads. Build it from source as below.
 
 ## Build from source
 
-Prerequisites: Rust 1.75+ and Node.js 18+.
+Prerequisites: a stable Rust toolchain and Node.js 24 (current LTS).
 
 The server binary embeds the compiled frontend, so build the frontend first, then the binary with the `server` feature:
 
