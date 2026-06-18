@@ -96,6 +96,11 @@ pub fn get_drift_run_status(state: State<'_, Arc<AppState>>) -> crate::drift::Dr
 }
 
 #[tauri::command]
+pub fn abort_drift_run(state: State<'_, Arc<AppState>>) -> crate::drift::DriftRunStatus {
+    api::abort_drift_run(&state)
+}
+
+#[tauri::command]
 pub fn get_drift_zones(state: State<'_, Arc<AppState>>) -> Result<Vec<db::DriftZoneRow>, String> {
     api::list_drift_zones(&state)
 }

@@ -105,6 +105,7 @@ pub fn run() {
             commands::delete_drift_run,
             commands::delete_invalid_drift_runs,
             commands::get_drift_run_status,
+            commands::abort_drift_run,
             commands::get_drift_zones,
             commands::save_drift_zone,
             commands::delete_drift_zone,

@@ -103,6 +103,10 @@ pub async fn drift_run_status(State(s): State<ServerState>) -> Json<crate::drift
     Json(api::drift_run_status(&s.app))
 }
 
+pub async fn abort_drift_run(State(s): State<ServerState>) -> Json<crate::drift::DriftRunStatus> {
+    Json(api::abort_drift_run(&s.app))
+}
+
 pub async fn recompute_drift_scores(State(s): State<ServerState>) -> Result<Json<usize>, JsonErr> {
     api::recompute_drift_scores(&s.app).map(Json).map_err(err)
 }

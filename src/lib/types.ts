@@ -239,10 +239,13 @@ export interface DriftRunStatus {
   endedAt: number | null;
   packetCount: number;
   invalidReason: string | null;
-  /** Latest packet is earning points (drifting with a tyre on tarmac). */
+  /** Latest packet is earning points (drifting with a tyre on tarmac). A live
+   *  banking instrument only — it no longer gates validity (the kill is
+   *  forward-progress / out-of-bounds, not scoring). */
   scoring: boolean;
-  /** Seconds left before score-starvation aborts the run; null when scoring,
-   *  idle/closed, or the starvation timer is disabled. */
+  /** Seconds left before the forward-progress stall aborts the run, while it is
+   *  not advancing; null when advancing, idle/closed, or the kill is disabled.
+   *  The live "death timer". (Field name kept from the old score-starvation timer.) */
   starveRemainingS: number | null;
   /** Live signed drift angle (°) of the latest packet; null when idle/closed. */
   angleDeg: number | null;
@@ -298,7 +301,9 @@ export interface AppSettings {
   mapDefaultZoom: number;
   mapDefaultCenter: [number, number];
   tiresVisible: boolean;
-  /** Seconds a drift run may go without scoring before it aborts. 0 disables. */
+  /** Run auto-fail on/off: >0 enables the measured forward-progress / out-of-bounds
+   *  kill, 0 disables it (run ends only at the finish gate or a manual abort). The
+   *  fail timing is per-zone, not this value. (Name kept for settings-file compat.) */
   driftStarveTimeoutS: number;
   /** Seconds of pre-run telemetry stored as each run's approach trail. 0 disables. */
   driftPrerollS: number;

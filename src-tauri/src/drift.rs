@@ -6,12 +6,58 @@ use serde::Serialize;
 use crate::{db, parser, scoring};
 
 /// Inter-arrival gap (wall-clock ms) above which a run treats the elapsed time
-/// as a telemetry stall — a pause, alt-tab, menu, or UDP stall — rather than
-/// genuine in-game non-scoring time. Telemetry is a fixed ~64 Hz tick
-/// (~15.6 ms between packets), and even a long burst of UDP loss stays well
-/// under this, so anything larger is a delivery stop, not the car failing to
-/// score. Such time is excluded from the starvation timer (see `note_packet`).
+/// as a telemetry stall — a pause, alt-tab, menu, rewind, or UDP stall — rather
+/// than genuine in-game time. Telemetry is a fixed ~64 Hz tick (~15.6 ms between
+/// packets), and even a long burst of UDP loss stays well under this, so anything
+/// larger is a delivery stop, not the car standing still in-game. Such frozen time
+/// is excluded from the forward-progress stall timer (see `note_packet`).
 const STALL_GAP_MS: i64 = 500;
+
+/// Forward-progress floor (m/s). Sustained progress below this — `speed ×
+/// cos(travel-vs-route)`, see [`forward_progress`] — is a stall (idle, crawl, or
+/// travelling the wrong way). ≈5 km/h: run #707 bracketed it to (4, 6] km/h (a
+/// 6 km/h coast survived, braking to 3 km/h killed); #706 at 4 km/h killed.
+/// Per-zone override `progressFloorMps`.
+const PROGRESS_FLOOR_MPS: f64 = 1.4;
+
+/// Sustained sub-floor progress (ms) that trips the in-zone stall kill. Clean idle
+/// runs all died at exactly 3.0 s (wrong-way slightly faster, ~2.5–2.7 s; one timer
+/// covers both). Frozen telemetry time (gaps > [`STALL_GAP_MS`]) is excluded.
+/// Per-zone override `progressStallS` (seconds).
+const PROGRESS_STALL_MS: i64 = 3000;
+
+/// Out-of-bounds slack (m past the flags polygon) that trips the spatial kill —
+/// distance-gated, NOT a timer (a position test, so leave-and-return within it is
+/// free). Measured roughly uniform across corners: n=9 exits at 7–34 m/s all died
+/// at a constant ~44–46 m past the original corner, ~39–41 m at a second corner.
+/// Per-zone override `oobSlackM`. This is the membership inflation of the flags —
+/// the same [`within_slack`] primitive as the old 3 m boundary slack, just fatter.
+const OOB_SLACK_M: f64 = 45.0;
+
+/// Centerline resolution: both boundaries are arc-resampled to this many points and
+/// averaged index-wise to form the route reference (mirrors `centerline(n=80)` in
+/// `scripts/drift_kill.py`).
+const CENTERLINE_POINTS: usize = 80;
+
+/// Half-length (m) of the chord used to read the route-forward tangent at the car's
+/// tracked arc position (mirrors the ±8 m chord in `drift_kill.py`).
+const ROUTE_TANGENT_CHORD_M: f64 = 8.0;
+
+/// Local arc window (± m) the car is re-projected onto the centerline within, once
+/// tracking has started — so a hairpin's far leg, distant in arc, can't steal the
+/// projection and flip the route 180° (the nearest-segment leg-flip). The first
+/// projection searches the whole centerline. Mirrors the 60 m window in `drift_kill.py`.
+const ARC_TRACK_WINDOW_M: f64 = 60.0;
+
+/// Minimum displacement (m) between two recorded positions for a reliable world
+/// travel bearing. Below it the car is treated as ~stationary (no bearing → progress
+/// 0 → stall accrues). Mirrors `TRAVEL_MIN_DISP` in `drift_kill.py`.
+const TRAVEL_MIN_DISP_M: f64 = 0.5;
+
+/// Maximum look-back (recorded positions, ~0.75 s at 64 Hz) when searching for the
+/// travel-bearing reference. Mirrors `TRAVEL_LOOKBACK` in `drift_kill.py`; also caps
+/// the per-run recent-position ring.
+const TRAVEL_LOOKBACK: usize = 48;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Point {
@@ -37,13 +83,19 @@ struct RunnableZone {
     // so the zone is bidirectional — neither is intrinsically start nor finish.
     gate_a: [Point; 2],
     gate_b: [Point; 2],
-    /// Metres a point may stray outside the polygon and still count as inside.
-    /// Retained (and still parsed from the zone config) but no longer gates run
-    /// validity: FH6's real fail condition is score-starvation, not a spatial
-    /// boundary, so [`DriftRunManager::note_packet`] aborts on the starvation
-    /// timer instead. Kept for the `within_slack` helper / possible future use.
-    #[allow(dead_code)]
-    slack_m: f64,
+    /// Corridor mid-line (the route reference the forward-progress kill measures
+    /// travel against). Built once from the raw boundaries — see [`Centerline`].
+    centerline: Centerline,
+    /// Metres a point may stray past the flags polygon before the out-of-bounds
+    /// kill fires (`oobSlackM`, default [`OOB_SLACK_M`]). A position test via
+    /// [`within_slack`], so re-entering within it keeps the run alive.
+    oob_slack_m: f64,
+    /// Forward progress (m/s) at/above which the run is advancing; sustained below
+    /// it is a stall (`progressFloorMps`, default [`PROGRESS_FLOOR_MPS`]).
+    progress_floor_mps: f64,
+    /// Sustained sub-floor progress (ms) that trips the stall kill (`progressStallS`
+    /// seconds, default [`PROGRESS_STALL_MS`]). 0 disables the stall kill.
+    progress_stall_ms: i64,
     params: scoring::ScoringParams,
 }
 
@@ -55,13 +107,27 @@ struct ActiveRun {
     finish_gate: [Point; 2],
     started_at: i64,
     packet_count: i64,
-    /// Wall-clock ms of the last packet that earned points. The run aborts if
-    /// this falls more than the configured starvation timeout behind `now`.
-    last_score_ms: i64,
-    /// Wall-clock ms of the previous packet seen during this run (scoring or
-    /// not). Drives stall detection: telemetry is a fixed ~64 Hz tick, so a gap
-    /// far larger than that means delivery stopped — a pause, alt-tab, menu, or
-    /// UDP stall — frozen time that must not count toward starvation.
+    /// Whether the run entered through gate A (vs gate B) — orients the centerline
+    /// arc/route-forward toward the finish gate. Set once at run start.
+    entry_is_a: bool,
+    /// Tracked arc-length position (m) of the car along the zone centerline,
+    /// monotonically projected within a local window so a hairpin can't leg-flip it.
+    arc: f64,
+    /// Whether the first (whole-centerline) arc projection has been done; after it,
+    /// projection uses the local [`ARC_TRACK_WINDOW_M`] window.
+    arc_started: bool,
+    /// Recent in-run positions (newest last), capped at [`TRAVEL_LOOKBACK`]. The
+    /// world travel bearing is read from the most recent point ≥ [`TRAVEL_MIN_DISP_M`]
+    /// back, so progress survives the ~64 Hz jitter of a near-stationary car.
+    recent: VecDeque<Point>,
+    /// Wall-clock ms of the last packet whose forward progress reached the floor.
+    /// The stall kill fires when this falls more than `progress_stall_ms` behind
+    /// `now`; frozen telemetry gaps roll it forward (paused time ≠ stalled progress).
+    last_progress_ok_ms: i64,
+    /// Wall-clock ms of the previous packet seen during this run. Drives the
+    /// gap-exclusion: telemetry is a fixed ~64 Hz tick, so a gap far larger than
+    /// that means delivery stopped — a pause, alt-tab, menu, rewind, or UDP stall —
+    /// frozen time that must not count toward the stall.
     last_packet_ms: i64,
     /// Drift-direction sign (+1/−1) latched at the last scoring packet; 0 until
     /// the run first scores. Drives the live flip counter.
@@ -84,11 +150,12 @@ pub struct DriftRunStatus {
     pub packet_count: i64,
     pub invalid_reason: Option<String>,
     /// Whether the latest packet is currently earning points (drifting with a
-    /// tyre on tarmac). False while the "death timer" is counting down.
+    /// tyre on tarmac). A live banking instrument only — it no longer gates run
+    /// validity (the kill is forward-progress / out-of-bounds, not scoring).
     pub scoring: bool,
-    /// Seconds left before the run aborts from score starvation, while running
-    /// and not currently scoring. `None` when scoring, idle, closed, or when the
-    /// starvation timer is disabled.
+    /// Seconds left before the forward-progress stall aborts the run, while it is
+    /// not advancing (progress below the floor). `None` when advancing, idle,
+    /// closed, or when the kill is disabled — i.e. the live "death timer".
     pub starve_remaining_s: Option<f64>,
     /// Live signed drift angle (°) of the latest packet — positive one way,
     /// negative the other. `None` when idle or closed.
@@ -135,7 +202,10 @@ impl DriftRunStatus {
             packet_count: run.packet_count,
             invalid_reason: None,
             scoring,
-            starve_remaining_s: if scoring { None } else { starve_remaining_s },
+            // The caller supplies this only while the stall timer is counting
+            // (not advancing); pass it through untouched — a run can advance
+            // without scoring, and that is no longer a death-timer state.
+            starve_remaining_s,
             angle_deg: Some(scoring::drift_angle_signed_deg(pkt)),
             speed_ms: Some(pkt.speed_ms as f64),
             direction_flips: Some(run.direction_flips),
@@ -191,13 +261,40 @@ impl DriftRunManager {
         self.last_status.clone()
     }
 
+    /// End the active run immediately as INVALID, scoring whatever packets were
+    /// recorded so far. Backs the manual "abort run" control: when the game has
+    /// already failed a zone there's no reason to wait out the score-starvation
+    /// timer, and it's the explicit stop for continuous-recording measurement
+    /// runs (where the starvation timeout is turned off so the record spans the
+    /// game's true end). Returns the closed status, or `None` if nothing was
+    /// active. Mirrors the starvation-close branch in [`Self::note_packet`].
+    pub fn abort_active(&mut self, conn: &Connection, now_ms: i64) -> Option<DriftRunStatus> {
+        let run = self.active.take()?;
+        let reason = "aborted".to_string();
+        let (score, breakdown) = score_from_packets(conn, run.id, &run.zone);
+        let status = DriftRunStatus::closed(&run, now_ms, false, Some(reason.clone()));
+        if let Err(e) = db::close_drift_run(conn, run.id, now_ms, false, Some(&reason), score) {
+            eprintln!("[drift] abort close error: {e}");
+        }
+        if let Err(e) = db::update_drift_run_score(conn, run.id, score, breakdown.as_deref()) {
+            eprintln!("[drift] abort score store error: {e}");
+        }
+        self.last_status = status.clone();
+        Some(status)
+    }
+
+    /// `kill_enabled` runs the forward-progress / out-of-bounds kill (the normal
+    /// mode); `false` is measurement mode — the run is only ever closed by the
+    /// finish gate or a manual [`Self::abort_active`], so a recording can span the
+    /// game's true end. The kill *timing* is per-zone (`progressStallS`/`oobSlackM`),
+    /// not this flag.
     pub fn note_packet(
         &mut self,
         conn: &Connection,
         pkt: &parser::TelemetryPacket,
         raw: &[u8],
         now_ms: i64,
-        starve_timeout_s: f64,
+        kill_enabled: bool,
         preroll_s: f64,
     ) -> Option<DriftRunStatus> {
         let current = packet_point(pkt)?;
@@ -235,51 +332,89 @@ impl DriftRunManager {
                 run.packet_count += 1;
             }
 
-            // Exclude paused/stalled wall-clock time from the starvation timer.
-            // While the game is paused (or alt-tabbed, in a menu, or briefly
-            // UDP-stalled) NO packets arrive, yet the wall clock keeps running.
-            // The first packet after the stall would otherwise see the entire
-            // gap as non-scoring time and abort instantly on resume. A gap far
-            // larger than the ~64 Hz tick can't be in-game time, so roll the
-            // last-score stamp forward by the gap (capped at now) — only
-            // continuous, in-game non-scoring time counts toward the timeout.
+            // Exclude paused/frozen wall-clock time from the progress-stall timer.
+            // While the game is paused (or alt-tabbed, in a menu, mid-rewind, or
+            // briefly UDP-stalled) NO packets arrive, yet the wall clock keeps
+            // running. The first packet after the stall would otherwise see the
+            // whole gap as time-without-progress and abort instantly on resume. A
+            // gap far larger than the ~64 Hz tick can't be in-game time, so roll the
+            // last-progress stamp forward by the gap (capped at now) — only
+            // continuous, in-game time-without-progress counts toward the kill.
             let gap_ms = now_ms - run.last_packet_ms;
             if gap_ms > STALL_GAP_MS {
-                run.last_score_ms = (run.last_score_ms + gap_ms).min(now_ms);
+                run.last_progress_ok_ms = (run.last_progress_ok_ms + gap_ms).min(now_ms);
+                // Drop the pre-gap trajectory so the first post-gap travel bearing
+                // isn't read across the position jump (a rewind, or a pause the car
+                // rolled through); the ring refills within ~1 packet.
+                run.recent.clear();
             }
             run.last_packet_ms = now_ms;
 
-            // Score-starvation abort. FH6 ends a run when no drift points have
-            // accrued for a while — NOT when the car leaves a spatial boundary
-            // (the polygon is only used to detect the entry gate-crossing). A
-            // tyre on tarmac off in a side road keeps scoring and stays alive;
-            // wandering into the scenery stops scoring and times out.
+            // Live banking instrument (HUD only — NOT a kill factor): whether this
+            // packet earns points, plus the signed-direction flip count. The kill
+            // is forward-progress / out-of-bounds, independent of scoring and season
+            // (a car driving around not-scoring stays alive; #687 lived 30 s+).
             let scoring = scoring::is_scoring_packet(pkt, &run.zone.params);
             if scoring {
-                run.last_score_ms = now_ms;
-                let sign = if scoring::drift_angle_signed_deg(pkt) >= 0.0 {
-                    1i8
-                } else {
-                    -1i8
-                };
+                let sign = if scoring::drift_angle_signed_deg(pkt) >= 0.0 { 1i8 } else { -1i8 };
                 if run.score_sign != 0 && sign != run.score_sign {
                     run.direction_flips += 1;
                 }
                 run.score_sign = sign;
             }
-            let starve_s = (now_ms - run.last_score_ms).max(0) as f64 / 1000.0;
-            if starve_timeout_s > 0.0 && starve_s > starve_timeout_s {
-                let reason = format!("no drift score for {starve_timeout_s:.0}s");
+
+            // Forward progress = speed × cos(travel-vs-route): advance the arc/
+            // route-forward tracker on the centerline, read the world travel bearing
+            // from the recent-position ring, and reset the stall stamp whenever
+            // progress reaches the floor. Nose/heading is NOT consulted — a
+            // 180°-reversed car travelling forward is fine (#699); only TRAVEL
+            // direction matters.
+            let (arc, route_fwd) = route_forward(
+                &run.zone.centerline,
+                current,
+                run.arc,
+                run.arc_started,
+                run.entry_is_a,
+            );
+            run.arc = arc;
+            run.arc_started = true;
+            let progress = forward_progress(
+                pkt.speed_ms as f64,
+                travel_bearing(&run.recent, current),
+                route_fwd,
+            );
+            run.recent.push_back(current);
+            while run.recent.len() > TRAVEL_LOOKBACK {
+                run.recent.pop_front();
+            }
+            if progress >= run.zone.progress_floor_mps {
+                run.last_progress_ok_ms = now_ms;
+            }
+
+            // First-to-fire kill (skipped entirely in measurement mode). (B)
+            // OUT-OF-BOUNDS is spatial — a fat membership boundary (~45 m past the
+            // flags), distance-gated not timed — checked first because the route
+            // projection is meaningless once the car is far outside. (A)
+            // PROGRESS-STALL is the in-zone kill: idle, crawl, and travel-wrong-way
+            // unified as "not advancing for ~3 s".
+            let kill_reason: Option<&'static str> = if !kill_enabled {
+                None
+            } else if !within_slack(current, &run.zone.polygon, run.zone.oob_slack_m) {
+                Some("out of bounds")
+            } else if run.zone.progress_stall_ms > 0
+                && now_ms - run.last_progress_ok_ms > run.zone.progress_stall_ms
+            {
+                Some("no forward progress")
+            } else {
+                None
+            };
+            if let Some(reason) = kill_reason {
                 let (score, breakdown) = score_from_packets(conn, run.id, &run.zone);
-                let status = DriftRunStatus::closed(run, now_ms, false, Some(reason.clone()));
-                if let Err(e) =
-                    db::close_drift_run(conn, run.id, now_ms, false, Some(&reason), score)
-                {
-                    eprintln!("[drift] starvation close error: {e}");
+                let status = DriftRunStatus::closed(run, now_ms, false, Some(reason.to_string()));
+                if let Err(e) = db::close_drift_run(conn, run.id, now_ms, false, Some(reason), score) {
+                    eprintln!("[drift] kill close error: {e}");
                 }
-                if let Err(e) =
-                    db::update_drift_run_score(conn, run.id, score, breakdown.as_deref())
-                {
+                if let Err(e) = db::update_drift_run_score(conn, run.id, score, breakdown.as_deref()) {
                     eprintln!("[drift] score store error: {e}");
                 }
                 self.active = None;
@@ -287,8 +422,17 @@ impl DriftRunManager {
                 return Some(status);
             }
 
-            let remaining = (starve_timeout_s > 0.0).then(|| (starve_timeout_s - starve_s).max(0.0));
-            let status = DriftRunStatus::running(run, scoring, remaining, pkt);
+            // Death-timer readout: seconds left before the stall kill, shown only
+            // while actually stalling (progress below the floor) — a run that is
+            // advancing but not scoring shows no countdown.
+            let stall_remaining = (kill_enabled
+                && run.zone.progress_stall_ms > 0
+                && progress < run.zone.progress_floor_mps)
+            .then(|| {
+                ((run.zone.progress_stall_ms - (now_ms - run.last_progress_ok_ms)).max(0)) as f64
+                    / 1000.0
+            });
+            let status = DriftRunStatus::running(run, scoring, stall_remaining, pkt);
             self.last_status = status.clone();
             return Some(status);
         }
@@ -354,6 +498,14 @@ impl DriftRunManager {
         // starvation, and the close-time score for this run's whole life.
         let mut zone = zone;
         zone.params = zone.params.for_season(crate::season::season_at_utc_ms(now_ms));
+        // Entry gate fixes the centerline orientation toward the finish: the finish
+        // is the gate NOT entered, so the run entered through A iff finish == gate B.
+        let entry_is_a = finish_gate == zone.gate_b;
+        // Seed the arc tracker by projecting the opening position onto the WHOLE
+        // centerline (window = total); every later packet tracks within a local
+        // window from there.
+        let initial_arc = if entry_is_a { 0.0 } else { zone.centerline.total };
+        let (arc0, _) = route_forward(&zone.centerline, current, initial_arc, false, entry_is_a);
 
         match db::open_drift_run(
             conn,
@@ -372,7 +524,11 @@ impl DriftRunManager {
                     finish_gate,
                     started_at: now_ms,
                     packet_count: 0,
-                    last_score_ms: now_ms,
+                    entry_is_a,
+                    arc: arc0,
+                    arc_started: true,
+                    recent: VecDeque::new(),
+                    last_progress_ok_ms: now_ms,
                     last_packet_ms: now_ms,
                     score_sign: 0,
                     direction_flips: 0,
@@ -392,17 +548,19 @@ impl DriftRunManager {
                 } else {
                     run.packet_count = 1;
                 }
+                // Seed the recent-position ring with the opening point so the next
+                // packet has a travel-bearing reference.
+                run.recent.push_back(current);
                 let scoring = scoring::is_scoring_packet(pkt, &run.zone.params);
                 if scoring {
-                    run.last_score_ms = now_ms;
                     run.score_sign = if scoring::drift_angle_signed_deg(pkt) >= 0.0 {
                         1
                     } else {
                         -1
                     };
                 }
-                let remaining = (starve_timeout_s > 0.0).then_some(starve_timeout_s);
-                let status = DriftRunStatus::running(&run, scoring, remaining, pkt);
+                // A run just opened isn't stalling yet — no death-timer countdown.
+                let status = DriftRunStatus::running(&run, scoring, None, pkt);
                 self.active = Some(run);
                 self.last_status = status.clone();
                 Some(status)
@@ -465,6 +623,11 @@ impl RunnableZone {
         // raw straight chords. `left ++ reversed(right)` closes the corridor ring.
         let left: Vec<Point> = row.left_boundary.iter().map(Point::from).collect();
         let right: Vec<Point> = row.right_boundary.iter().map(Point::from).collect();
+        // Route reference for the forward-progress kill, built from the RAW
+        // boundaries (mirrors scripts/drift_kill.py, which uses the stored points —
+        // a tessellated bulge would shift the mid-line). Always succeeds here (≥2
+        // points per side is guaranteed above).
+        let centerline = Centerline::build(&left, &right)?;
         let (left, right) = if curve_is_catmull(&row.scoring_config) {
             (
                 tessellate(&left, false, CURVE_DEFAULT_SEGMENTS),
@@ -478,27 +641,32 @@ impl RunnableZone {
         if polygon.len() < 3 {
             return None;
         }
+        let cfg = &row.scoring_config;
         Some(Self {
             id: row.id,
             name: row.name.clone(),
             polygon,
             gate_a,
             gate_b,
-            slack_m: slack_from_config(&row.scoring_config),
-            params: scoring::ScoringParams::from_config(&row.scoring_config),
+            centerline,
+            oob_slack_m: config_f64(cfg, "oobSlackM", OOB_SLACK_M).max(0.0),
+            progress_floor_mps: config_f64(cfg, "progressFloorMps", PROGRESS_FLOOR_MPS).max(0.0),
+            progress_stall_ms: (config_f64(cfg, "progressStallS", PROGRESS_STALL_MS as f64 / 1000.0)
+                .max(0.0)
+                * 1000.0) as i64,
+            params: scoring::ScoringParams::from_config(cfg),
         })
     }
 }
 
-/// Per-zone boundary slack (metres) from the zone's `scoring_config` bag,
-/// defaulting to 3 m. Stored there (not a dedicated column) since it's just
-/// another per-zone knob.
-fn slack_from_config(config: &serde_json::Value) -> f64 {
+/// Read a per-zone `f64` knob from the zone's `scoring_config` bag, falling back to
+/// `default` when absent or non-numeric. The kill thresholds live here (not in
+/// dedicated columns) for the same reason every other per-zone tuning knob does.
+fn config_f64(config: &serde_json::Value, key: &str, default: f64) -> f64 {
     config
-        .get("boundarySlackM")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(3.0)
-        .max(0.0)
+        .get(key)
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or(default)
 }
 
 /// Whether a zone's boundary is a centripetal Catmull-Rom curve
@@ -542,6 +710,187 @@ fn point_segment_dist(p: Point, a: Point, b: Point) -> f64 {
     let projx = a.x + t * dx;
     let projz = a.z + t * dz;
     ((p.x - projx).powi(2) + (p.z - projz).powi(2)).sqrt()
+}
+
+// ── Forward-progress geometry (ported from scripts/drift_kill.py) ────────────
+// The in-zone kill measures the car's progress ALONG the route, not its raw speed
+// or its nose direction. The route reference is the corridor mid-line (centerline);
+// the car is projected onto it with monotonic local-window tracking (so a hairpin
+// can't flip the route 180°), and progress is `speed × cos(travel − route)`.
+
+/// Arc-parameterized corridor mid-line — the route reference the forward-progress
+/// kill projects the car onto. Built once per runnable zone by arc-resampling both
+/// boundaries to [`CENTERLINE_POINTS`] and averaging index-wise (mirrors
+/// `centerline()` in `scripts/drift_kill.py`): the GPS route runs ~down the middle,
+/// so this beats either edge or a straight chord to the finish gate (a chord is
+/// wrong ~27% of the time where the route winds away from the gate; validated there).
+#[derive(Debug, Clone)]
+struct Centerline {
+    pts: Vec<Point>,
+    /// Cumulative arc length to each point; `cum[0] == 0`, `*cum.last() == total`.
+    cum: Vec<f64>,
+    total: f64,
+}
+
+impl Centerline {
+    /// Build from the two raw boundaries, or `None` if either has fewer than two
+    /// points (no extent to resample).
+    fn build(left: &[Point], right: &[Point]) -> Option<Self> {
+        if left.len() < 2 || right.len() < 2 {
+            return None;
+        }
+        let l = resample(left, CENTERLINE_POINTS);
+        let r = resample(right, CENTERLINE_POINTS);
+        let pts: Vec<Point> = (0..CENTERLINE_POINTS)
+            .map(|i| Point {
+                x: (l[i].x + r[i].x) / 2.0,
+                z: (l[i].z + r[i].z) / 2.0,
+            })
+            .collect();
+        let mut cum = vec![0.0; pts.len()];
+        for i in 1..pts.len() {
+            cum[i] = cum[i - 1] + dist(pts[i - 1], pts[i]);
+        }
+        let total = *cum.last().unwrap_or(&0.0);
+        Some(Self { pts, cum, total })
+    }
+
+    /// Position at arc-length `arc` (clamped to `[0, total]`), linearly interpolated
+    /// along the polyline. Mirrors `point_at` in `drift_kill.py`.
+    fn point_at(&self, arc: f64) -> Point {
+        let arc = arc.clamp(0.0, self.total);
+        for i in 0..self.pts.len().saturating_sub(1) {
+            if self.cum[i + 1] >= arc {
+                let d = self.cum[i + 1] - self.cum[i];
+                let denom = if d == 0.0 { 1e-9 } else { d };
+                let t = (arc - self.cum[i]) / denom;
+                return Point {
+                    x: self.pts[i].x + t * (self.pts[i + 1].x - self.pts[i].x),
+                    z: self.pts[i].z + t * (self.pts[i + 1].z - self.pts[i].z),
+                };
+            }
+        }
+        self.pts.last().copied().unwrap_or(Point { x: 0.0, z: 0.0 })
+    }
+
+    /// Arc position (within `±window` of `center`) nearest `p`, by a ~1 m scan —
+    /// the monotonic local-window projection that stops a hairpin's far leg from
+    /// stealing the match. Mirrors `nearest_arc` in `drift_kill.py`.
+    fn nearest_arc(&self, p: Point, center: f64, window: f64) -> f64 {
+        let a0 = (center - window).max(0.0);
+        let a1 = (center + window).min(self.total);
+        let steps = (((a1 - a0) / 1.0) as i64).max(4);
+        let mut best = f64::INFINITY;
+        let mut barc = center;
+        for s in 0..=steps {
+            let arc = a0 + (a1 - a0) * s as f64 / steps as f64;
+            let q = self.point_at(arc);
+            let d = (p.x - q.x).powi(2) + (p.z - q.z).powi(2);
+            if d < best {
+                best = d;
+                barc = arc;
+            }
+        }
+        barc
+    }
+}
+
+/// Arc-resample a polyline to `n` arc-equispaced points. Mirrors `_resample` in
+/// `scripts/drift_kill.py`. `path` must be non-empty; one point yields `n` copies.
+fn resample(path: &[Point], n: usize) -> Vec<Point> {
+    let mut cum = vec![0.0; path.len()];
+    for i in 1..path.len() {
+        cum[i] = cum[i - 1] + dist(path[i - 1], path[i]);
+    }
+    let total = *cum.last().unwrap_or(&0.0);
+    let mut out = Vec::with_capacity(n);
+    for s in 0..n {
+        let arc = if n > 1 {
+            total * s as f64 / (n - 1) as f64
+        } else {
+            0.0
+        };
+        let mut pushed = false;
+        for i in 0..path.len().saturating_sub(1) {
+            if cum[i + 1] >= arc {
+                let d = cum[i + 1] - cum[i];
+                let denom = if d == 0.0 { 1e-9 } else { d };
+                let t = (arc - cum[i]) / denom;
+                out.push(Point {
+                    x: path[i].x + t * (path[i + 1].x - path[i].x),
+                    z: path[i].z + t * (path[i + 1].z - path[i].z),
+                });
+                pushed = true;
+                break;
+            }
+        }
+        if !pushed {
+            out.push(path.last().copied().unwrap_or(Point { x: 0.0, z: 0.0 }));
+        }
+    }
+    out
+}
+
+/// Planar distance between two points.
+fn dist(a: Point, b: Point) -> f64 {
+    ((b.x - a.x).powi(2) + (b.z - a.z).powi(2)).sqrt()
+}
+
+/// World bearing (deg) of a displacement — `atan2(dx, dz)`, the FH world convention
+/// (+z forward). Mirrors `bearing(dx, dz)` in `drift_kill.py`.
+fn bearing(dx: f64, dz: f64) -> f64 {
+    dx.atan2(dz).to_degrees()
+}
+
+/// Smallest signed difference `a − b` wrapped to `(−180, 180]`. Mirrors `ang_diff`.
+fn ang_diff(a: f64, b: f64) -> f64 {
+    (a - b + 180.0).rem_euclid(360.0) - 180.0
+}
+
+/// Advance the arc tracker to `p` and read the route-forward bearing (deg) there.
+/// Projects onto the centerline within a local arc window (the whole line on the
+/// first call, `started == false`), then takes a ±[`ROUTE_TANGENT_CHORD_M`] chord
+/// tangent oriented toward the finish gate (entry A ⇒ +arc, entry B ⇒ −arc).
+/// Returns `(new_arc, bearing_deg)`. Mirrors `route_forward_series` in `drift_kill.py`.
+fn route_forward(
+    cl: &Centerline,
+    p: Point,
+    prev_arc: f64,
+    started: bool,
+    entry_is_a: bool,
+) -> (f64, f64) {
+    let window = if started { ARC_TRACK_WINDOW_M } else { cl.total };
+    let arc = cl.nearest_arc(p, prev_arc, window);
+    let sign = if entry_is_a { 1.0 } else { -1.0 };
+    let ahead = cl.point_at(arc + sign * ROUTE_TANGENT_CHORD_M);
+    let behind = cl.point_at(arc - sign * ROUTE_TANGENT_CHORD_M);
+    (arc, bearing(ahead.x - behind.x, ahead.z - behind.z))
+}
+
+/// World travel bearing (deg) from the most recent earlier position at least
+/// [`TRAVEL_MIN_DISP_M`] from `current` (scanning the ring newest-first, up to
+/// [`TRAVEL_LOOKBACK`] back). `None` when the car is ~stationary — no reliable
+/// bearing — which the caller treats as zero progress. Mirrors `travel_bearing`.
+fn travel_bearing(recent: &VecDeque<Point>, current: Point) -> Option<f64> {
+    for prev in recent.iter().rev().take(TRAVEL_LOOKBACK) {
+        let dx = current.x - prev.x;
+        let dz = current.z - prev.z;
+        if (dx * dx + dz * dz).sqrt() >= TRAVEL_MIN_DISP_M {
+            return Some(bearing(dx, dz));
+        }
+    }
+    None
+}
+
+/// Forward progress (m/s along the route): `speed × cos(travel − route_forward)`.
+/// +ve advances to the finish, −ve reverses up-route; a `None` travel bearing
+/// (≈stationary) is zero. Crawl-robust by construction (`speed·cos`, NOT a noisy
+/// d(arc)/dt). Sustained below the floor is the in-zone stall kill. Mirrors `drift_kill.py`.
+fn forward_progress(speed_ms: f64, travel_bearing: Option<f64>, route_forward: f64) -> f64 {
+    match travel_bearing {
+        Some(tb) => speed_ms * ang_diff(tb, route_forward).to_radians().cos(),
+        None => 0.0,
+    }
 }
 
 /// Interpolated points emitted per anchor span when tessellating a curved zone
@@ -1212,6 +1561,17 @@ mod tests {
         p
     }
 
+    /// A packet at world (x, z) moving dead-straight at `speed` m/s — speed set and
+    /// car-local velocity along +z (so it is NOT drifting / not scoring). Drives the
+    /// forward-progress kill, which reads `speed_ms` and successive positions.
+    fn moving_packet(x: f32, z: f32, speed: f32, ms: u32) -> parser::TelemetryPacket {
+        let mut p = packet(x, z);
+        p.timestamp_ms = ms;
+        p.speed_ms = speed;
+        p.vel_z = speed;
+        p
+    }
+
     // Forward drive: 11 packets 0→100 m along z at the 64 Hz tick (~16 ms apart).
     fn forward_drive() -> Vec<parser::TelemetryPacket> {
         (0..=10)
@@ -1548,6 +1908,117 @@ mod tests {
         ));
     }
 
+    // ── Forward-progress geometry ────────────────────────────────────────────
+
+    /// An L-corridor (a quarter turn) for the route-forward parity check.
+    fn l_corridor_zone() -> db::DriftZoneRow {
+        db::DriftZoneRow {
+            left_boundary: vec![
+                db::ZonePoint { x: 0.0, z: 0.0 },
+                db::ZonePoint { x: 0.0, z: 20.0 },
+                db::ZonePoint { x: 20.0, z: 20.0 },
+            ],
+            right_boundary: vec![
+                db::ZonePoint { x: 4.0, z: 0.0 },
+                db::ZonePoint { x: 4.0, z: 16.0 },
+                db::ZonePoint { x: 20.0, z: 16.0 },
+            ],
+            ..square_zone()
+        }
+    }
+
+    #[test]
+    fn ang_diff_wraps_to_smallest_signed_offset() {
+        assert!((ang_diff(170.0, -170.0) - (-20.0)).abs() < 1e-9);
+        assert!((ang_diff(-170.0, 170.0) - 20.0).abs() < 1e-9);
+        assert!((ang_diff(10.0, 350.0) - 20.0).abs() < 1e-9);
+        assert!(ang_diff(45.0, 45.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn forward_progress_is_speed_times_route_alignment() {
+        // Along the route ⇒ full speed; reversed ⇒ negative; perpendicular ⇒ ~0;
+        // no bearing (stationary) ⇒ 0; 60° off ⇒ cos(60°) = half speed.
+        assert!((forward_progress(10.0, Some(0.0), 0.0) - 10.0).abs() < 1e-9);
+        assert!((forward_progress(10.0, Some(180.0), 0.0) + 10.0).abs() < 1e-9);
+        assert!(forward_progress(10.0, Some(90.0), 0.0).abs() < 1e-9);
+        assert_eq!(forward_progress(10.0, None, 0.0), 0.0);
+        assert!((forward_progress(10.0, Some(90.0), 30.0) - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn travel_bearing_skips_sub_threshold_jitter() {
+        // Newest-first scan: a <0.5 m wobble is skipped for the first point ≥0.5 m
+        // back; a ring with only sub-threshold history yields None (≈stationary).
+        let mut ring: VecDeque<Point> = VecDeque::new();
+        ring.push_back(Point { x: 0.0, z: 0.0 }); // 2 m back
+        ring.push_back(Point { x: 0.0, z: 1.9 }); // 0.1 m back (skipped)
+        let b = travel_bearing(&ring, Point { x: 0.0, z: 2.0 }).unwrap();
+        assert!(b.abs() < 1e-9, "bearing (0,0)→(0,2) is 0° (+z), got {b}");
+        let still: VecDeque<Point> = [Point { x: 0.0, z: 2.0 }].into_iter().collect();
+        assert!(travel_bearing(&still, Point { x: 0.0, z: 2.0 }).is_none());
+    }
+
+    #[test]
+    fn centerline_runs_down_a_straight_corridor() {
+        // square_zone: left (0,0)-(0,10), right (5,0)-(5,10) ⇒ mid-line x=2.5, len 10.
+        let zone = RunnableZone::from_row(&square_zone()).unwrap();
+        let cl = &zone.centerline;
+        assert_eq!(cl.pts.len(), CENTERLINE_POINTS);
+        assert!((cl.total - 10.0).abs() < 1e-6);
+        for p in &cl.pts {
+            assert!((p.x - 2.5).abs() < 1e-9, "mid-line at x=2.5, got {}", p.x);
+        }
+        // Entry A points toward the finish (+z) ⇒ ~0°; entry B the other way ⇒ ~180°.
+        let (_, fwd_a) = route_forward(cl, Point { x: 2.5, z: 5.0 }, 5.0, true, true);
+        assert!(fwd_a.abs() < 1e-6, "entry-A route-forward ≈ 0°, got {fwd_a}");
+        let (_, fwd_b) = route_forward(cl, Point { x: 2.5, z: 5.0 }, 5.0, true, false);
+        assert!((fwd_b.abs() - 180.0).abs() < 1e-6, "entry-B ≈ 180°, got {fwd_b}");
+    }
+
+    #[test]
+    fn centerline_route_forward_matches_python_reference() {
+        // Goldens from scripts/drift_kill.py's geometry (centerline + arc-tracked
+        // route_forward) on the L-corridor — the Rust port must reproduce them to
+        // float precision. Regenerate with the heredoc in notes/KILL_LOGIC_TODO.md.
+        let zone = RunnableZone::from_row(&l_corridor_zone()).unwrap();
+        let cl = &zone.centerline;
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-6;
+        assert!(near(cl.total, 35.866_529_672_439), "total = {}", cl.total);
+
+        // Fresh (whole-centerline) projections along the turn: (x, z, arc, fwd°).
+        let fresh = [
+            (2.0, 1.0, 1.024_757_990_6, 0.0),
+            (2.0, 10.0, 10.247_579_906_4, 1.385_711_724_6),
+            (3.0, 18.0, 18.445_643_831_5, 48.634_403_312_8),
+            (10.0, 18.0, 25.618_949_766_0, 88.614_288_275_4),
+            (18.0, 18.0, 33.817_013_691_2, 90.0),
+        ];
+        for (x, z, arc_g, fwd_g) in fresh {
+            let (arc, fwd) = route_forward(cl, Point { x, z }, 0.0, false, true);
+            assert!(near(arc, arc_g), "arc@({x},{z}) = {arc} vs {arc_g}");
+            assert!(near(fwd, fwd_g), "fwd@({x},{z}) = {fwd} vs {fwd_g}");
+        }
+
+        // Tracked sequence (entry A): prev_arc fed forward like the live path.
+        let tracked = [
+            (2.0, 2.0, 2.049_515_981_3, 0.0),
+            (2.0, 9.0, 9.222_821_915_8, 0.0),
+            (2.0, 17.0, 17.420_885_840_9, 41.365_596_687_2),
+            (8.0, 18.0, 23.569_433_784_7, 79.941_718_890_0),
+            (16.0, 18.0, 31.767_497_709_9, 90.0),
+        ];
+        let mut prev = 0.0;
+        let mut started = false;
+        for (x, z, arc_g, fwd_g) in tracked {
+            let (arc, fwd) = route_forward(cl, Point { x, z }, prev, started, true);
+            prev = arc;
+            started = true;
+            assert!(near(arc, arc_g), "tracked arc@({x},{z}) = {arc} vs {arc_g}");
+            assert!(near(fwd, fwd_g), "tracked fwd@({x},{z}) = {fwd} vs {fwd_g}");
+        }
+    }
+
     #[test]
     fn run_starts_and_finishes_on_gates() {
         let conn = in_memory();
@@ -1571,14 +2042,14 @@ mod tests {
         let mut mgr = DriftRunManager::new();
         let raw = vec![1u8; 324];
         assert!(mgr
-            .note_packet(&conn, &packet(2.0, -1.0), &raw, 1000, 0.0, 10.0)
+            .note_packet(&conn, &packet(2.0, -1.0), &raw, 1000, false, 10.0)
             .is_none());
         let started = mgr
-            .note_packet(&conn, &packet(2.0, 1.0), &raw, 1100, 0.0, 10.0)
+            .note_packet(&conn, &packet(2.0, 1.0), &raw, 1100, false, 10.0)
             .unwrap();
         assert_eq!(started.state, "running");
         let finished = mgr
-            .note_packet(&conn, &packet(2.0, 11.0), &raw, 2000, 0.0, 10.0)
+            .note_packet(&conn, &packet(2.0, 11.0), &raw, 2000, false, 10.0)
             .unwrap();
         assert_eq!(finished.state, "completed");
         let rows = db::list_drift_runs(&conn).unwrap();
@@ -1588,24 +2059,61 @@ mod tests {
     }
 
     #[test]
-    fn leaving_zone_no_longer_voids_the_run() {
-        // The polygon no longer gates validity — straying outside it keeps the
-        // run alive (starvation disabled here with timeout 0 to isolate this).
+    fn out_of_bounds_voids_the_run() {
+        // The measured spatial kill: straying past the flags polygon by more than
+        // the OOB slack voids the run (distance-gated, not a timer). Reverses the
+        // old winter-only "leaving never voids" finding. progressStallS=0 isolates
+        // the OOB kill from the stall kill.
         let conn = in_memory();
-        save_square_zone(&conn, 0.0);
+        save_square_zone_cfg(
+            &conn,
+            serde_json::json!({ "oobSlackM": 3.0, "progressStallS": 0.0 }),
+        );
         let mut mgr = DriftRunManager::new();
         let raw = vec![1u8; 324];
-        mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 1000, 0.0, 10.0);
-        mgr.note_packet(&conn, &packet(2.0, 1.0), &raw, 1100, 0.0, 10.0);
-        // x=9 is far outside the x=5 edge — previously invalid, now still running.
-        let still = mgr
-            .note_packet(&conn, &packet(9.0, 5.0), &raw, 1300, 0.0, 10.0)
+        mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 1000, true, 10.0);
+        let started = mgr
+            .note_packet(&conn, &packet(2.0, 1.0), &raw, 1100, true, 10.0)
             .unwrap();
-        assert_eq!(still.state, "running");
+        assert_eq!(started.state, "running");
+        // x=9 is 4 m past the x=5 edge — beyond the 3 m slack → out of bounds.
+        let killed = mgr
+            .note_packet(&conn, &packet(9.0, 5.0), &raw, 1300, true, 10.0)
+            .unwrap();
+        assert_eq!(killed.state, "invalid");
+        let rows = db::list_drift_runs(&conn).unwrap();
+        assert!(!rows[0].valid);
+        assert_eq!(rows[0].invalid_reason.as_deref(), Some("out of bounds"));
+    }
+
+    #[test]
+    fn leave_and_return_within_slack_survives() {
+        // A position-test OOB makes leave-and-return free by construction: straying
+        // within the slack — and returning — never voids. progressStallS=0 isolates
+        // the OOB rule from the stall.
+        let conn = in_memory();
+        save_square_zone_cfg(
+            &conn,
+            serde_json::json!({ "oobSlackM": 3.0, "progressStallS": 0.0 }),
+        );
+        let mut mgr = DriftRunManager::new();
+        let raw = vec![1u8; 324];
+        mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 1000, true, 10.0);
+        mgr.note_packet(&conn, &packet(2.0, 1.0), &raw, 1100, true, 10.0);
+        // x=6 is 1 m outside the x=5 edge — within the 3 m slack → still running…
+        let out = mgr
+            .note_packet(&conn, &packet(6.0, 5.0), &raw, 1300, true, 10.0)
+            .unwrap();
+        assert_eq!(out.state, "running");
+        // …and returning inside keeps it alive.
+        let back = mgr
+            .note_packet(&conn, &packet(2.0, 8.0), &raw, 1500, true, 10.0)
+            .unwrap();
+        assert_eq!(back.state, "running");
         assert!(db::list_drift_runs(&conn).unwrap()[0].valid);
     }
 
-    fn save_square_zone(conn: &Connection, slack: f64) -> i64 {
+    fn save_square_zone_cfg(conn: &Connection, config: serde_json::Value) -> i64 {
         db::save_drift_zone(
             conn,
             &db::DriftZoneInput {
@@ -1618,45 +2126,136 @@ mod tests {
                 start_gate: Vec::new(),
                 finish_gate: Vec::new(),
                 split_gates: Vec::new(),
-                scoring_config: serde_json::json!({ "boundarySlackM": slack }),
+                scoring_config: config,
             },
             1,
         )
         .unwrap()
     }
 
+    // Most lifecycle tests don't probe the kill thresholds (they pass
+    // kill_enabled=false, or finish/abort before any kill fires); this sets just
+    // the OOB slack for the few that do.
+    fn save_square_zone(conn: &Connection, oob_slack: f64) -> i64 {
+        save_square_zone_cfg(conn, serde_json::json!({ "oobSlackM": oob_slack }))
+    }
+
     #[test]
-    fn run_aborts_on_score_starvation() {
-        // No points for longer than the timeout (1 s here) → the run aborts.
-        // Packets arrive at a realistic sub-stall cadence (100 ms) so this is
-        // genuine in-game starvation, not a telemetry stall the gap-skip would
-        // absorb (see `pause_does_not_abort_run_on_resume`).
+    fn run_aborts_on_progress_stall() {
+        // The in-zone kill: a car that stops advancing dies after the stall window
+        // (0.3 s here). Packets arrive at a realistic sub-stall cadence (100 ms) so
+        // this is genuine in-game time-without-progress, not a telemetry gap the
+        // skip would absorb (see `pause_does_not_trip_progress_stall`).
         let conn = in_memory();
-        save_square_zone(&conn, 0.0);
+        save_square_zone_cfg(&conn, serde_json::json!({ "progressStallS": 0.3 }));
         let mut mgr = DriftRunManager::new();
         let raw = vec![1u8; 324];
-        mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 1000, 1.0, 10.0);
-        let started = mgr.note_packet(&conn, &packet(2.0, 1.0), &raw, 1100, 1.0, 10.0).unwrap();
+        mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 1000, true, 10.0);
+        let started = mgr.note_packet(&conn, &packet(2.0, 1.0), &raw, 1100, true, 10.0).unwrap();
         assert_eq!(started.state, "running");
-        // Non-scoring packets every 100 ms; once >1 s has elapsed with no score
-        // the run starves. Bounded loop so a logic regression can't hang.
+        // Stationary (speed 0) packets every 100 ms; once >0.3 s has elapsed with no
+        // forward progress the run is killed. Bounded loop so a regression can't hang.
         let mut now = 1200i64;
         let mut last = started;
         while last.state == "running" && now <= 4000 {
             last = mgr
-                .note_packet(&conn, &packet(2.0, 5.0), &raw, now, 1.0, 10.0)
+                .note_packet(&conn, &packet(2.0, 5.0), &raw, now, true, 10.0)
                 .unwrap();
             now += 100;
         }
         assert_eq!(last.state, "invalid");
-        assert!(!last.scoring);
         let rows = db::list_drift_runs(&conn).unwrap();
         assert!(!rows[0].valid);
-        assert!(rows[0]
-            .invalid_reason
-            .as_deref()
-            .unwrap()
-            .contains("no drift score"));
+        assert_eq!(rows[0].invalid_reason.as_deref(), Some("no forward progress"));
+    }
+
+    #[test]
+    fn reversing_run_stalls_despite_speed() {
+        // Travel-wrong-way unifies with idle: a car moving at speed but UP-route
+        // (reversing toward the entry) has negative forward progress, so the SAME
+        // stall kills it — speed alone doesn't keep a run alive, only progress does.
+        let conn = in_memory();
+        save_square_zone_cfg(&conn, serde_json::json!({ "progressStallS": 0.3 }));
+        let mut mgr = DriftRunManager::new();
+        let raw = vec![1u8; 324];
+        mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 1000, true, 10.0);
+        // Enter through gate A and reach mid-zone, then reverse back toward A at
+        // 6 m/s (−z) — staying inside the polygon so only the stall can fire.
+        mgr.note_packet(&conn, &moving_packet(2.0, 1.0, 6.0, 0), &raw, 1100, true, 10.0);
+        mgr.note_packet(&conn, &moving_packet(2.0, 6.0, 6.0, 16), &raw, 1200, true, 10.0);
+        let mut now = 1300i64;
+        let mut z = 5.4f32;
+        let mut ms = 116u32;
+        let mut last = mgr.status();
+        while last.state == "running" && now <= 4000 {
+            last = mgr
+                .note_packet(&conn, &moving_packet(2.0, z, 6.0, ms), &raw, now, true, 10.0)
+                .unwrap();
+            z -= 0.6; // reverse up-route; stays within (0, 10) over the stall window
+            now += 100;
+            ms += 100;
+        }
+        assert_eq!(last.state, "invalid");
+        assert_eq!(
+            db::list_drift_runs(&conn).unwrap()[0]
+                .invalid_reason
+                .as_deref(),
+            Some("no forward progress")
+        );
+    }
+
+    #[test]
+    fn forward_progress_keeps_run_alive_without_scoring() {
+        // The correctness win: a car driving forward but NOT drifting (not scoring)
+        // stays alive well past the stall window — the old score-starvation timer
+        // false-killed exactly this (a car drove around unscored for 30 s+, #687).
+        let conn = in_memory();
+        save_square_zone_cfg(&conn, serde_json::json!({ "progressStallS": 0.3 }));
+        let mut mgr = DriftRunManager::new();
+        let raw = vec![1u8; 324];
+        mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 1000, true, 10.0);
+        mgr.note_packet(&conn, &packet(2.0, 1.0), &raw, 1100, true, 10.0);
+        // Drive dead-straight forward at 6 m/s for ~0.8 s (>> the 0.3 s stall window)
+        // without reaching the finish gate (z=10).
+        let mut now = 1200i64;
+        let mut z = 1.6f32;
+        let mut ms = 116u32;
+        for _ in 0..8 {
+            let s = mgr
+                .note_packet(&conn, &moving_packet(2.0, z, 6.0, ms), &raw, now, true, 10.0)
+                .unwrap();
+            assert_eq!(s.state, "running");
+            assert!(!s.scoring, "straight driving doesn't score");
+            assert!(s.starve_remaining_s.is_none(), "advancing ⇒ no death timer");
+            z += 0.6;
+            now += 100;
+            ms += 100;
+        }
+        assert_eq!(mgr.status().state, "running");
+    }
+
+    #[test]
+    fn manual_abort_ends_active_run_as_invalid() {
+        // The manual "abort run" control closes the live run at once as invalid,
+        // without waiting out the starvation timer; a second abort is a no-op.
+        let conn = in_memory();
+        save_square_zone(&conn, 0.0);
+        let mut mgr = DriftRunManager::new();
+        let raw = vec![1u8; 324];
+        mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 1000, true, 10.0);
+        let started = mgr
+            .note_packet(&conn, &packet(2.0, 1.0), &raw, 1100, true, 10.0)
+            .unwrap();
+        assert_eq!(started.state, "running");
+
+        let aborted = mgr.abort_active(&conn, 1200).expect("a run was active");
+        assert_eq!(aborted.state, "invalid");
+        assert!(!aborted.scoring);
+        assert!(mgr.abort_active(&conn, 1300).is_none(), "nothing left to abort");
+
+        let rows = db::list_drift_runs(&conn).unwrap();
+        assert!(!rows[0].valid);
+        assert_eq!(rows[0].invalid_reason.as_deref(), Some("aborted"));
     }
 
     /// Put all four wheels on a rough surface (fully off the tarmac).
@@ -1669,119 +2268,100 @@ mod tests {
     }
 
     #[test]
-    fn grass_dwell_feeds_starvation_outside_winter_but_starves_in_winter() {
-        // The tarmac gate is seasonal: outside winter, off-tarmac drifting
-        // banks points (grass pays full rate), so a long grass excursion must
-        // keep feeding the starvation timer. In winter the same excursion
-        // banks nothing and the run starves out. Runs are bound to the season
-        // of their wall-clock start time.
-        for (t0, expect_alive) in [
-            (crate::season::SPRING_ANCHOR_MS + 3_600_000, true), // spring
-            (crate::season::SPRING_ANCHOR_MS - 3_600_000, false), // winter
+    fn seasonal_tarmac_gate_still_drives_the_live_scoring_flag() {
+        // The KILL is now forward-progress / out-of-bounds (season-independent — a
+        // moving winter grass run is no longer starved out), but the seasonal
+        // tarmac SCORING gate is unchanged: it still binds at run start and drives
+        // the live `scoring` instrument (and the close-time score). Outside winter
+        // grass pays (scoring); in winter an all-off-tarmac packet banks nothing
+        // (the game wants ≥2 wheels on tarmac). Kill disabled here to isolate the
+        // gate; its effect on the score itself is covered in scoring.rs.
+        for (t0, expect_scoring) in [
+            (crate::season::SPRING_ANCHOR_MS + 3_600_000, true), // spring: grass pays
+            (crate::season::SPRING_ANCHOR_MS - 3_600_000, false), // winter: needs ≥2 on tarmac
         ] {
             let conn = in_memory();
             save_square_zone(&conn, 0.0);
             let mut mgr = DriftRunManager::new();
             let raw = vec![1u8; 324];
-            mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, t0, 1.0, 10.0);
-            let started = mgr
-                .note_packet(&conn, &packet(2.0, 1.0), &raw, t0 + 100, 1.0, 10.0)
+            mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, t0, false, 10.0);
+            mgr.note_packet(&conn, &packet(2.0, 1.0), &raw, t0 + 100, false, 10.0);
+            // An all-four-wheels-in-the-grass drifting packet, mid-zone.
+            let s = mgr
+                .note_packet(
+                    &conn,
+                    &grass(drifting_packet(2.0, 5.0, 200)),
+                    &raw,
+                    t0 + 200,
+                    false,
+                    10.0,
+                )
                 .unwrap();
-            assert_eq!(started.state, "running");
-            // 2+ s of all-four-wheels-in-the-grass drifting at 100 ms cadence
-            // (starve timeout is 1 s here).
-            let mut last = started;
-            let mut now = t0 + 200;
-            let mut ms = 200u32;
-            while last.state == "running" && now <= t0 + 2400 {
-                last = mgr
-                    .note_packet(&conn, &grass(drifting_packet(2.0, 5.0, ms)), &raw, now, 1.0, 10.0)
-                    .unwrap();
-                now += 100;
-                ms += 100;
-            }
-            if expect_alive {
-                assert_eq!(last.state, "running", "grass keeps a spring run alive");
-                assert!(last.scoring, "spring grass packets are scoring packets");
-            } else {
-                assert_eq!(last.state, "invalid", "winter grass must starve the run");
-                assert!(!last.scoring);
-            }
+            assert_eq!(s.state, "running", "kill disabled keeps the run alive");
+            assert_eq!(
+                s.scoring, expect_scoring,
+                "winter must gate off-tarmac scoring; spring must pay it"
+            );
         }
     }
 
     #[test]
-    fn pause_does_not_abort_run_on_resume() {
-        // A pause freezes telemetry: no packets arrive for the pause duration
-        // while the wall clock keeps advancing. The first packet after a pause
-        // longer than the timeout must NOT trip the starvation abort — under
-        // the old wall-clock logic it saw the whole pause as non-scoring time
-        // and killed the run instantly (issue #19).
+    fn pause_does_not_trip_progress_stall() {
+        // A pause freezes telemetry: no packets arrive for the pause duration while
+        // the wall clock keeps advancing. The first packet after a pause longer than
+        // the stall window must NOT trip the kill — that frozen time isn't
+        // time-without-progress (the old wall-clock logic killed instantly on
+        // resume, issue #19; the gap-exclusion carries over).
         let conn = in_memory();
-        save_square_zone(&conn, 0.0);
+        save_square_zone_cfg(&conn, serde_json::json!({ "progressStallS": 0.3 }));
         let mut mgr = DriftRunManager::new();
         let raw = vec![1u8; 324];
-        mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 1000, 5.0, 10.0);
-        // Enter scoring, then a couple of packets at normal ~64 Hz cadence.
+        mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 1000, true, 10.0);
+        // Enter and advance a little (progressing) at normal ~64 Hz cadence.
         let started = mgr
-            .note_packet(&conn, &drifting_packet(2.0, 1.0, 100), &raw, 1100, 5.0, 10.0)
+            .note_packet(&conn, &moving_packet(2.0, 1.0, 6.0, 100), &raw, 1100, true, 10.0)
             .unwrap();
         assert_eq!(started.state, "running");
-        assert!(started.scoring);
-        mgr.note_packet(&conn, &drifting_packet(2.0, 2.0, 116), &raw, 1116, 5.0, 10.0);
-        // Pause for 30 s (>> the 5 s timeout), then resume with a NON-scoring
-        // packet — the worst case, since there's no fresh score to reset the
-        // timer. The stall window is excluded, so the run survives.
+        mgr.note_packet(&conn, &moving_packet(2.0, 1.6, 6.0, 116), &raw, 1116, true, 10.0);
+        // Pause 30 s (>> the 0.3 s window), then resume STATIONARY (worst case — no
+        // progress to reset the timer). The frozen gap is excluded, so it survives.
         let resumed = mgr
-            .note_packet(&conn, &packet(2.0, 3.0), &raw, 31_116, 5.0, 10.0)
+            .note_packet(&conn, &packet(2.0, 1.6), &raw, 31_116, true, 10.0)
             .unwrap();
         assert_eq!(resumed.state, "running");
-        // Genuine starvation still bites: ~64 Hz non-scoring packets after the
-        // resume accumulate past the timeout and abort the run.
+        // Genuine stall still bites: stationary packets after the resume accumulate
+        // past the window and kill the run.
         let mut now = 31_216i64;
         let mut last = resumed;
         while last.state == "running" && now <= 40_000 {
             last = mgr
-                .note_packet(&conn, &packet(2.0, 5.0), &raw, now, 5.0, 10.0)
+                .note_packet(&conn, &packet(2.0, 1.6), &raw, now, true, 10.0)
                 .unwrap();
             now += 100;
         }
         assert_eq!(last.state, "invalid");
+        assert_eq!(
+            db::list_drift_runs(&conn).unwrap()[0]
+                .invalid_reason
+                .as_deref(),
+            Some("no forward progress")
+        );
     }
 
     #[test]
-    fn scoring_packets_prevent_starvation() {
-        // A run that keeps earning points stays alive well past the timeout.
+    fn kill_disabled_keeps_run_alive_indefinitely() {
+        // kill_enabled=false (measurement mode): a stationary car that would
+        // otherwise stall out never auto-fails — the run ends only at the finish
+        // gate or a manual abort.
         let conn = in_memory();
         save_square_zone(&conn, 0.0);
         let mut mgr = DriftRunManager::new();
         let raw = vec![1u8; 324];
-        mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 1000, 1.0, 10.0);
-        mgr.note_packet(&conn, &packet(2.0, 1.0), &raw, 1100, 1.0, 10.0);
-        // Scoring packets every 0.5 s for 3 s — each resets the starve timer.
-        let (mut t, mut now) = (1600u32, 1600i64);
-        for _ in 0..6 {
-            let s = mgr
-                .note_packet(&conn, &drifting_packet(2.0, 5.0, t), &raw, now, 1.0, 10.0)
-                .unwrap();
-            assert_eq!(s.state, "running");
-            assert!(s.scoring);
-            t += 500;
-            now += 500;
-        }
-        assert_eq!(mgr.status().state, "running");
-    }
-
-    #[test]
-    fn starvation_disabled_keeps_run_alive_indefinitely() {
-        // timeout 0 = disabled: a long non-scoring stretch never aborts.
-        let conn = in_memory();
-        save_square_zone(&conn, 0.0);
-        let mut mgr = DriftRunManager::new();
-        let raw = vec![1u8; 324];
-        mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 1000, 0.0, 10.0);
-        mgr.note_packet(&conn, &packet(2.0, 1.0), &raw, 1100, 0.0, 10.0);
-        let still = mgr.note_packet(&conn, &packet(2.0, 5.0), &raw, 99000, 0.0, 10.0).unwrap();
+        mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 1000, false, 10.0);
+        mgr.note_packet(&conn, &packet(2.0, 1.0), &raw, 1100, false, 10.0);
+        let still = mgr
+            .note_packet(&conn, &packet(2.0, 5.0), &raw, 99000, false, 10.0)
+            .unwrap();
         assert_eq!(still.state, "running");
     }
 
@@ -1793,10 +2373,10 @@ mod tests {
         save_square_zone(&conn, 0.0);
         let mut mgr = DriftRunManager::new();
         let raw = vec![1u8; 324];
-        assert!(mgr.note_packet(&conn, &packet(2.0, 11.0), &raw, 1000, 0.0, 10.0).is_none());
-        let started = mgr.note_packet(&conn, &packet(2.0, 9.0), &raw, 1100, 0.0, 10.0).unwrap();
+        assert!(mgr.note_packet(&conn, &packet(2.0, 11.0), &raw, 1000, false, 10.0).is_none());
+        let started = mgr.note_packet(&conn, &packet(2.0, 9.0), &raw, 1100, false, 10.0).unwrap();
         assert_eq!(started.state, "running");
-        let finished = mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 2000, 0.0, 10.0).unwrap();
+        let finished = mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 2000, false, 10.0).unwrap();
         assert_eq!(finished.state, "completed");
         let rows = db::list_drift_runs(&conn).unwrap();
         assert!(rows[0].valid);
@@ -1813,8 +2393,8 @@ mod tests {
         let raw = vec![1u8; 324];
         // (-1,5) outside; (1,5) inside, but the segment crosses the left boundary
         // (x=0) mid-zone — not an end gate (z=0 or z=10).
-        assert!(mgr.note_packet(&conn, &packet(-1.0, 5.0), &raw, 1000, 0.0, 10.0).is_none());
-        assert!(mgr.note_packet(&conn, &packet(1.0, 5.0), &raw, 1100, 0.0, 10.0).is_none());
+        assert!(mgr.note_packet(&conn, &packet(-1.0, 5.0), &raw, 1000, false, 10.0).is_none());
+        assert!(mgr.note_packet(&conn, &packet(1.0, 5.0), &raw, 1100, false, 10.0).is_none());
         assert!(db::list_drift_runs(&conn).unwrap().is_empty());
     }
 
@@ -1839,13 +2419,13 @@ mod tests {
         // One idle packet that will fall out of the 10s window, one inside it.
         let mut p = packet(2.0, -3.0);
         p.timestamp_ms = 100;
-        mgr.note_packet(&conn, &p, &raw_old, 1_000, 0.0, 10.0);
+        mgr.note_packet(&conn, &p, &raw_old, 1_000, false, 10.0);
         let mut p = packet(2.0, -1.0);
         p.timestamp_ms = 200;
-        mgr.note_packet(&conn, &p, &raw_new, 50_000, 0.0, 10.0);
+        mgr.note_packet(&conn, &p, &raw_new, 50_000, false, 10.0);
         // Gate crossing opens the run; this packet belongs to the run itself.
         let started = mgr
-            .note_packet(&conn, &packet(2.0, 1.0), &raw_run, 50_100, 0.0, 10.0)
+            .note_packet(&conn, &packet(2.0, 1.0), &raw_run, 50_100, false, 10.0)
             .unwrap();
         assert_eq!(started.state, "running");
         let run_id = started.run_id.unwrap();
@@ -1866,19 +2446,19 @@ mod tests {
         let mut mgr = DriftRunManager::new();
         let raw = vec![1u8; 324];
         let between = vec![2u8; 324];
-        mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 1_000, 0.0, 10.0);
+        mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 1_000, false, 10.0);
         let first = mgr
-            .note_packet(&conn, &packet(2.0, 1.0), &raw, 1_100, 0.0, 10.0)
+            .note_packet(&conn, &packet(2.0, 1.0), &raw, 1_100, false, 10.0)
             .unwrap();
         assert_eq!(first.state, "running");
         let done = mgr
-            .note_packet(&conn, &packet(2.0, 11.0), &raw, 2_000, 0.0, 10.0)
+            .note_packet(&conn, &packet(2.0, 11.0), &raw, 2_000, false, 10.0)
             .unwrap();
         assert_eq!(done.state, "completed");
         // One idle packet between the runs, then re-enter through the far gate.
-        mgr.note_packet(&conn, &packet(2.0, 10.5), &between, 2_100, 0.0, 10.0);
+        mgr.note_packet(&conn, &packet(2.0, 10.5), &between, 2_100, false, 10.0);
         let second = mgr
-            .note_packet(&conn, &packet(2.0, 9.0), &raw, 2_200, 0.0, 10.0)
+            .note_packet(&conn, &packet(2.0, 9.0), &raw, 2_200, false, 10.0)
             .unwrap();
         assert_eq!(second.state, "running");
         let trail = db::get_drift_run_preroll(&conn, second.run_id.unwrap()).unwrap();
@@ -1892,9 +2472,9 @@ mod tests {
         save_square_zone(&conn, 0.0);
         let mut mgr = DriftRunManager::new();
         let raw = vec![1u8; 324];
-        mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 1_000, 0.0, 0.0);
+        mgr.note_packet(&conn, &packet(2.0, -1.0), &raw, 1_000, false, 0.0);
         let started = mgr
-            .note_packet(&conn, &packet(2.0, 1.0), &raw, 1_100, 0.0, 0.0)
+            .note_packet(&conn, &packet(2.0, 1.0), &raw, 1_100, false, 0.0)
             .unwrap();
         assert_eq!(started.state, "running");
         assert!(db::get_drift_run_preroll(&conn, started.run_id.unwrap())

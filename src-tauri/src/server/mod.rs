@@ -32,6 +32,7 @@ pub fn router(state: ServerState) -> axum::Router {
         .route("/drift-runs/:id/packets", get(routes::drift_run_packets))
         .route("/drift-runs/status", get(routes::drift_run_status))
         .route("/drift-runs/recompute", post(routes::recompute_drift_scores))
+        .route("/drift-runs/abort", post(routes::abort_drift_run))
         .route(
             "/drift-runs/purge-invalid",
             post(routes::delete_invalid_drift_runs),

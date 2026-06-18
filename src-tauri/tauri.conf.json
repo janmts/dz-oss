@@ -1,6 +1,6 @@
 {
   "productName": "DZ-OSS",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "identifier": "com.github.janmts.dz-oss",
   "build": {
     "beforeDevCommand": "npm run dev",

@@ -94,14 +94,17 @@ fn handle_drift_run(
         .as_millis() as i64;
     // Read the live (settings-tab adjustable) knobs before taking the other
     // locks; save_settings updates these in place so they take effect without
-    // a restart.
-    let (starve_timeout_s, preroll_s) = {
+    // a restart. The starve setting is now an on/off for the measured
+    // progress-stall / out-of-bounds kill (>0 enables; 0 = measurement mode, the
+    // run then ends only at the finish gate or a manual abort); the kill timing
+    // itself is the measured per-zone progressStallS / oobSlackM.
+    let (kill_enabled, preroll_s) = {
         let s = state.settings.lock().unwrap();
-        (s.drift_starve_timeout_s as f64, s.drift_preroll_s as f64)
+        (s.drift_starve_timeout_s > 0.0, s.drift_preroll_s as f64)
     };
     let mut drift = state.drift_manager.lock().unwrap();
     let db = state.db.lock().unwrap();
-    if let Some(status) = drift.note_packet(&db, pkt, raw, now_ms, starve_timeout_s, preroll_s) {
+    if let Some(status) = drift.note_packet(&db, pkt, raw, now_ms, kill_enabled, preroll_s) {
         let _ = tx.send(ServerEvent::DriftRunStatus(status));
     }
 }

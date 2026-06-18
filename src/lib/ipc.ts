@@ -116,6 +116,10 @@ export const ipc = {
   getDriftRunStatus: (): Promise<DriftRunStatus> =>
     isTauri ? tauriInvoke('get_drift_run_status') : http('/api/drift-runs/status'),
 
+  abortDriftRun: (): Promise<DriftRunStatus> =>
+    isTauri ? tauriInvoke('abort_drift_run')
+            : http('/api/drift-runs/abort', { method: 'POST' }),
+
   setDriftRunManualScore: (
     runId: number,
     manualScore: number,
