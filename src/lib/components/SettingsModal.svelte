@@ -83,19 +83,21 @@
       <fieldset>
         <legend>Drift Runs</legend>
         <label>
-          Score-starvation timeout (s)
+          Run auto-fail
           <input
             type="number"
             min="0"
-            step="0.5"
+            step="1"
             bind:value={draft.driftStarveTimeoutS}
           />
           <span class="hint">
-            A run aborts after this many seconds without earning drift points
-            (the in-game fail condition). <strong>0 disables</strong> — a run then
-            ends only at the finish gate. The default <strong>5 s matches FH6</strong>;
-            the live run box turns yellow while the timer counts if you want to
-            see it in action.
+            On/off for the measured fail condition: a run ends when it
+            <strong>stops advancing</strong> (~3 s not making forward progress) or
+            goes <strong>out of bounds</strong> (~45 m past the flags). Any value
+            above <strong>0 enables</strong> it; <strong>0 disables</strong> — a run
+            then ends only at the finish gate or the Abort button (for full
+            continuous recordings). The fail timing is measured per-zone, not set
+            here; the live run box turns yellow while the stall timer counts.
           </span>
         </label>
         <label>

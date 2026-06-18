@@ -51,12 +51,14 @@ pub struct Settings {
     pub tires_visible: bool,
 
     // ── Drift runs ──────────────────────────────────────────────────────────
-    /// Seconds a drift run may go without earning points before it aborts
-    /// (score-starvation). 0 disables the timer (a run then ends only on the
-    /// finish gate). FH6's true fail condition. Default 5 s — play-test
-    /// confirmed to match the in-game abort (~5 s with no scoring), so this is
-    /// the right value, not a placeholder; the live "not scoring" indicator is
-    /// there to verify, not to hunt a number.
+    /// On/off for the run auto-fail (the measured forward-progress / out-of-bounds
+    /// kill). Any value > 0 enables it; 0 disables it — a run then ends only at the
+    /// finish gate or a manual abort (measurement mode, for full continuous
+    /// recordings). The kill *timing* is the measured per-zone `progressStallS`
+    /// (~3 s not advancing) and `oobSlackM` (~45 m past the flags), NOT this number;
+    /// the value's magnitude is ignored beyond the on/off. (Kept as a float — and
+    /// named for the old score-starvation timer it replaced — so existing settings
+    /// files still load; default 5 ⇒ on.)
     #[serde(default = "Settings::default_drift_starve_timeout_s")]
     pub drift_starve_timeout_s: f32,
     /// Seconds of telemetry kept as a PRE-ROLL trail before each drift run.

@@ -45,6 +45,10 @@ export async function recomputeDriftScores(): Promise<number> {
   return n;
 }
 export async function loadDriftRunStatus() { driftRunStatus.set(await ipc.getDriftRunStatus()); }
+export async function abortDriftRun() {
+  driftRunStatus.set(await ipc.abortDriftRun());
+  await loadDriftRuns();
+}
 export async function startDriftRunStatusListener(): Promise<() => void> {
   await loadDriftRunStatus();
   return ipc.subscribeDriftRunStatus((status) => {

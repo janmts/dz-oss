@@ -244,6 +244,21 @@ pub fn drift_run_status(state: &AppState) -> crate::drift::DriftRunStatus {
     state.drift_manager.lock().unwrap().status()
 }
 
+/// Abort the active drift run (if any) immediately, marking it invalid. Returns
+/// the resulting status (the closed run, or the current status when idle).
+pub fn abort_drift_run(state: &AppState) -> crate::drift::DriftRunStatus {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    // Lock order matches the UDP ingest path (drift manager first, then db) so
+    // the manual abort and live ingest can't deadlock against each other.
+    let mut drift = state.drift_manager.lock().unwrap();
+    let conn = state.db.lock().unwrap();
+    drift.abort_active(&conn, now_ms);
+    drift.status()
+}
+
 pub fn list_drift_zones(state: &AppState) -> Result<Vec<db::DriftZoneRow>, String> {
     let conn = state.db.lock().unwrap();
     db::list_drift_zones(&conn).map_err(|e| e.to_string())

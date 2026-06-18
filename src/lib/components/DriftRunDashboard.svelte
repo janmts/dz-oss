@@ -5,6 +5,7 @@
     driftRuns,
     driftRunStatus,
     driftZones,
+    abortDriftRun,
     deleteDriftRun,
     deleteInvalidDriftRuns,
     loadDriftRuns,
@@ -29,6 +30,7 @@
   let recomputing = $state(false);
   let recomputeStatus = $state('');
   let purging = $state(false);
+  let aborting = $state(false);
   let zoneQuery = $state('');
 
   // Invalid runs across every zone (the purge command is global, matching this).
@@ -69,8 +71,11 @@
   let activeForSelected = $derived(
     $driftRunStatus.state === 'running' && selectedZone?.id === $driftRunStatus.zoneId
   );
-  // Death-timer counting: live run that isn't currently earning points.
-  let liveStarving = $derived(activeForSelected && !$driftRunStatus.scoring);
+  // Death-timer counting: a live run that isn't advancing along the route — the
+  // forward-progress stall is ticking toward a kill. Driven by the backend's
+  // countdown, which is present only while progress is below the floor, so a run
+  // that's moving but not currently scoring no longer trips the warning.
+  let liveStarving = $derived(activeForSelected && $driftRunStatus.starveRemainingS != null);
   let scoringRun = $derived.by(() => {
     if (selectedRunId !== null) {
       const explicit = selectedRuns.find((run) => run.id === selectedRunId);
@@ -226,6 +231,15 @@
     }
   }
 
+  async function abortRun() {
+    aborting = true;
+    try {
+      await abortDriftRun();
+    } finally {
+      aborting = false;
+    }
+  }
+
   async function recompute() {
     recomputing = true;
     recomputeStatus = '';
@@ -335,15 +349,25 @@
     >
       <div class="card-title">
         <span class="cap">Current Run</span>
-        <strong class="mono" class:warn={liveStarving}>
-          {#if liveStarving}
-            NO SCORE{#if $driftRunStatus.starveRemainingS != null} · {$driftRunStatus.starveRemainingS.toFixed(1)}s{/if}
-          {:else if activeForSelected}
-            LIVE
-          {:else}
-            {statusLabel()}
+        <div class="title-actions">
+          <strong class="mono" class:warn={liveStarving}>
+            {#if liveStarving}
+              STALLED{#if $driftRunStatus.starveRemainingS != null} · {$driftRunStatus.starveRemainingS.toFixed(1)}s{/if}
+            {:else if activeForSelected}
+              LIVE
+            {:else}
+              {statusLabel()}
+            {/if}
+          </strong>
+          {#if $driftRunStatus.state === 'running'}
+            <button
+              class="ghost danger"
+              disabled={aborting}
+              onclick={abortRun}
+              title="End this run now and mark it invalid — skip the starvation wait when the game has already failed the zone"
+            >{aborting ? 'Aborting…' : 'Abort'}</button>
           {/if}
-        </strong>
+        </div>
       </div>
 
       <!-- Live play-test instruments: signed drift-angle needle, speed in the
@@ -426,7 +450,7 @@
         <div class="run-foot">
           {#if liveStarving}
             <p class="starving-msg">
-              ⚠ Not scoring — no tyre on tarmac / not drifting{#if $driftRunStatus.starveRemainingS != null} · run ends in {$driftRunStatus.starveRemainingS.toFixed(1)}s{/if}
+              ⚠ Not advancing — stopped, crawling, or going the wrong way{#if $driftRunStatus.starveRemainingS != null} · run ends in {$driftRunStatus.starveRemainingS.toFixed(1)}s{/if}
             </p>
           {/if}
           {#if $driftRunStatus.invalidReason}
